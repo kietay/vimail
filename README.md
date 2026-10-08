@@ -100,7 +100,9 @@ Vim-first. `?` shows everything in the app. The essentials:
 | `/` · `:`/`⌘K` · `^l` | Search (Gmail syntax) · omnibox · refresh + sync |
 
 **Compose:** you write Markdown. The pane on the right shows the exact HTML recipients get.
-`⌘↵` sends (with a 5s undo window, `u`).
+`⌘↵` sends (with a 5s undo window, `u`). In To, Cc and Bcc, an address becomes a pill when you type `,` `;` or
+the closing `>`, press `↵` or `tab`, or pick a suggestion. Click a pill to remove it; `⌫` in an empty field
+removes the last one.
 
 **Vim keys in the body.** `esc` goes to normal mode (block cursor, `NORMAL` in the status bar); `i a I A o O`
 go back to insert mode. `esc` again leaves the body for the compose keys (`t` To, `s` Subject, `p` preview,

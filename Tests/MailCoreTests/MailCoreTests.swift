@@ -12,6 +12,20 @@ struct AddressTests {
         #expect(list[2].formatted == "Ben Ortiz <ben@icloud.com>")
     }
 
+    @Test func typedRecipientsFinishOnSeparatorsAndClosingBracket() {
+        func split(_ text: String) -> ([String], String) {
+            let result = EmailAddress.splitTyped(text)
+            return (result.finished.map(\.formatted), result.typing)
+        }
+        #expect(split("a@b.co, ") == (["a@b.co"], ""))
+        #expect(split("a@b.co, ben@") == (["a@b.co"], "ben@"))
+        #expect(split("a@b.co; Ben Ortiz <ben@x.io>, c") == (["a@b.co", "Ben Ortiz <ben@x.io>"], "c"))
+        #expect(split("Aahel Iyer <aahel@x.com>") == (["Aahel Iyer <aahel@x.com>"], ""))
+        #expect(split("Aahel Iyer <aahel.iye") == ([], "Aahel Iyer <aahel.iye"))
+        #expect(split("\"Morgan, Alex\" <al") == ([], "\"Morgan, Alex\" <al"))
+        #expect(split("nina") == ([], "nina"))
+    }
+
     @Test func initials() {
         #expect(EmailAddress(name: "Alex Morgan", email: "a@b.c").initials == "AM")
         #expect(EmailAddress(name: "Linear", email: "n@linear.app").initials == "L")

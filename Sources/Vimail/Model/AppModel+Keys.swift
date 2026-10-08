@@ -157,16 +157,8 @@ extension AppModel {
             if focusTarget == .composeBody, let textView = context.textView {
                 return handleBodyKey(stroke, compose: compose, textView: textView)
             }
-            if let field = focusTarget, [.composeTo, .composeCc, .composeBcc].contains(field), !compose.suggestions.isEmpty {
-                switch stroke.key {
-                case .down: compose.moveSuggestion(1); return true
-                case .up: compose.moveSuggestion(-1); return true
-                case .enter, .tab: compose.acceptSuggestion(for: field); return true
-                case .escape: compose.suggestions = []; return true
-                default:
-                    if stroke.isControl("n") { compose.moveSuggestion(1); return true }
-                    if stroke.isControl("p") { compose.moveSuggestion(-1); return true }
-                }
+            if let field = focusTarget, ComposeModel.recipientFields.contains(field), handleRecipientKey(stroke, field: field, compose: compose) {
+                return true
             }
             if stroke.isEscape {
                 compose.lastFocus = focusTarget
@@ -192,6 +184,35 @@ extension AppModel {
         if stroke.isChar("t") { focusTarget = .composeTo; return true }
         if stroke.isChar("s") { focusTarget = .composeSubject; return true }
         return !stroke.command
+    }
+
+    /// To, Cc and Bcc: the suggestion list, Enter and Tab finish an address, Backspace in an
+    /// empty field removes the last one.
+    private func handleRecipientKey(_ stroke: KeyStroke, field: FocusTarget, compose: ComposeModel) -> Bool {
+        if !compose.suggestions.isEmpty {
+            switch stroke.key {
+            case .down: compose.moveSuggestion(1); return true
+            case .up: compose.moveSuggestion(-1); return true
+            case .enter, .tab: compose.acceptSuggestion(for: field); return true
+            case .escape: compose.suggestions = []; return true
+            default:
+                if stroke.isControl("n") { compose.moveSuggestion(1); return true }
+                if stroke.isControl("p") { compose.moveSuggestion(-1); return true }
+            }
+        }
+        switch stroke.key {
+        case .enter:
+            compose.commitInput(field)
+            return true
+        case .tab:
+            // Tab still moves to the next field.
+            compose.commitInput(field)
+            return false
+        case .backspace where !stroke.command && !stroke.option:
+            return compose.removeLastRecipient(field)
+        default:
+            return false
+        }
     }
 
     /// The compose body: vim keys in its text view. Esc in insert mode goes to normal mode;

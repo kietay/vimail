@@ -13,9 +13,10 @@ final class ComposeModel {
         didSet { if draft != oldValue { draftChanged(previous: oldValue) } }
     }
     let source: MailMessage?
-    var toText: String { didSet { if toText != oldValue { addressesChanged(.composeTo) } } }
-    var ccText: String { didSet { if ccText != oldValue { addressesChanged(.composeCc) } } }
-    var bccText: String { didSet { if bccText != oldValue { addressesChanged(.composeBcc) } } }
+    /// What is being typed in To, Cc and Bcc. Finished addresses move to the draft (pills).
+    var toInput = "" { didSet { if toInput != oldValue { inputChanged(.composeTo) } } }
+    var ccInput = "" { didSet { if ccInput != oldValue { inputChanged(.composeCc) } } }
+    var bccInput = "" { didSet { if bccInput != oldValue { inputChanged(.composeBcc) } } }
     var showCc: Bool
     var showBcc: Bool
     var suggestions: [EmailAddress] = []
@@ -48,9 +49,6 @@ final class ComposeModel {
         self.source = source
         self.store = store
         self.app = app
-        toText = draft.to.isEmpty ? "" : draft.to.formattedList + ", "
-        ccText = draft.cc.isEmpty ? "" : draft.cc.formattedList + ", "
-        bccText = draft.bcc.isEmpty ? "" : draft.bcc.formattedList + ", "
         showCc = !draft.cc.isEmpty
         showBcc = !draft.bcc.isEmpty
         everSaved = !draft.isBlank
@@ -107,6 +105,7 @@ final class ComposeModel {
     /// Called when compose closes. Keeps non-blank drafts; removes blank ones that were saved before.
     func finish() async {
         vim?.stop()
+        commitAllInputs()
         if draft.isBlank {
             if everSaved { try? await store.deleteDraft(id: draft.id) }
         } else {
@@ -116,17 +115,84 @@ final class ComposeModel {
 
     // MARK: - Addresses
 
-    private func addressesChanged(_ field: FocusTarget) {
+    static let recipientFields: [FocusTarget] = [.composeTo, .composeCc, .composeBcc]
+
+    func recipients(_ field: FocusTarget) -> [EmailAddress] {
+        Self.recipientPath(field).map { draft[keyPath: $0] } ?? []
+    }
+
+    func input(_ field: FocusTarget) -> String {
         switch field {
-        case .composeTo: draft.to = EmailAddress.parseList(toText)
-        case .composeCc: draft.cc = EmailAddress.parseList(ccText)
-        case .composeBcc: draft.bcc = EmailAddress.parseList(bccText)
+        case .composeTo: toInput
+        case .composeCc: ccInput
+        case .composeBcc: bccInput
+        default: ""
+        }
+    }
+
+    private func setInput(_ text: String, for field: FocusTarget) {
+        switch field {
+        case .composeTo: toInput = text
+        case .composeCc: ccInput = text
+        case .composeBcc: bccInput = text
         default: break
         }
-        let text = field == .composeTo ? toText : field == .composeCc ? ccText : bccText
-        let token = text.split(separator: ",", omittingEmptySubsequences: false).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+    }
+
+    private static func recipientPath(_ field: FocusTarget) -> WritableKeyPath<Draft, [EmailAddress]>? {
+        switch field {
+        case .composeTo: \.to
+        case .composeCc: \.cc
+        case .composeBcc: \.bcc
+        default: nil
+        }
+    }
+
+    /// Typing "," ";" or a closing ">" turns the addresses before it into pills.
+    private func inputChanged(_ field: FocusTarget) {
+        let (finished, typing) = EmailAddress.splitTyped(input(field))
+        if !finished.isEmpty {
+            add(finished, to: field)
+            // A text field ignores changes made while it reports its own edit, so this waits a turn.
+            DispatchQueue.main.async { [weak self] in self?.setInput(typing, for: field) }
+            return
+        }
+        updateSuggestions(for: typing.trimmingCharacters(in: .whitespaces))
+    }
+
+    private func add(_ addresses: [EmailAddress], to field: FocusTarget) {
+        guard let path = Self.recipientPath(field) else { return }
+        draft[keyPath: path] += addresses.deduplicated(excluding: Set(draft.recipients.map(\.normalized)))
+    }
+
+    /// Turns the typed text into pills. With `onlyValid`, half-typed text stays (focus moved away).
+    func commitInput(_ field: FocusTarget, onlyValid: Bool = false) {
+        let parsed = EmailAddress.parseList(input(field))
+        guard !parsed.isEmpty, !onlyValid || parsed.allSatisfy(\.isValid) else { return }
+        add(parsed, to: field)
+        setInput("", for: field)
+    }
+
+    /// Before sending or closing: everything typed counts, invalid addresses included (they show red).
+    func commitAllInputs() {
+        for field in Self.recipientFields { commitInput(field) }
+    }
+
+    func removeRecipient(_ address: EmailAddress, from field: FocusTarget) {
+        guard let path = Self.recipientPath(field) else { return }
+        draft[keyPath: path].removeAll { $0.normalized == address.normalized }
+    }
+
+    /// Backspace in an empty field removes the pill next to it.
+    func removeLastRecipient(_ field: FocusTarget) -> Bool {
+        guard let path = Self.recipientPath(field), input(field).isEmpty, !draft[keyPath: path].isEmpty else { return false }
+        draft[keyPath: path].removeLast()
+        return true
+    }
+
+    private func updateSuggestions(for token: String) {
         suggestionTask?.cancel()
-        guard token.count >= 1, !token.contains("<") else {
+        guard !token.isEmpty, !token.contains("<") else {
             suggestions = []
             return
         }
@@ -134,8 +200,8 @@ final class ComposeModel {
         suggestionTask = Task {
             try? await Task.sleep(for: .milliseconds(40))
             guard !Task.isCancelled, let found = try? await store.contacts(matching: token) else { return }
-            let existing = Set((draft.to + draft.cc + draft.bcc).map(\.normalized))
-            suggestions = found.filter { !existing.contains($0.normalized) || $0.email.lowercased().hasPrefix(token.lowercased()) && token.count < $0.email.count }
+            let existing = Set(draft.recipients.map(\.normalized))
+            suggestions = found.filter { !existing.contains($0.normalized) }
             suggestionIndex = 0
         }
     }
@@ -148,18 +214,8 @@ final class ComposeModel {
     func acceptSuggestion(for field: FocusTarget, index: Int? = nil) {
         guard !suggestions.isEmpty else { return }
         let chosen = suggestions[min(index ?? suggestionIndex, suggestions.count - 1)]
-        func replaced(_ text: String) -> String {
-            var parts = text.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
-            if !parts.isEmpty { parts.removeLast() }
-            let kept = parts.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            return (kept + [chosen.formatted]).joined(separator: ", ") + ", "
-        }
-        switch field {
-        case .composeTo: toText = replaced(toText)
-        case .composeCc: ccText = replaced(ccText)
-        case .composeBcc: bccText = replaced(bccText)
-        default: break
-        }
+        add([chosen], to: field)
+        setInput("", for: field)
         suggestions = []
     }
 
@@ -234,6 +290,7 @@ final class ComposeModel {
 
     /// The body starts in insert mode each time it gets focus again.
     func focusChanged(to target: FocusTarget?) {
+        for field in Self.recipientFields where field != target { commitInput(field, onlyValid: true) }
         guard target != .composeBody else { return }
         bodyVim.reset()
         syncBodyVim()

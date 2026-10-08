@@ -137,6 +137,7 @@ extension AppModel {
             showToast("Save and quit vim (:wq) before sending.")
             return
         }
+        compose.commitAllInputs()
         var draft = compose.draft
         if draft.recipients.isEmpty {
             showToast("Add at least one recipient.", isError: true)

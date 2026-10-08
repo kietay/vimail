@@ -149,6 +149,7 @@ struct Theme: Equatable {
     var yellow: Color { Color(hex: palette.yellow) }
     var yellowSoft: Color { Color(hex: palette.yellowSoft) }
     var red: Color { Color(hex: palette.red) }
+    var redSoft: Color { Color(hex: palette.redSoft) }
     var body: Color { Color(hex: palette.body) }
     var button: Color { Color(hex: palette.button) }
     var buttonText: Color { Color(hex: palette.buttonText) }

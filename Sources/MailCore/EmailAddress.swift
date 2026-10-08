@@ -96,6 +96,39 @@ public struct EmailAddress: Hashable, Codable, Sendable {
         if let address = parse(current) { results.append(address) }
         return results
     }
+
+    /// Splits text typed into a recipient field into finished addresses and the part still being
+    /// typed. A comma or semicolon outside quotes and angle brackets finishes the addresses before
+    /// it; a closing `>` finishes `Name <a@b.c>`.
+    public static func splitTyped(_ raw: String) -> (finished: [EmailAddress], typing: String) {
+        var lastSeparator: String.Index?
+        var inQuotes = false
+        var inAngle = false
+        var previous: Character = " "
+        for index in raw.indices {
+            let char = raw[index]
+            switch char {
+            case "\"" where previous != "\\": inQuotes.toggle()
+            case "<" where !inQuotes: inAngle = true
+            case ">" where !inQuotes: inAngle = false
+            default: break
+            }
+            if (char == "," || char == ";") && !inQuotes && !inAngle { lastSeparator = index }
+            previous = char
+        }
+        var finished: [EmailAddress] = []
+        var typing = raw
+        if let lastSeparator {
+            finished = parseList(String(raw[..<lastSeparator]))
+            typing = String(raw[raw.index(after: lastSeparator)...])
+        }
+        typing = String(typing.drop(while: \.isWhitespace))
+        if typing.hasSuffix(">"), let address = parse(typing), address.isValid {
+            finished.append(address)
+            typing = ""
+        }
+        return (finished, typing)
+    }
 }
 
 extension Array where Element == EmailAddress {

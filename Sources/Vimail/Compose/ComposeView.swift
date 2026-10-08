@@ -100,14 +100,14 @@ struct ComposeView: View {
 
     private var fields: some View {
         VStack(spacing: 0) {
-            addressRow("To", text: $compose.toText, target: .composeTo) {
+            addressRow("To", input: $compose.toInput, field: .composeTo) {
                 HStack(spacing: 12) {
                     if !compose.showCc { smallToggle("Cc") { compose.showCc = true; focus = .composeCc } }
                     if !compose.showBcc { smallToggle("Bcc") { compose.showBcc = true; focus = .composeBcc } }
                 }
             }
-            if compose.showCc { addressRow("Cc", text: $compose.ccText, target: .composeCc) { EmptyView() } }
-            if compose.showBcc { addressRow("Bcc", text: $compose.bccText, target: .composeBcc) { EmptyView() } }
+            if compose.showCc { addressRow("Cc", input: $compose.ccInput, field: .composeCc) { EmptyView() } }
+            if compose.showBcc { addressRow("Bcc", input: $compose.bccInput, field: .composeBcc) { EmptyView() } }
             HStack(spacing: 16) {
                 Text("Subject").font(AppFonts.sans(12)).foregroundStyle(theme.mutedForeground).frame(width: 52, alignment: .leading)
                 TextField("", text: $compose.draft.subject, prompt: Text("Subject").foregroundColor(theme.mutedForeground.opacity(0.6)))
@@ -122,26 +122,38 @@ struct ComposeView: View {
         .zIndex(2)
     }
 
-    private func addressRow<Trailing: View>(_ title: String, text: Binding<String>, target: FocusTarget, @ViewBuilder trailing: () -> Trailing) -> some View {
-        HStack(spacing: 16) {
-            Text(title).font(AppFonts.sans(12)).foregroundStyle(theme.mutedForeground).frame(width: 52, alignment: .leading)
-            TextField("", text: text, prompt: Text("name@example.com").foregroundColor(theme.mutedForeground.opacity(0.6)))
-                .textFieldStyle(.plain)
-                .font(AppFonts.sans(13))
-                .foregroundStyle(theme.foreground)
-                .focused($focus, equals: target)
-            trailing()
+    /// Finished recipients as pills, then the text field for the one being typed.
+    private func addressRow<Trailing: View>(_ title: String, input: Binding<String>, field: FocusTarget, @ViewBuilder trailing: () -> Trailing) -> some View {
+        let recipients = compose.recipients(field)
+        return HStack(alignment: .top, spacing: 16) {
+            Text(title).font(AppFonts.sans(12)).foregroundStyle(theme.mutedForeground)
+                .frame(width: 52, height: RecipientFlow.lineHeight, alignment: .leading)
+            RecipientFlow {
+                ForEach(recipients, id: \.normalized) { address in
+                    RecipientPill(address: address) { compose.removeRecipient(address, from: field) }
+                }
+                TextField("", text: input, prompt: recipients.isEmpty ? Text("name@example.com").foregroundColor(theme.mutedForeground.opacity(0.6)) : nil)
+                    .textFieldStyle(.plain)
+                    .font(AppFonts.sans(13))
+                    .foregroundStyle(theme.foreground)
+                    .focused($focus, equals: field)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { focus = field }
+            trailing().frame(height: RecipientFlow.lineHeight)
         }
         .padding(.horizontal, 24)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
         .overlay(alignment: .bottom) { Rectangle().fill(theme.border.opacity(0.6)).frame(height: 1).padding(.horizontal, 24) }
-        .overlay(alignment: .topLeading) {
-            if focus == target, !compose.suggestions.isEmpty {
-                suggestionList(for: target)
-                    .offset(x: 92, y: 40)
+        .overlay(alignment: .bottomLeading) {
+            if focus == field, !compose.suggestions.isEmpty {
+                // Just below the row, however many lines of pills it has.
+                suggestionList(for: field)
+                    .alignmentGuide(.bottom) { $0[.top] - 2 }
+                    .offset(x: 92)
             }
         }
-        .zIndex(focus == target ? 3 : 1)
+        .zIndex(focus == field ? 3 : 1)
     }
 
     private func suggestionList(for target: FocusTarget) -> some View {
