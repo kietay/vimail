@@ -147,9 +147,12 @@ struct ComposeView: View {
         .overlay(alignment: .bottom) { Rectangle().fill(theme.border.opacity(0.6)).frame(height: 1).padding(.horizontal, 24) }
         .overlay(alignment: .bottomLeading) {
             if focus == field, !compose.suggestions.isEmpty {
-                // Just below the row, however many lines of pills it has.
+                // Just below the row, however many lines of pills it has. The zero-height frame
+                // hangs the list from the row's bottom edge. An alignment guide does not work here:
+                // SwiftUI ignores it inside this `if`, and the list covers the header.
                 suggestionList(for: field)
-                    .alignmentGuide(.bottom) { $0[.top] - 2 }
+                    .padding(.top, 2)
+                    .frame(height: 0, alignment: .top)
                     .offset(x: 92)
             }
         }
