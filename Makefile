@@ -10,7 +10,7 @@ TEST_FLAGS := -Xswiftc -plugin-path -Xswiftc $(CLT)/usr/lib/swift/host/plugins/t
 
 APP := build/app.noindex/vimail.app
 
-.PHONY: build release test app run dev install uninstall icon clean reset-data
+.PHONY: build release test eval-rules app run dev install uninstall icon clean reset-data
 
 build:
 	swift build
@@ -20,6 +20,12 @@ release:
 
 test:
 	swift test $(TEST_FLAGS)
+
+# Judges dummy mail and injection fixtures with the real Claude API and prints precision, recall and
+# cost. Spends real money (cents on Haiku 5.5). The key is read from VIMAIL_ANTHROPIC_KEY_FILE
+# (default ~/.config/vimail/anthropic-key); VIMAIL_EVAL_MODEL picks another model.
+eval-rules:
+	VIMAIL_LIVE_LLM=1 swift test $(TEST_FLAGS) --filter MailAITests.LiveRuleEvalTests
 
 # Release build packaged as a signed (ad-hoc) .app bundle.
 app: release

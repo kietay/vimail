@@ -48,6 +48,6 @@ let package = Package(
         .testTarget(name: "GmailProviderTests", dependencies: ["GmailProvider", "HTTPKit", "MailCore"]),
         .testTarget(name: "HTTPKitTests", dependencies: ["HTTPKit"]),
         .testTarget(name: "MailRulesTests", dependencies: ["MailRules", "MailStore", "MailSync", "MailCore", "DummyProvider"]),
-        .testTarget(name: "MailAITests", dependencies: ["MailAI", "MailCore", "HTTPKit"], resources: [.copy("Fixtures")]),
+        .testTarget(name: "MailAITests", dependencies: ["MailAI", "MailCore", "HTTPKit", "DummyProvider"], resources: [.copy("Fixtures")]),
     ]
 )
