@@ -313,6 +313,41 @@ struct JudgeRequestTests {
     }
 }
 
+@Suite("Judge hash")
+struct JudgeHashTests {
+    let receipts = LabelRef(id: "local-1", lastKnownName: "receipts")
+
+    @Test func keysOnPromptVersionModelEffortAndAsk() throws {
+        let rule = Rule(key: "r1", name: "Receipts", ask: "Receipts for things I bought", then: [.addLabel(receipts)])
+        let hash = try #require(rule.judgeHash(model: "claude-haiku-5-5", effort: "low", promptVersion: 1))
+        // Pinned: a change here re-bills every cached verdict.
+        #expect(hash == "49ad2e35e2e385e539691122f2e51e078fbd94ce883ae73b5ab65b53ea56dcde")
+        #expect(hash == Rule.judgeHash(ask: "Receipts for things I bought", model: "claude-haiku-5-5", effort: "low", promptVersion: 1))
+
+        // Each input re-keys; whitespace around the ASK does not.
+        #expect(rule.judgeHash(model: "claude-opus-5-5", effort: "low", promptVersion: 1) != hash)
+        #expect(rule.judgeHash(model: "claude-haiku-5-5", effort: "medium", promptVersion: 1) != hash)
+        #expect(rule.judgeHash(model: "claude-haiku-5-5", effort: "low", promptVersion: 2) != hash)
+        var edited = rule
+        edited.ask = "Receipts for things I bought or subscribe to"
+        #expect(edited.judgeHash(model: "claude-haiku-5-5", effort: "low", promptVersion: 1) != hash)
+        edited.ask = "  Receipts for things I bought\n"
+        #expect(edited.judgeHash(model: "claude-haiku-5-5", effort: "low", promptVersion: 1) == hash)
+
+        // Examples, the label and everything else about the rule are not part of it.
+        var other = rule
+        other.name = "Bills"
+        other.when = "from:stripe"
+        other.then = [.addLabel(LabelRef(id: "Label_9", lastKnownName: "bills"))]
+        other.promptExampleIDs = ["m1", "m2"]
+        #expect(other.judgeHash(model: "claude-haiku-5-5", effort: "low", promptVersion: 1) == hash)
+
+        // A rule without an ASK has none.
+        #expect(Rule(key: "r2", name: "Deploys", when: "from:vercel", then: [.addLabel(receipts)]).judgeHash(model: "m", effort: "low", promptVersion: 1) == nil)
+        #expect(Rule(key: "r2", name: "Blank", ask: "  ", then: [.addLabel(receipts)]).judgeHash(model: "m", effort: "low", promptVersion: 1) == nil)
+    }
+}
+
 @Suite("Email digest")
 struct EmailDigestTests {
     let me: Set<String> = ["sam@studio.co", "sam@hey.com"]

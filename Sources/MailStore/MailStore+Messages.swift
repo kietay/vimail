@@ -296,7 +296,8 @@ extension MailStore {
 
     // MARK: - Deletion and local messages
 
-    /// Deletes a message, its index entries and what rules did or learned with it. Returns its thread ID.
+    /// Deletes a message, its index entries and what rules did or learned with it. Runs that were
+    /// still to process it count it no more, and finish when it was their last. Returns its thread ID.
     @discardableResult
     static func deleteMessage(_ id: String, _ db: SQLiteDatabase) throws -> String? {
         guard let threadID = try threadID(ofMessage: id, db) else { return nil }
@@ -304,10 +305,15 @@ extension MailStore {
         try db.run("DELETE FROM message_labels WHERE message_id = ?", [id])
         try db.run("DELETE FROM annotations WHERE message_id = ?", [id])
         try db.run("DELETE FROM processing_log WHERE message_id = ?", [id])
+        let queued = try db.query("SELECT run_id, state = 'failed' FROM rule_queue WHERE message_id = ?", [id]) { ($0.int64(0), $0.bool(1)) }
         for table in ["rule_queue", "rule_decisions", "rule_ledger", "label_marks", "rule_examples", "verdicts"] {
             try db.run("DELETE FROM \(table) WHERE message_id = ?", [id])
         }
         try db.run("DELETE FROM messages WHERE id = ?", [id])
+        for (runID, failed) in queued {
+            try db.run("UPDATE rule_runs SET total = MAX(total - 1, 0), failed = MAX(failed - ?, 0) WHERE id = ?", [failed ? 1 : 0, runID])
+        }
+        if !queued.isEmpty { try finishRuns(Set(queued.map(\.0)), db) }
         return threadID
     }
 

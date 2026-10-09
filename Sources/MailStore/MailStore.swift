@@ -169,6 +169,37 @@ public final class MailStore: @unchecked Sendable {
         }
     }
 
+    /// Like `write`, for work too large for one transaction: `body` runs once per chunk of `elements`
+    /// (at most `size` each), each chunk in its own transaction. Observers hear once, at the end, about
+    /// every chunk that committed. A failing chunk rolls back alone and stops the rest.
+    func writeChunks<Element: Sendable, T: Sendable>(
+        _ elements: [Element], size: Int, _ body: @escaping @Sendable (ArraySlice<Element>, SQLiteDatabase, inout StoreChange) throws -> T
+    ) async throws -> [T] {
+        try await withCheckedThrowingContinuation { continuation in
+            writeQueue.async {
+                var committed = StoreChange()
+                var results: [T] = []
+                var failure: (any Error)?
+                for start in stride(from: 0, to: elements.count, by: size) {
+                    var change = StoreChange()
+                    do {
+                        results.append(try self.writer.transaction { try body(elements[start..<min(start + size, elements.count)], self.writer, &change) })
+                        committed.formUnion(change)
+                    } catch {
+                        failure = error
+                        break
+                    }
+                }
+                self.notify(committed)
+                if let failure {
+                    continuation.resume(throwing: failure)
+                } else {
+                    continuation.resume(returning: results)
+                }
+            }
+        }
+    }
+
     /// Synchronous read, for tests and app startup.
     public func readNow<T>(_ body: (SQLiteDatabase) throws -> T) throws -> T {
         try readQueue.sync { try body(reader) }
@@ -263,7 +294,7 @@ public final class MailStore: @unchecked Sendable {
                 try db.execute("""
                     DELETE FROM drafts; DELETE FROM saved_views; DELETE FROM meta;
                     DELETE FROM rules; DELETE FROM rule_revisions; DELETE FROM rule_examples;
-                    DELETE FROM rule_overrides; DELETE FROM verdicts;
+                    DELETE FROM rule_overrides; DELETE FROM verdicts; DELETE FROM rule_call_costs;
                     """)
             } else {
                 for label in targeted { try Self.upsertLabel(label, db) }

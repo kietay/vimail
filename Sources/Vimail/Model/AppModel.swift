@@ -287,6 +287,9 @@ final class AppModel {
             undoStack.removeAll { if case .send(_, let pending, _) = $0 { return pending.id == draft.id } else { return false } }
         case .operationFailed(let reason):
             showToast(reason, isError: true)
+        case .rulesGmailRejected:
+            // Not a toast: the rules status reports it.
+            break
         }
     }
 

@@ -58,7 +58,7 @@ struct RuleStoreTests {
         }
 
         let store = try MailStore(url: url)
-        #expect(try store.readNow { try $0.scalar("PRAGMA user_version") } == 2)
+        #expect(try store.readNow { try $0.scalar("PRAGMA user_version") } == 3)
         #expect(try await store.threads(.mailbox(.label("Label_1"))).map(\.id) == ["t1"])
         #expect(try await store.threads(ThreadQuery(scope: .anywhere).narrowed(by: .parse("budget"))).map(\.id) == ["t1"])
         #expect(Set(try await store.labels().map(\.id)) == ["Label_1", "local-1"])
@@ -70,8 +70,11 @@ struct RuleStoreTests {
             "messages_date", "rules", "rule_revisions", "rule_examples", "label_marks", "rule_overrides", "verdicts",
             "rule_decisions", "rule_decisions_rule", "rule_runs", "rule_runs_live_day", "rule_queue", "rule_queue_due",
             "rule_ledger", "rule_ledger_message", "rule_ledger_run", "rule_ledger_outbox", "rule_ledger_active",
+            "rule_call_costs", "rule_call_costs_model",
         ]
         #expect(expected.isSubset(of: names))
+        let runColumns = try store.readNow { db in try db.query("SELECT name FROM pragma_table_info('rule_runs')") { $0.string(0) } }
+        #expect(runColumns.contains("confirmed_at"))
         // Opening again does not migrate twice.
         _ = try MailStore(url: url)
     }

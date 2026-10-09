@@ -37,6 +37,8 @@ public actor SyncEngine {
         case sendFailed(draft: Draft, reason: String)
         /// The provider rejected another queued change. The affected mail was refetched.
         case operationFailed(String)
+        /// Gmail refused labels that rules added. They came off here; the rules status reports them, not a toast.
+        case rulesGmailRejected(count: Int)
     }
 
     public let provider: any MailProvider
@@ -467,7 +469,7 @@ public actor SyncEngine {
                 // The provider refused it. Drop the operation and restore the provider's truth.
                 Self.log.error("\(name): refused after \(clock.text): \((error as? LocalizedError)?.errorDescription ?? String(describing: error)). Undoing it locally")
                 try await store.completeOutboxItem(item.id)
-                try await handleRejected(item.operation, error: error)
+                try await handleRejected(item.operation, itemID: item.id, error: error)
             }
         }
     }
@@ -504,15 +506,22 @@ public actor SyncEngine {
         }
     }
 
-    private func handleRejected(_ operation: OutboxOperation, error: Error) async throws {
+    private func handleRejected(_ operation: OutboxOperation, itemID: Int64, error: Error) async throws {
         let reason = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
         switch operation {
         case .send(let draft, _, let localMessageID, _):
             try await store.restoreFailedSend(draft: draft, localMessageID: localMessageID)
             eventContinuation.yield(.sendFailed(draft: draft, reason: reason))
         case .modifyLabels(let delta):
+            // Labels rules added stop being theirs and come off; the refetch then restores Gmail's truth.
+            let ruleLabels = try await store.ruleOutboxRejected(itemID)
             try await refetch(messageIDs: delta.messageIDs)
-            eventContinuation.yield(.operationFailed("Could not update mail: \(reason)"))
+            if ruleLabels > 0 {
+                Self.log.notice("Outbox #\(itemID): Gmail refused \(ruleLabels) label(s) added by rules")
+                eventContinuation.yield(.rulesGmailRejected(count: ruleLabels))
+            } else {
+                eventContinuation.yield(.operationFailed("Could not update mail: \(reason)"))
+            }
         case .deleteMessages(let ids):
             try await refetch(messageIDs: ids)
             eventContinuation.yield(.operationFailed("Could not delete mail: \(reason)"))

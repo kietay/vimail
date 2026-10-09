@@ -200,6 +200,15 @@ enum Schema {
         CREATE INDEX rule_ledger_outbox ON rule_ledger(outbox_id) WHERE outbox_id IS NOT NULL;
         CREATE UNIQUE INDEX rule_ledger_active ON rule_ledger(message_id, rule_id, target) WHERE reverted_at IS NULL;
         """,
+        // 3: when a run was confirmed (a re-check applies only after it), recent Claude call costs for
+        // estimates, and a new live run for the day after you undo one.
+        """
+        ALTER TABLE rule_runs ADD COLUMN confirmed_at INTEGER;
+        CREATE TABLE rule_call_costs (model TEXT NOT NULL, cost_micros INTEGER NOT NULL, created_at INTEGER NOT NULL);
+        CREATE INDEX rule_call_costs_model ON rule_call_costs(model);
+        DROP INDEX rule_runs_live_day;
+        CREATE UNIQUE INDEX rule_runs_live_day ON rule_runs(day) WHERE kind = 'live' AND state != 'undone';
+        """,
     ]
 
     static func migrate(_ db: SQLiteDatabase) throws {

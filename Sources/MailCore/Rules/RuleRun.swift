@@ -43,6 +43,11 @@ public struct RunRule: Codable, Sendable, Hashable {
         self.revision = revision
     }
 
+    /// The rule at its current revision.
+    public init(_ rule: Rule) {
+        self.init(id: rule.id, revision: rule.revision)
+    }
+
     enum CodingKeys: String, CodingKey {
         case id
         case revision = "rev"
