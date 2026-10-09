@@ -63,7 +63,7 @@ public actor SyncEngine {
     /// Held while mail downloads or changes wait to be sent, so macOS does not throttle the app
     /// (App Nap) when its window is hidden or the screen is locked.
     private var activity: (any NSObjectProtocol)?
-    private var activityReason: String?
+    private(set) var activityReason: String?
 
     /// - Parameters:
     ///   - initialSyncLimit: how many of the newest conversations are cached (the inbox is always cached).
@@ -99,18 +99,22 @@ public actor SyncEngine {
         }
     }
 
-    /// Stops syncing for good (the account is closing). Ends the status and event streams.
-    public func stop() {
-        Self.log.info("Sync stopped")
-        keepAwake(nil)
-        loop?.cancel()
+    /// Stops syncing for good (the account is closing). Returns once the running cycle has finished,
+    /// so nothing writes to the store afterwards. Ends the status and event streams.
+    public func stop() async {
+        let running = loop
+        running?.cancel()
         signalTask?.cancel()
         loop = nil
         signalTask = nil
         waiter?.resume()
         waiter = nil
+        await running?.value
+        // Only now: the cycle it waited for may have kept the app awake again.
+        keepAwake(nil)
         statusContinuation.finish()
         eventContinuation.finish()
+        Self.log.info("Sync stopped")
     }
 
     /// Requests a cycle as soon as possible (after local actions, or "sync now").
@@ -154,6 +158,8 @@ public actor SyncEngine {
     }
 
     private func sleep(for delay: Duration) async {
+        // Stopped during the cycle: `stop()` is waiting for the loop to end.
+        guard !Task.isCancelled else { return }
         if wakeRequested {
             wakeRequested = false
             return
@@ -221,6 +227,9 @@ public actor SyncEngine {
         do {
             if try await store.meta("initial_sync_done") == nil {
                 try await initialSync()
+            } else if try await store.meta("account_aliases") == nil {
+                // Synced before send-as aliases were kept: fetch them once, so rules skip mail sent from them.
+                try await store.setAccount(try await provider.profile())
             }
             try await flushOutbox()
             try await pullChanges()
@@ -307,7 +316,7 @@ public actor SyncEngine {
             let page = try await provider.listThreadIDs(labelID: SystemLabel.inbox, pageToken: token, pageSize: pageSize)
             Self.log.info("Inbox page: \(page.ids.count) conversations listed in \(listed.text)\(page.nextPageToken == nil ? " (last page)" : "")")
             let base = fetched
-            try await download(page.ids, skipExisting: skipExisting) { done in
+            try await download(page.ids, skipExisting: skipExisting, intake: resync ? .resync : .none) { done in
                 self.publish { $0.initialSyncProgress = base + done }
             }
             fetched += page.ids.count
@@ -340,7 +349,7 @@ public actor SyncEngine {
             token = nil
             page = try await provider.listThreadIDs(labelID: nil, pageToken: nil, pageSize: 100)
         }
-        let inserted = try await download(page.ids, skipExisting: !resync)
+        let inserted = try await download(page.ids, skipExisting: !resync, intake: resync ? .resync : .none)
         count += page.ids.count
         Self.log.info("Background download: \(count) of \(initialSyncLimit) newest conversations checked, \(inserted.count) new messages stored, page took \(clock.text)")
 
@@ -354,7 +363,7 @@ public actor SyncEngine {
         try await store.setMeta("backfill_done", "1")
         try await store.setMeta("backfill_token", nil)
         try await store.setMeta("backfill_count", nil)
-        try await store.setMeta("resync", nil)
+        try await store.endResync()
         publish { $0.backfillProgress = nil }
         Self.log.info("Background download complete: the newest \(count) conversations are on this Mac")
         return false
@@ -362,8 +371,9 @@ public actor SyncEngine {
 
     /// Fetches and stores conversations, in small chunks: each chunk is saved as soon as it arrives,
     /// so a slow or dropped connection loses little. Local changes waiting in the outbox stay applied.
+    /// Old mail reaches rules only during a resync (`intake`), for what arrived while history expired.
     @discardableResult
-    private func download(_ ids: [String], skipExisting: Bool, progress: (Int) -> Void = { _ in }) async throws -> [String] {
+    private func download(_ ids: [String], skipExisting: Bool, intake: RuleIntake, progress: (Int) -> Void = { _ in }) async throws -> [String] {
         var wanted = ids
         if skipExisting {
             let existing = try await store.existingThreadIDs(ids)
@@ -379,7 +389,9 @@ public actor SyncEngine {
             let fetched = fetchClock.text
             let storeClock = Stopwatch()
             let messages = threads.flatMap { $0 }
-            inserted += try await store.applyRemoteChanges(ChangeSet(cursor: "", upserted: messages))
+            let stored = try await store.applyRemoteChanges(ChangeSet(cursor: "", upserted: messages), intake: intake)
+            if intake == .resync && !stored.isEmpty { rules?.wake() }
+            inserted += stored
             Self.log.debug("Stored \(threads.count) conversations (\(messages.count) messages): fetched in \(fetched), saved in \(storeClock.text)")
             progress(skipped + start + chunk.count)
         }
@@ -419,11 +431,11 @@ public actor SyncEngine {
                 changes.upserted = changes.upserted.filter { !completeIDs.contains($0.id) } + complete
             }
         }
-        let inserted = try await store.applyRemoteChanges(changes)
-        try await store.setMeta("cursor", changes.cursor)
+        // Messages, the new cursor and rules' queue rows are stored together. Conversations fetched
+        // only as context for a reply did not arrive now, so they are not queued and do not wake rules.
+        let inserted = try await store.applyRemoteChanges(changes, cursor: changes.cursor, intake: .live(arrived: arrived))
 
         guard !inserted.isEmpty else { return }
-        // Conversations fetched only as context for a reply did not arrive now, so they do not wake rules.
         if inserted.contains(where: arrived.contains) { rules?.wake() }
         let me = store.selfAddresses
         let insertedSet = Set(inserted)

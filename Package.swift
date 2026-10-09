@@ -16,7 +16,7 @@ let package = Package(
         .target(name: "MailCore"),
         // The log: unified log (Console.app) plus ~/Library/Logs/vimail/vimail.log. No mail content.
         .target(name: "VimailLog"),
-        // Local-first SQLite store: mail cache, outbox, drafts, snoozes, views, annotations.
+        // Local-first SQLite store: mail cache, outbox, drafts, snoozes, views, annotations, rules.
         .target(name: "MailStore", dependencies: ["MailCore"]),
         // Optimistic actions, the outbox, and the sync engine that talks to a MailProvider.
         .target(name: "MailSync", dependencies: ["MailCore", "MailStore", "VimailLog"]),

@@ -9,13 +9,14 @@ public struct StoreChange: Hashable, Sendable {
     public var outbox = false
     public var views = false
     public var snoozes = false
+    public var rules = false
     /// Large or unspecific change (initial sync, reset): reload everything.
     public var reset = false
 
     public init() {}
 
     public var isEmpty: Bool {
-        threadIDs.isEmpty && !labels && !drafts && !outbox && !views && !snoozes && !reset
+        threadIDs.isEmpty && !labels && !drafts && !outbox && !views && !snoozes && !rules && !reset
     }
 
     public mutating func formUnion(_ other: StoreChange) {
@@ -25,6 +26,7 @@ public struct StoreChange: Hashable, Sendable {
         outbox = outbox || other.outbox
         views = views || other.views
         snoozes = snoozes || other.snoozes
+        rules = rules || other.rules
         reset = reset || other.reset
     }
 }
@@ -32,14 +34,17 @@ public struct StoreChange: Hashable, Sendable {
 /// The local-first database. The UI reads only from here; the sync engine writes provider
 /// data here and pushes the outbox to the provider.
 ///
-/// Two SQLite connections in WAL mode: one writer and one reader, each on its own serial
-/// queue, so list queries never wait for a sync batch to commit.
+/// Three SQLite connections in WAL mode, each on its own serial queue: one writer, one reader for
+/// the UI, and one reader for long background work (rules), so list queries never wait for a sync
+/// batch to commit or for a rules pass to finish reading.
 public final class MailStore: @unchecked Sendable {
     public let url: URL
     private let writer: SQLiteDatabase
     private let reader: SQLiteDatabase
+    private let backgroundReader: SQLiteDatabase
     private let writeQueue = DispatchQueue(label: "vimail.store.write", qos: .userInitiated)
     private let readQueue = DispatchQueue(label: "vimail.store.read", qos: .userInitiated)
+    private let backgroundReadQueue = DispatchQueue(label: "vimail.store.read-background", qos: .utility)
     private let lock = NSLock()
     private var observers: [UUID: @Sendable (StoreChange) -> Void] = [:]
     private var cachedSelfAddresses: Set<String> = []
@@ -67,18 +72,33 @@ public final class MailStore: @unchecked Sendable {
             PRAGMA cache_size = -32000;
             """)
         try Schema.migrate(writer)
-        reader = try SQLiteDatabase(path: url.path)
+        reader = try Self.openReader(path: url.path)
+        backgroundReader = try Self.openReader(path: url.path)
+        cachedSelfAddresses = try Self.accountAddresses(writer)
+    }
+
+    private static func openReader(path: String) throws -> SQLiteDatabase {
+        let reader = try SQLiteDatabase(path: path)
         try reader.execute("""
             PRAGMA query_only = 1;
             PRAGMA temp_store = MEMORY;
             PRAGMA cache_size = -32000;
             PRAGMA mmap_size = 268435456;
             """)
-        let addresses = try writer.first("SELECT value FROM meta WHERE key = 'account_email'") { $0.string(0) }
-        cachedSelfAddresses = Set([addresses].compactMap { $0?.lowercased() })
+        return reader
     }
 
-    /// The account's own addresses (lowercased). Used for "me" in participant lines.
+    /// The account's address and its send-as aliases, lowercased.
+    static func accountAddresses(_ db: SQLiteDatabase) throws -> Set<String> {
+        let email = try db.first("SELECT value FROM meta WHERE key = 'account_email'") { $0.string(0) }
+        let aliases = try db.first("SELECT value FROM meta WHERE key = 'account_aliases'") { row in
+            (try? decoder.decode([String].self, from: Data(row.string(0).utf8))) ?? []
+        } ?? []
+        return Set(([email].compactMap { $0 } + aliases).map { $0.lowercased() })
+    }
+
+    /// The account's own addresses (lowercased): its address and send-as aliases. Used for "me" in
+    /// participant lines, and to keep your own mail away from rules.
     public var selfAddresses: Set<String> {
         lock.lock()
         defer { lock.unlock() }
@@ -123,6 +143,15 @@ public final class MailStore: @unchecked Sendable {
         try await withCheckedThrowingContinuation { continuation in
             readQueue.async {
                 continuation.resume(with: Result { try body(self.reader) })
+            }
+        }
+    }
+
+    /// Like `read`, on the background connection: for long reads (rules work) that must not hold up the UI.
+    public func readBackground<T: Sendable>(_ body: @escaping @Sendable (SQLiteDatabase) throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            backgroundReadQueue.async {
+                continuation.resume(with: Result { try body(self.backgroundReader) })
             }
         }
     }
@@ -177,8 +206,9 @@ public final class MailStore: @unchecked Sendable {
             try Self.setMeta("account_email", profile.email, db)
             try Self.setMeta("account_name", profile.displayName, db)
             try Self.setMeta("account_signature_html", profile.signatureHTML, db)
+            try Self.setMeta("account_aliases", try Self.json(profile.aliases), db)
         }
-        setSelfAddresses([profile.email])
+        setSelfAddresses(Set([profile.email] + profile.aliases))
     }
 
     /// The provider account's own signature (Gmail settings), as HTML.
@@ -209,19 +239,34 @@ public final class MailStore: @unchecked Sendable {
         }
     }
 
-    /// Deletes all mail data and sync state. Local-only state (drafts, views) is kept unless `everything`.
+    /// Deletes all mail data and sync state. Local-only state (drafts, views, rules) is kept unless `everything`.
+    ///
+    /// Rules keep what they learned (examples, sender overrides, Claude's verdicts) but lose their
+    /// work on the deleted mail: decisions, ledger, queue, runs and your label marks. Labels that
+    /// rules target come back with the same ID, name and colour; for Gmail labels, the next sync
+    /// then tells whether Gmail still has them.
     public func resetMailData(everything: Bool = false) async throws {
         try await write { db, change in
+            let targeted = try Self.labels(targetedByRules: db)
             try db.execute("""
                 DELETE FROM threads; DELETE FROM messages; DELETE FROM message_labels;
                 DELETE FROM thread_labels; DELETE FROM message_search; DELETE FROM outbox;
                 DELETE FROM labels; DELETE FROM annotations; DELETE FROM processing_log;
                 DELETE FROM contacts; DELETE FROM snoozes;
+                DELETE FROM rule_decisions; DELETE FROM rule_ledger; DELETE FROM rule_queue; DELETE FROM rule_runs;
+                DELETE FROM label_marks;
                 DELETE FROM meta WHERE key IN ('cursor', 'initial_sync_done', 'initial_cursor', 'resync', 'backfill_done',
-                    'backfill_token', 'backfill_count', 'account_email', 'account_name', 'account_signature_html');
+                    'backfill_token', 'backfill_count', 'account_email', 'account_name', 'account_signature_html',
+                    'account_aliases', 'rules_resync');
                 """)
             if everything {
-                try db.execute("DELETE FROM drafts; DELETE FROM saved_views; DELETE FROM meta;")
+                try db.execute("""
+                    DELETE FROM drafts; DELETE FROM saved_views; DELETE FROM meta;
+                    DELETE FROM rules; DELETE FROM rule_revisions; DELETE FROM rule_examples;
+                    DELETE FROM rule_overrides; DELETE FROM verdicts;
+                    """)
+            } else {
+                for label in targeted { try Self.upsertLabel(label, db) }
             }
             change.reset = true
         }

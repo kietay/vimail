@@ -93,6 +93,21 @@ public final class SQLiteDatabase: @unchecked Sendable {
         }
         handle = pointer
         sqlite3_busy_timeout(handle, 5_000)
+        try addFunctions()
+    }
+
+    /// `unicode_lower(text)` lowercases like Swift's `lowercased()`. SQLite's `lower()` and `LIKE`
+    /// fold ASCII letters only, so "Émile" would never match a search for "émile".
+    private func addFunctions() throws {
+        let result = sqlite3_create_function_v2(handle, "unicode_lower", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, nil, { context, _, values in
+            guard let value = values?[0], let text = sqlite3_value_text(value) else {
+                sqlite3_result_null(context)
+                return
+            }
+            let lowered = String(decoding: UnsafeBufferPointer(start: text, count: Int(sqlite3_value_bytes(value))), as: UTF8.self).lowercased()
+            sqlite3_result_text(context, lowered, -1, SQLITE_TRANSIENT)
+        }, nil, nil, nil)
+        if result != SQLITE_OK { throw error(result, nil) }
     }
 
     deinit {

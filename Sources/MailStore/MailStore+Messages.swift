@@ -5,7 +5,7 @@ extension MailStore {
     // MARK: - Labels
 
     /// Replaces provider labels (system and user). Local labels are kept.
-    /// Messages lose labels that no longer exist on the provider.
+    /// Messages lose labels that no longer exist on the provider, and rules that add them turn off.
     public func replaceProviderLabels(_ labels: [MailLabel]) async throws {
         try await write { db, change in
             let existing = try db.query("SELECT id, color_index FROM labels WHERE kind != 'local'") { ($0.string(0), $0.isNull(1) ? nil : $0.int(1)) }
@@ -14,6 +14,7 @@ extension MailStore {
             for (id, _) in existing where !incoming.contains(id) {
                 change.threadIDs.formUnion(try Self.removeLabelEverywhere(id, db))
                 try db.run("DELETE FROM labels WHERE id = ?", [id])
+                try Self.labelRemoved(id, db, &change)
             }
             for label in labels {
                 let color = label.colorIndex ?? (colors[label.id] ?? nil)
@@ -51,10 +52,12 @@ extension MailStore {
         return Set(threads)
     }
 
+    /// Deletes a label and removes it from every message. Rules that add it turn off.
     public func deleteLabel(id: String) async throws {
         try await write { db, change in
             change.threadIDs = try Self.removeLabelEverywhere(id, db)
             try db.run("DELETE FROM labels WHERE id = ?", [id])
+            try Self.labelRemoved(id, db, &change)
             try Self.refreshThreads(change.threadIDs, db, selfAddresses: self.selfAddresses)
             // Saved views that filter on the label now match nothing; clear the filter instead.
             try Self.rewriteViews(db) { view in
@@ -84,10 +87,25 @@ extension MailStore {
                 copy.labelID = label.id
                 return copy
             }
+            try Self.rewriteRules(db) { rule in
+                guard rule.labelTargets.contains(where: { $0.id == localID }) else { return nil }
+                var copy = rule
+                copy.then = rule.then.map { action in
+                    guard case .addLabel(var target) = action, target.id == localID else { return action }
+                    target.id = label.id
+                    target.lastKnownName = label.name
+                    return .addLabel(target)
+                }
+                return copy
+            }
+            try db.run("UPDATE OR IGNORE rule_ledger SET target = ? WHERE target = ?", [label.id, localID])
+            try db.run("UPDATE OR IGNORE label_marks SET label_id = ? WHERE label_id = ?", [label.id, localID])
+            try db.run("DELETE FROM label_marks WHERE label_id = ?", [localID])
             change.threadIDs = Set(threads)
             try Self.refreshThreads(change.threadIDs, db, selfAddresses: self.selfAddresses)
             change.labels = true
             change.views = true
+            change.rules = true
         }
     }
 
@@ -120,7 +138,10 @@ extension MailStore {
 
     /// Applies a provider change set, then re-applies queued local label changes on top so
     /// optimistic state is not reverted by older provider state. Returns new message IDs.
-    public func applyRemoteChanges(_ changes: ChangeSet) async throws -> [String] {
+    ///
+    /// The same transaction saves `cursor` (the history position the changes reach) and queues new
+    /// mail for rules as `intake` says, so a crash never loses arrived mail or queues it twice.
+    public func applyRemoteChanges(_ changes: ChangeSet, cursor: String? = nil, intake: RuleIntake = .none) async throws -> [String] {
         try await write { db, change in
             let localLabels = try Self.localLabelIDs(db)
             let me = self.selfAddresses
@@ -144,6 +165,8 @@ extension MailStore {
 
             change.threadIDs.formUnion(try Self.rebasePendingOperations(onto: touched, db))
             try Self.refreshThreads(change.threadIDs, db, selfAddresses: me)
+            try Self.queueForRules(inserted, intake: intake, me: me, db)
+            if let cursor { try Self.setMeta("cursor", cursor, db) }
             return inserted
         }
     }
@@ -273,7 +296,7 @@ extension MailStore {
 
     // MARK: - Deletion and local messages
 
-    /// Deletes a message and its index entries. Returns its thread ID.
+    /// Deletes a message, its index entries and what rules did or learned with it. Returns its thread ID.
     @discardableResult
     static func deleteMessage(_ id: String, _ db: SQLiteDatabase) throws -> String? {
         guard let threadID = try threadID(ofMessage: id, db) else { return nil }
@@ -281,6 +304,9 @@ extension MailStore {
         try db.run("DELETE FROM message_labels WHERE message_id = ?", [id])
         try db.run("DELETE FROM annotations WHERE message_id = ?", [id])
         try db.run("DELETE FROM processing_log WHERE message_id = ?", [id])
+        for table in ["rule_queue", "rule_decisions", "rule_ledger", "label_marks", "rule_examples", "verdicts"] {
+            try db.run("DELETE FROM \(table) WHERE message_id = ?", [id])
+        }
         try db.run("DELETE FROM messages WHERE id = ?", [id])
         return threadID
     }

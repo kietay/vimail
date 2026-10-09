@@ -20,7 +20,7 @@ extension MailStore {
             let rows = try db.query(
                 """
                 SELECT m.date, m.from_name, m.from_email, m.subject, m.snippet,
-                       instr(m.attachments_json, '"isInline":false') > 0, m.to_json,
+                       \(hasFileAttachment), m.to_json,
                        (SELECT group_concat(label_id, ' ') FROM message_labels WHERE message_id = m.id)
                 FROM messages m WHERE m.thread_id = ? ORDER BY m.date
                 """,
@@ -113,13 +113,24 @@ extension MailStore {
 
     /// Builds the FTS5 MATCH expression for the positive terms, or nil when there are none.
     static func ftsExpression(_ query: ThreadQuery) -> String? {
+        ftsExpression(words: query.terms + query.containsText.flatMap { $0.split(separator: " ").map(String.init) }, phrases: query.phrases)
+    }
+
+    /// Prefix-matched words and exact phrases, all required.
+    static func ftsExpression(words: [String], phrases: [String]) -> String? {
         var parts: [String] = []
-        let words = query.terms + query.containsText.flatMap { $0.split(separator: " ").map(String.init) }
         for word in words where !word.isEmpty { parts.append(ftsQuote(word) + "*") }
-        for phrase in query.phrases where !phrase.isEmpty { parts.append(ftsQuote(phrase)) }
+        for phrase in phrases where !phrase.isEmpty { parts.append(ftsQuote(phrase)) }
         return parts.isEmpty ? nil : parts.joined(separator: " AND ")
     }
 
+    /// Matches any of the excluded words (`-word`), or nil when there are none.
+    static func ftsExcludedExpression(_ words: [String]) -> String? {
+        let words = words.filter { !$0.isEmpty }
+        return words.isEmpty ? nil : words.map { ftsQuote($0) + "*" }.joined(separator: " OR ")
+    }
+
+    /// A `LIKE` pattern for `text` anywhere, lowercased: compare it with `unicode_lower(column)`.
     static func likePattern(_ text: String) -> String {
         let escaped = text.lowercased()
             .replacingOccurrences(of: "\\", with: "\\\\")
@@ -127,6 +138,17 @@ extension MailStore {
             .replacingOccurrences(of: "_", with: "\\_")
         return "%\(escaped)%"
     }
+
+    /// The message `m` is from `sender` (a substring of its address or name).
+    static func senderMatches(_ sender: String) -> (String, [SQLBindable]) {
+        ("(unicode_lower(m.from_email) LIKE ? ESCAPE '\\' OR ifnull(unicode_lower(m.from_name), '') LIKE ? ESCAPE '\\')", [likePattern(sender), likePattern(sender)])
+    }
+
+    /// The message `m` has an attachment listed as a file (not an inline image).
+    static let hasFileAttachment = "instr(m.attachments_json, '\"isInline\":false') > 0"
+
+    /// The message `m` came from a mailing list (it has a List-Unsubscribe header).
+    static let isListMessage = "(m.list_unsubscribe IS NOT NULL AND m.list_unsubscribe != '')"
 
     /// SQL for a thread query. `selecting` is either the summary column list or `COUNT(*)`.
     static func threadQuerySQL(_ query: ThreadQuery, selecting: String, paged: Bool) -> (String, [SQLBindable]) {
@@ -174,7 +196,7 @@ extension MailStore {
         if query.starredOnly { conditions.append("t.starred = 1") }
         if query.hasAttachment == true { conditions.append("t.has_attachments = 1") }
         if query.isList == true {
-            conditions.append("EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND m.list_unsubscribe IS NOT NULL AND m.list_unsubscribe != '')")
+            conditions.append("EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND \(isListMessage))")
         }
         if let before = query.before {
             conditions.append("t.last_date < ?")
@@ -189,31 +211,31 @@ extension MailStore {
             args.append(labelID)
         }
         for name in query.labelNames {
-            conditions.append("EXISTS (SELECT 1 FROM thread_labels x JOIN labels l ON l.id = x.label_id WHERE x.thread_id = t.id AND lower(l.name) = ?)")
+            conditions.append("EXISTS (SELECT 1 FROM thread_labels x JOIN labels l ON l.id = x.label_id WHERE x.thread_id = t.id AND unicode_lower(l.name) = ?)")
             args.append(name.lowercased())
         }
         for name in query.excludedLabelNames {
-            conditions.append("NOT EXISTS (SELECT 1 FROM thread_labels x JOIN labels l ON l.id = x.label_id WHERE x.thread_id = t.id AND lower(l.name) = ?)")
+            conditions.append("NOT EXISTS (SELECT 1 FROM thread_labels x JOIN labels l ON l.id = x.label_id WHERE x.thread_id = t.id AND unicode_lower(l.name) = ?)")
             args.append(name.lowercased())
         }
         for sender in query.senders {
-            conditions.append("EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND (lower(m.from_email) LIKE ? ESCAPE '\\' OR lower(m.from_name) LIKE ? ESCAPE '\\'))")
-            args.append(likePattern(sender))
-            args.append(likePattern(sender))
+            let (match, values) = senderMatches(sender)
+            conditions.append("EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND \(match))")
+            args += values
         }
         // Like `-word`: the conversation goes when any of its messages is from the sender.
         for sender in query.excludedSenders {
-            conditions.append("NOT EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND (lower(m.from_email) LIKE ? ESCAPE '\\' OR lower(m.from_name) LIKE ? ESCAPE '\\'))")
-            args.append(likePattern(sender))
-            args.append(likePattern(sender))
+            let (match, values) = senderMatches(sender)
+            conditions.append("NOT EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND \(match))")
+            args += values
         }
         for recipient in query.recipients {
-            conditions.append("EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND (lower(m.to_json) LIKE ? ESCAPE '\\' OR lower(m.cc_json) LIKE ? ESCAPE '\\'))")
+            conditions.append("EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND (unicode_lower(m.to_json) LIKE ? ESCAPE '\\' OR unicode_lower(m.cc_json) LIKE ? ESCAPE '\\'))")
             args.append(likePattern(recipient))
             args.append(likePattern(recipient))
         }
         for subject in query.subjects {
-            conditions.append("lower(t.subject) LIKE ? ESCAPE '\\'")
+            conditions.append("unicode_lower(t.subject) LIKE ? ESCAPE '\\'")
             args.append(likePattern(subject))
         }
         if let ids = query.ids {
@@ -228,10 +250,9 @@ extension MailStore {
             conditions.append("t.id IN (SELECT thread_id FROM message_search WHERE message_search MATCH ?)")
             args.append(match)
         }
-        let excluded = query.excludedTerms.filter { !$0.isEmpty }
-        if !excluded.isEmpty {
+        if let excluded = ftsExcludedExpression(query.excludedTerms) {
             conditions.append("t.id NOT IN (SELECT thread_id FROM message_search WHERE message_search MATCH ?)")
-            args.append(excluded.map { ftsQuote($0) + "*" }.joined(separator: " OR "))
+            args.append(excluded)
         }
 
         var sql = "SELECT \(selecting) FROM threads t \(joins.joined(separator: " ")) \(snoozeJoin)"
@@ -282,6 +303,128 @@ extension MailStore {
         try await read { db in
             try db.first("SELECT \(Self.summaryColumns) FROM threads t LEFT JOIN snoozes s ON s.thread_id = t.id WHERE t.id = ?", [id], Self.summary)
         }
+    }
+
+    // MARK: - Message queries (rules)
+
+    /// Which messages a rules query looks at.
+    struct MessageQuery {
+        var search: SearchQuery
+        /// A rule's scope, or nil for every stored message.
+        var mailboxes: RuleScope.Mailboxes?
+        /// Only these messages.
+        var ids: [String]?
+        /// Only messages dated inside it.
+        var window: ClosedRange<Date>?
+        /// The newest `limit` (ordered queries only).
+        var limit: Int?
+    }
+
+    /// SQL for messages that pass a search one message at a time, as a rule's WHEN does. `selecting`
+    /// is a column list or `COUNT(*)`; `ordered` lists the newest first.
+    ///
+    /// Unlike conversation search, each operator tests the message itself: `from:` its sender, `to:`
+    /// the addresses and names in its To and Cc, `subject:` its own subject, `label:` its own labels,
+    /// `before:`/`after:` its date. A negation drops only the matching message, not its conversation.
+    /// `in:` and `is:read|unread|starred` are ignored; `newer_than:`/`older_than:` arrive as `after`/
+    /// `before`, fixed when parsed. None of them are rule operators: `RuleFilter` rejects them.
+    /// - Parameter me: the account's addresses. Mail from them is outside every scope.
+    static func messageQuerySQL(_ query: MessageQuery, me: Set<String>, selecting: String, ordered: Bool) throws -> (String, [SQLBindable]) {
+        var conditions: [String] = []
+        var args: [SQLBindable] = []
+        let search = query.search
+
+        if let mailboxes = query.mailboxes {
+            let (scope, values) = scopeCondition(mailboxes, me: me)
+            conditions.append(scope)
+            args += values
+        }
+        if let ids = query.ids {
+            // One argument however many IDs, so long lists stay under SQLite's parameter limit.
+            conditions.append("m.id IN (SELECT value FROM json_each(?))")
+            args.append(try json(ids))
+        }
+        if let window = query.window {
+            conditions.append("m.date >= ? AND m.date <= ?")
+            args += [window.lowerBound, window.upperBound]
+        }
+        for sender in search.from {
+            let (match, values) = senderMatches(sender)
+            conditions.append(match)
+            args += values
+        }
+        for sender in search.excludedFrom {
+            let (match, values) = senderMatches(sender)
+            conditions.append("NOT \(match)")
+            args += values
+        }
+        for recipient in search.to {
+            let address = "unicode_lower(json_extract(a.value, '$.email')) LIKE ? ESCAPE '\\' OR ifnull(unicode_lower(json_extract(a.value, '$.name')), '') LIKE ? ESCAPE '\\'"
+            conditions.append("(EXISTS (SELECT 1 FROM json_each(m.to_json) a WHERE \(address)) OR EXISTS (SELECT 1 FROM json_each(m.cc_json) a WHERE \(address)))")
+            args += Array(repeating: likePattern(recipient), count: 4)
+        }
+        for subject in search.subject {
+            conditions.append("unicode_lower(m.subject) LIKE ? ESCAPE '\\'")
+            args.append(likePattern(subject))
+        }
+        for name in search.labelNames {
+            conditions.append("EXISTS (SELECT 1 FROM message_labels x JOIN labels l ON l.id = x.label_id WHERE x.message_id = m.id AND unicode_lower(l.name) = ?)")
+            args.append(name.lowercased())
+        }
+        for name in search.excludedLabelNames {
+            conditions.append("NOT EXISTS (SELECT 1 FROM message_labels x JOIN labels l ON l.id = x.label_id WHERE x.message_id = m.id AND unicode_lower(l.name) = ?)")
+            args.append(name.lowercased())
+        }
+        if search.hasAttachment == true { conditions.append(hasFileAttachment) }
+        if search.isList == true { conditions.append(isListMessage) }
+        if let before = search.before {
+            conditions.append("m.date < ?")
+            args.append(before)
+        }
+        if let after = search.after {
+            conditions.append("m.date >= ?")
+            args.append(after)
+        }
+        if let match = ftsExpression(words: search.terms, phrases: search.phrases) {
+            conditions.append("m.rowid IN (SELECT rowid FROM message_search WHERE message_search MATCH ?)")
+            args.append(match)
+        }
+        if let excluded = ftsExcludedExpression(search.excluded) {
+            conditions.append("m.rowid NOT IN (SELECT rowid FROM message_search WHERE message_search MATCH ?)")
+            args.append(excluded)
+        }
+
+        var sql = "SELECT \(selecting) FROM messages m"
+        if !conditions.isEmpty { sql += " WHERE " + conditions.joined(separator: " AND ") }
+        if ordered {
+            sql += " ORDER BY m.date DESC"
+            if let limit = query.limit {
+                sql += " LIMIT ?"
+                args.append(limit)
+            }
+        }
+        return (sql, args)
+    }
+
+    /// The message `m` is in a rule's scope. Received: not in Sent, Drafts, Spam or Trash, not a copy
+    /// still being sent, and not from you. Inbox: received and in the Inbox.
+    static func scopeCondition(_ mailboxes: RuleScope.Mailboxes, me: Set<String>) -> (String, [SQLBindable]) {
+        var conditions = [
+            "m.is_local = 0",
+            "NOT EXISTS (SELECT 1 FROM message_labels x WHERE x.message_id = m.id AND x.label_id IN ('SENT', 'DRAFT', 'SPAM', 'TRASH'))",
+        ]
+        var args: [SQLBindable] = []
+        if !me.isEmpty {
+            conditions.append("unicode_lower(m.from_email) NOT IN (\(Array(repeating: "?", count: me.count).joined(separator: ", ")))")
+            args += me.sorted().map { $0 as SQLBindable }
+        }
+        switch mailboxes {
+        case .received: break
+        case .inbox: conditions.append("EXISTS (SELECT 1 FROM message_labels x WHERE x.message_id = m.id AND x.label_id = 'INBOX')")
+        // A scope from a newer build: nothing is in it here.
+        case .unsupported: conditions.append("0")
+        }
+        return ("(" + conditions.joined(separator: " AND ") + ")", args)
     }
 
     // MARK: - Thread detail
@@ -375,7 +518,7 @@ extension MailStore {
             return try db.query(
                 """
                 SELECT email, name FROM contacts
-                WHERE email LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\'
+                WHERE email LIKE ? ESCAPE '\\' OR unicode_lower(name) LIKE ? ESCAPE '\\' OR unicode_lower(name) LIKE ? ESCAPE '\\'
                 ORDER BY score DESC, last_seen DESC LIMIT ?
                 """,
                 [String(prefix), String(prefix), String(wordPrefix), limit]

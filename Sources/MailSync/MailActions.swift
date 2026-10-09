@@ -91,12 +91,9 @@ public final class MailActions: Sendable {
 
     /// Finds a label by name (case-insensitive) or creates it.
     public func ensureLabel(named name: String, kind: MailLabel.Kind) async throws -> MailLabel {
-        let trimmed = name.trimmingCharacters(in: .whitespaces)
-        if let existing = try await store.labels().first(where: { $0.kind != .system && $0.name.lowercased() == trimmed.lowercased() }) {
-            return existing
-        }
-        let label = try await store.createLabel(name: trimmed, kind: kind, colorIndex: nil)
-        outboxChanged()
+        let (label, created) = try await store.ensureLabel(named: name, kind: kind)
+        // Only a new Gmail label has something to sync.
+        if created && label.kind == .user { outboxChanged() }
         return label
     }
 

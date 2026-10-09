@@ -140,6 +140,66 @@ enum Schema {
             last_seen INTEGER NOT NULL DEFAULT 0
         );
         """,
+        // 2: rules, their work queue, runs, decisions and ledger.
+        """
+        CREATE INDEX messages_date ON messages(date DESC);
+        CREATE TABLE rules (id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, position INTEGER NOT NULL,
+          enabled INTEGER NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL,
+          state TEXT NOT NULL DEFAULT 'ok',          -- ok | tripped | label_missing | needs_upgrade
+          live_from INTEGER, covered_since INTEGER, disabled_at INTEGER,
+          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE rule_revisions (rule_id TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL,
+          created_at INTEGER NOT NULL, PRIMARY KEY (rule_id, revision)) WITHOUT ROWID;
+        CREATE TABLE rule_examples (                 -- explicit ✔/✖ for one rule; each decides its message
+          rule_id TEXT NOT NULL, message_id TEXT NOT NULL, verdict INTEGER NOT NULL,
+          origin TEXT NOT NULL,                      -- seed | preview | explain | edit (editsTeach only)
+          digest TEXT NOT NULL,                      -- "sender name · @domain · subject ≤ 120 chars"
+          undo_key TEXT, created_at INTEGER NOT NULL, PRIMARY KEY (rule_id, message_id)) WITHOUT ROWID;
+        CREATE TABLE label_marks (                   -- your own label edits; bind every rule
+          message_id TEXT NOT NULL, label_id TEXT NOT NULL,
+          present INTEGER NOT NULL,                  -- 1 you added it, 0 you removed it
+          undo_key TEXT, created_at INTEGER NOT NULL, PRIMARY KEY (message_id, label_id)) WITHOUT ROWID;
+        CREATE TABLE rule_overrides (rule_id TEXT NOT NULL, subject TEXT NOT NULL,   -- "a@b.com" | "@b.com"
+          verdict INTEGER NOT NULL, origin TEXT NOT NULL, evidence INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL, PRIMARY KEY (rule_id, subject)) WITHOUT ROWID;
+        CREATE TABLE verdicts (message_id TEXT NOT NULL, judge_hash TEXT NOT NULL,
+          verdict TEXT NOT NULL,                     -- match | no_match | unsure | declined
+          reason TEXT NOT NULL, examples_digest TEXT NOT NULL, model TEXT NOT NULL, served_by TEXT NOT NULL,
+          created_at INTEGER NOT NULL, PRIMARY KEY (message_id, judge_hash)) WITHOUT ROWID;
+        CREATE TABLE rule_decisions (message_id TEXT NOT NULL, rule_id TEXT NOT NULL, revision INTEGER NOT NULL,
+          outcome TEXT NOT NULL, source TEXT NOT NULL,   -- gate | mark | example | override | thread | cache | claude
+          judge_hash TEXT, run_id INTEGER NOT NULL, decided_at INTEGER NOT NULL,
+          PRIMARY KEY (message_id, rule_id)) WITHOUT ROWID;
+        CREATE INDEX rule_decisions_rule ON rule_decisions(rule_id, outcome);
+        CREATE TABLE rule_runs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind TEXT NOT NULL,                        -- live | backfill | recheck | manual | gap | backlog
+          day TEXT,                                  -- live only: one row per local 'YYYY-MM-DD'
+          rules TEXT NOT NULL,                       -- JSON [{"id":"r_…","rev":3}]
+          window_start INTEGER, window_end INTEGER,
+          state TEXT NOT NULL,                       -- running | paused | awaiting_confirm | done | cancelled | undone
+          pause_reason TEXT,                         -- budget | cap | user | ai | rule_changed | model_changed
+          model TEXT, total INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0,
+          judged INTEGER NOT NULL DEFAULT 0, labeled INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+          plus INTEGER, minus INTEGER, est_micros INTEGER, cap_micros INTEGER,
+          cost_micros INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, finished_at INTEGER);
+        CREATE UNIQUE INDEX rule_runs_live_day ON rule_runs(day) WHERE kind = 'live';
+        CREATE TABLE rule_queue (message_id TEXT NOT NULL, run_id INTEGER NOT NULL,
+          priority INTEGER NOT NULL,                 -- 0 live, 1 manual, 2 runs
+          state TEXT NOT NULL DEFAULT 'queued',      -- queued | waiting_ai | held | failed
+          attempts INTEGER NOT NULL DEFAULT 0, not_before INTEGER NOT NULL DEFAULT 0,
+          error_code TEXT, PRIMARY KEY (message_id, run_id)) WITHOUT ROWID;
+        CREATE INDEX rule_queue_due ON rule_queue(state, priority, not_before);
+        CREATE TABLE rule_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL,
+          rule_id TEXT NOT NULL, revision INTEGER NOT NULL, message_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+          effect TEXT NOT NULL, target TEXT NOT NULL, inverse TEXT,  -- 'add_label', label id, future inverse JSON
+          changed INTEGER NOT NULL,                  -- 1 this commit added it, 0 co-owner of a rule-added label
+          outbox_id INTEGER, simulated INTEGER NOT NULL DEFAULT 0, applied_at INTEGER NOT NULL,
+          reverted_at INTEGER, reverted_by TEXT);    -- undo | user | recheck | rule_deleted | label_deleted | gmail_rejected
+        CREATE INDEX rule_ledger_message ON rule_ledger(message_id);
+        CREATE INDEX rule_ledger_run ON rule_ledger(run_id) WHERE reverted_at IS NULL;
+        CREATE INDEX rule_ledger_outbox ON rule_ledger(outbox_id) WHERE outbox_id IS NOT NULL;
+        CREATE UNIQUE INDEX rule_ledger_active ON rule_ledger(message_id, rule_id, target) WHERE reverted_at IS NULL;
+        """,
     ]
 
     static func migrate(_ db: SQLiteDatabase) throws {

@@ -148,17 +148,41 @@ extension MailStore {
 
     /// Creates a label. Provider labels get a temporary ID until the provider assigns one.
     public func createLabel(name: String, kind: MailLabel.Kind, colorIndex: Int?) async throws -> MailLabel {
-        try await write { db, change in
-            let prefix = kind == .local ? "local" : "pending"
-            let label = MailLabel(id: "\(prefix)-\(UUID().uuidString.prefix(8).lowercased())", name: name, kind: kind, colorIndex: colorIndex)
-            try Self.upsertLabel(label, db)
-            if kind == .user {
-                _ = try Self.enqueue(.createLabel(localID: label.id, name: name), db)
-                change.outbox = true
-            }
-            change.labels = true
-            return label
+        try await write { db, change in try Self.createLabel(name: name, kind: kind, colorIndex: colorIndex, db, &change) }
+    }
+
+    static func createLabel(name: String, kind: MailLabel.Kind, colorIndex: Int?, _ db: SQLiteDatabase, _ change: inout StoreChange) throws -> MailLabel {
+        let prefix = kind == .local ? "local" : "pending"
+        let label = MailLabel(id: "\(prefix)-\(UUID().uuidString.prefix(8).lowercased())", name: name, kind: kind, colorIndex: colorIndex)
+        try upsertLabel(label, db)
+        if kind == .user {
+            _ = try enqueue(.createLabel(localID: label.id, name: name), db)
+            change.outbox = true
         }
+        change.labels = true
+        return label
+    }
+
+    /// Finds a label by name (case-insensitive) or creates one of `kind`. Lookup and creation share
+    /// one transaction, so concurrent calls make one label. A label of `kind` is preferred, but one of
+    /// the other kind is reused rather than duplicated, as the label picker always did.
+    public func ensureLabel(named name: String, kind: MailLabel.Kind) async throws -> (label: MailLabel, created: Bool) {
+        try await write { db, change in try Self.findOrCreateLabel(named: name, preferring: kind, creating: kind, db, &change) }
+    }
+
+    /// The label a rule adds, picked by name when the rule is saved: an existing label of that name
+    /// (Gmail's before a local one), else a new local label. One transaction.
+    public func resolveLabel(name: String) async throws -> MailLabel {
+        try await write { db, change in try Self.findOrCreateLabel(named: name, preferring: .user, creating: .local, db, &change).label }
+    }
+
+    static func findOrCreateLabel(
+        named name: String, preferring preferred: MailLabel.Kind, creating kind: MailLabel.Kind, _ db: SQLiteDatabase, _ change: inout StoreChange
+    ) throws -> (label: MailLabel, created: Bool) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        let named = try labels(db).filter { $0.kind != .system && $0.name.lowercased() == trimmed.lowercased() }
+        if let existing = named.first(where: { $0.kind == preferred }) ?? named.first { return (existing, false) }
+        return (try createLabel(name: trimmed, kind: kind, colorIndex: nil, db, &change), true)
     }
 
     public func renameLabel(id: String, to name: String, syncs: Bool) async throws {

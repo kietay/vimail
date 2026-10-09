@@ -67,7 +67,7 @@ final class AppServices {
         await dummy?.startSimulation()
     }
 
-    /// Stops syncing before another account takes over.
+    /// Stops syncing before another account takes over. Returns once no sync cycle is writing.
     func stop() async {
         await engine.stop()
         await dummy?.stopSimulation()

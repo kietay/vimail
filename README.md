@@ -133,7 +133,7 @@ Everything is local:
     session.json                  last mailbox/view, filter, cursor per mailbox, sidebar
     google-oauth-client.json      your Google Cloud OAuth client (mode 600)
     accounts/<account>/mail.sqlite   mail cache + full-text index, outbox, drafts, snoozes,
-                                  saved views, local labels, annotations, contacts
+                                  saved views, local labels, annotations, contacts, rules
     accounts/<account>/drafts/    draft attachments and vim buffers
     accounts/gmail-<email>/google-credential.json   Gmail refresh token (mode 600)
     dummy/server.json             the fake Gmail server's state
@@ -154,7 +154,8 @@ the Keychain once the app has a stable signing identity (ad-hoc signatures chang
 ```
 Sources/
   MailCore       Models, MailProvider protocol, search parser, reply rules, rule model and planner
-  MailStore      SQLite (WAL, separate reader/writer queues), FTS5 search, outbox, local-only state
+  MailStore      SQLite (WAL; a writer, a UI reader and a background reader, each on its own queue),
+                 FTS5 search, outbox, local-only state, rules and their work queue
   MailSync       MailActions (optimistic, undoable), SyncEngine (push outbox, pull changes)
   MailRules      Rules engine (so far its status types)
   MailAI         Claude model catalog and prices
@@ -173,8 +174,9 @@ Vendor/SwiftTerm Terminal emulator for the embedded editor (MIT, trimmed, see Ve
   `threads`, `history` cursors, `messages.batchModify`, `send` (raw MIME), attachments. `GmailProvider` and
   `DummyMailProvider` implement it; `AppServices` picks one per account. Nothing else knows which is in use.
 - **Rules.** A rule is a search-syntax filter, optionally a question Claude decides, and labels to add
-  (`Sources/MailCore/Rules/`). Sync wakes the rules engine only for mail that has just arrived, never for
-  the first sync or the background download of older mail.
+  (`Sources/MailCore/Rules/`). Rules are stored per account with their revisions. Mail that has just
+  arrived is queued for rules in the transaction that stores it, never mail from the first sync or the
+  background download of older mail, and never mail you sent (from your address or a send-as alias).
 - **Chat.** `MailStore` already exposes what a chat agent needs as tools: full-text `threads(query)`,
   `thread(id)`, `message(id)`, `contacts`, annotations. Actions go through `MailActions` for undo and sync.
 
