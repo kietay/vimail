@@ -154,6 +154,23 @@ struct MailStoreTests {
         #expect(try await store.dueSnoozes(now: until.addingTimeInterval(1)) == ["t2"])
     }
 
+    @Test func undoingASnoozeRestoresWhatWasThere() async throws {
+        let store = try await seededStore()
+        let snoozed = try await store.apply(LocalMutation(
+            deltas: [PlannedDelta(LabelDelta(messageIDs: ["m3"], remove: ["INBOX"]), syncs: true)],
+            snoozes: ["t2": Date().addingTimeInterval(3600)]
+        ))
+        // Changing the time and undoing that brings the first time back.
+        let first = try await store.snoozes()["t2"]
+        let changed = try await store.apply(LocalMutation(snoozes: ["t2": Date().addingTimeInterval(7200)]))
+        try await store.revert(changed)
+        #expect(try await store.snoozes()["t2"] == first)
+        // Undoing the snooze itself leaves none behind, or the thread would wake up later as unread.
+        try await store.revert(snoozed)
+        #expect(try await store.snoozes().isEmpty)
+        #expect(try await store.threads(.mailbox(.inbox)).map(\.id).contains("t2"))
+    }
+
     @Test func remappingTemporaryLabelUpdatesMessagesAndOutbox() async throws {
         let store = try await seededStore()
         let pending = try await store.createLabel(name: "clients", kind: .user, colorIndex: nil)
