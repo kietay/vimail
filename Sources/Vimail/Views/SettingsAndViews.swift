@@ -88,6 +88,7 @@ struct SettingsView: View {
 
                     divider("COMPOSE")
                     toggle("Show HTML preview", detail: "The exact email recipients get, next to the editor.", isOn: $model.settings.showComposePreview)
+                    toggle("Archive on send", detail: "Sending a reply archives the conversation. Undo send brings it back.", isOn: $model.settings.archiveOnSend)
                     toggle("Reply and forward start in vim", detail: "Ctrl+G toggles vim in any compose window.", isOn: $model.settings.composeStartsInVim)
                     VStack(alignment: .leading, spacing: 8) {
                         label("Editor command", detail: "Empty uses $VISUAL, $EDITOR, then nvim from your login shell. Mail-only settings: ~/.config/vimail/vimrc.")

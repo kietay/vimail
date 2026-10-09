@@ -52,7 +52,8 @@ enum Mode: String {
 
 enum UndoEntry {
     case action(UndoRecord)
-    case send(outboxID: Int64, draft: Draft, localMessageID: String)
+    /// `archived` is the archive that archive-on-send did with it, if any.
+    case send(outboxID: Int64, draft: Draft, localMessageID: String, archived: UndoRecord?)
 }
 
 @MainActor
@@ -289,7 +290,11 @@ final class AppModel {
             showToast("Message sent.")
         case .sendFailed(let draft, let reason):
             showToast("Send failed: \(reason). Saved to Drafts.", isError: true)
-            undoStack.removeAll { if case .send(_, let pending, _) = $0 { return pending.id == draft.id } else { return false } }
+            // A reply that did not go out should not stay archived.
+            for case .send(_, let pending, _, let archived?) in undoStack where pending.id == draft.id {
+                Task { try? await services.actions.undo(archived); await reloadList() }
+            }
+            undoStack.removeAll { if case .send(_, let pending, _, _) = $0 { return pending.id == draft.id } else { return false } }
         case .operationFailed(let reason):
             showToast(reason, isError: true)
         }

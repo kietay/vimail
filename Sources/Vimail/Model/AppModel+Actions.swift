@@ -50,7 +50,7 @@ extension AppModel {
     }
 
     /// Updates the in-memory list immediately; the store reload a few milliseconds later reconciles.
-    private func applyOptimistically(_ action: ThreadAction, to ids: [String]) {
+    func applyOptimistically(_ action: ThreadAction, to ids: [String]) {
         let idSet = Set(ids)
         if removesFromCurrentList(action) {
             let firstIndex = threads.firstIndex { idSet.contains($0.id) }
@@ -166,8 +166,16 @@ extension AppModel {
                     showToast("Could not undo: \(error.localizedDescription)", isError: true)
                 }
             }
-        case .send(let outboxID, let draft, let localMessageID):
+        case .send(let outboxID, let draft, let localMessageID, let archived):
             Task {
+                if let archived {
+                    do {
+                        try await services.actions.undo(archived)
+                        await reloadList()
+                    } catch {
+                        AppModel.log.error("Could not undo archive on send: \(error)")
+                    }
+                }
                 if (try? await services.store.cancelSend(outboxID: outboxID, draft: draft, localMessageID: localMessageID)) == true {
                     AppModel.log.info("Undo send: outbox #\(outboxID) cancelled before it left")
                     showToast("Sending cancelled. The draft is open again.")

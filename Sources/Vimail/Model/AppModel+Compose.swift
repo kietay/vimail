@@ -1,6 +1,7 @@
 import AppKit
 import MailCore
 import MailStore
+import MailSync
 import VimailKit
 
 /// A signature compose can pick, with the name the menu shows.
@@ -168,8 +169,19 @@ extension AppModel {
             do {
                 let outboxID = try await services.store.queueSend(draft: draft, message: outgoing, localCopy: localCopy, notBefore: sendAt)
                 AppModel.log.info("Queued send as outbox #\(outboxID) (\(outgoing.messageID ?? "?"), \(outgoing.attachments.count) attachment(s), sends in \(Int(delay))s)")
-                undoStack.append(.send(outboxID: outboxID, draft: draft, localMessageID: localCopy.id))
-                if delay > 0 { showToast("Sending", undoable: true, countdownTo: sendAt) } else { showToast("Sending…") }
+                var archived: UndoRecord?
+                if settings.archiveOnSend, let threadID = outgoing.threadID {
+                    applyOptimistically(.archive, to: [threadID])
+                    do {
+                        archived = try await services.actions.perform(.archive, threads: [threadID])
+                    } catch {
+                        AppModel.log.error("Could not archive on send: \(error)")
+                        await reloadList()
+                    }
+                }
+                undoStack.append(.send(outboxID: outboxID, draft: draft, localMessageID: localCopy.id, archived: archived))
+                let title = archived == nil ? "Sending" : "Sending and archiving"
+                if delay > 0 { showToast(title, undoable: true, countdownTo: sendAt) } else { showToast("\(title)…") }
                 services.engine.wake()
             } catch {
                 AppModel.log.error("Could not queue a send: \(error)")
