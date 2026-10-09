@@ -185,3 +185,6 @@ VIMAIL_SCRIPT='activate wait:1500 gi j j / type:coffee <CR> e' build/app.noindex
 ```
 
 `activate` brings the window to the front; `hide` hides the app (to test background behaviour).
+`snapshot:name` saves the reader as `snapshots/name.png` in the data folder, and `name.json` with
+which messages are expanded, focused and on screen. It needs no screen-recording permission and works
+with the window in the background. Set `VIMAIL_HOME` to a scratch folder to test on fresh dummy data.

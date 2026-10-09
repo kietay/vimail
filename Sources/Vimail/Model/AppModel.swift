@@ -154,6 +154,9 @@ final class AppModel {
     @ObservationIgnored var keyTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var threadCache: [String: MailThread] = [:]
     @ObservationIgnored private var renderedThreadID: String?
+    /// Messages that were unread when the conversation on screen was opened. They stay expanded and
+    /// marked new while it stays open, so marking it read does not fold away what you are reading.
+    @ObservationIgnored private var newMessageIDs = Set<String>()
     @ObservationIgnored private var storeObserver: UUID?
     @ObservationIgnored var signInTask: Task<Void, Never>?
     static let pageSize = 400
@@ -315,7 +318,7 @@ final class AppModel {
         await reloadList()
         await reloadCounts()
         if let id = cursorID, change.reset || change.threadIDs.contains(id) || (change.drafts && id.hasPrefix("draft:")) {
-            await loadCurrentThread(preserveScroll: true)
+            await loadCurrentThread(refresh: true)
         }
         if change.reset { await reloadAccount() }
         let inboxUnread = unreadCounts[SystemLabel.inbox] ?? 0
@@ -579,11 +582,13 @@ final class AppModel {
     private func cursorDidChange() {
         markReadTask?.cancel()
         if let cursorID { session.cursors[destination.key] = cursorID }
-        Task { await loadCurrentThread(preserveScroll: false) }
+        Task { await loadCurrentThread(refresh: false) }
         scheduleMarkRead()
     }
 
-    func loadCurrentThread(preserveScroll: Bool) async {
+    /// Shows the conversation under the cursor. `refresh` reloads the one on screen after it
+    /// changed: it skips the cache and renders even when the conversation looks the same.
+    func loadCurrentThread(refresh: Bool) async {
         threadTask?.cancel()
         guard let id = cursorID else {
             currentThread = nil
@@ -595,18 +600,17 @@ final class AppModel {
             await renderDraftPreview(String(id.dropFirst(6)))
             return
         }
-        if !preserveScroll, let cached = threadCache[id] {
+        if !refresh, let cached = threadCache[id] {
             currentThread = cached
-            render(cached, preserveScroll: false)
+            render(cached)
         }
-        let scroll = preserveScroll && renderedThreadID == id ? await reader.scrollPosition() : nil
         threadTask = Task {
             guard let thread = try? await services.store.thread(id: id), !Task.isCancelled, cursorID == id else { return }
             threadCache[id] = thread
             if threadCache.count > 60 { threadCache.removeAll() }
-            if thread != currentThread || renderedThreadID != id || preserveScroll {
+            if thread != currentThread || renderedThreadID != id || refresh {
                 currentThread = thread
-                render(thread, preserveScroll: scroll != nil, scroll: scroll)
+                render(thread)
             }
             prefetchNeighbors()
         }
@@ -624,12 +628,15 @@ final class AppModel {
     }
 
     func rerenderReader() {
-        if let currentThread { render(currentThread, preserveScroll: true) } else { Task { await loadCurrentThread(preserveScroll: true) } }
+        if let currentThread { render(currentThread) } else { Task { await loadCurrentThread(refresh: true) } }
     }
 
-    private func render(_ thread: MailThread, preserveScroll: Bool, scroll: Double? = nil) {
+    private func render(_ thread: MailThread) {
+        let unread = thread.messages.filter(\.isUnread).map(\.id)
+        // Marking read keeps what was new; a message that arrives while the conversation is open is new too.
+        if renderedThreadID == thread.id { newMessageIDs.formUnion(unread) } else { newMessageIDs = Set(unread) }
         renderedThreadID = thread.id
-        reader.render(readerPayload(for: thread, scroll: preserveScroll ? scroll : nil))
+        reader.render(readerPayload(for: thread))
     }
 
     private func renderDraftPreview(_ draftID: String) async {
@@ -650,7 +657,7 @@ final class AppModel {
             toShort: draft.to.isEmpty ? "no recipients" : "to \(draft.to.map(\.shortName).joined(separator: ", "))",
             toFull: draft.to.formattedList, ccFull: draft.cc.isEmpty ? nil : draft.cc.formattedList,
             time: Formatting.readerTime(draft.updatedAt), dateLong: "Edited \(Formatting.longDate(draft.updatedAt))",
-            snippet: "", unread: false, expanded: true, focus: true, kind: "html",
+            snippet: "", isNew: false, expanded: true, focus: true, kind: "html",
             text: nil, html: Markdown.html(draft.body.isEmpty ? "*Empty draft. Press Enter to edit.*" : draft.body),
             attachments: draft.attachments.map { .init(id: $0.id, name: $0.filename, kind: ($0.filename as NSString).pathExtension.uppercased(), size: Formatting.fileSize($0.size)) },
             sending: false
@@ -672,17 +679,17 @@ final class AppModel {
         return "\(index + 1)/\(totalCount)"
     }
 
-    private func readerPayload(for thread: MailThread, scroll: Double?) -> ReaderPayload {
+    private func readerPayload(for thread: MailThread) -> ReaderPayload {
         let me = services.store.selfAddresses
         var payload = ReaderPayload()
         payload.dark = theme.palette.isDark
+        payload.threadID = thread.id
         payload.subject = thread.subject
         payload.position = positionText
         payload.hasPrevious = (cursorIndex ?? 0) > 0
         payload.hasNext = (cursorIndex ?? 0) < threads.count - 1
         payload.allowRemote = settings.loadRemoteImages || remoteImagesAllowed.contains(thread.id)
         payload.showHints = settings.alwaysShowKeyHints
-        payload.preserveScroll = scroll
         payload.labels = chips(for: thread.labelIDs)
         if let snoozed = thread.snoozedUntil {
             payload.labels.append(.init(name: "snoozed · \(Formatting.snoozeDate(snoozed))", fg: theme.palette.yellow, soft: theme.palette.yellowSoft))
@@ -691,8 +698,9 @@ final class AppModel {
         payload.canReplyAll = latestReceived.map { ($0.to + $0.cc).filter { !me.contains($0.normalized) }.count + 1 > 1 } ?? false
         payload.menu = readerMenu(for: thread)
 
-        let firstUnread = thread.messages.firstIndex(where: \.isUnread)
-        let focusIndex = firstUnread ?? (thread.messages.count - 1)
+        // New messages open, and the reader starts at the first one. The latest message is always open.
+        let firstNew = thread.messages.firstIndex { newMessageIDs.contains($0.id) }
+        let focusIndex = firstNew ?? (thread.messages.count - 1)
         payload.messages = thread.messages.enumerated().map { index, message in
             let kind: String
             if let html = message.htmlBody, !html.isEmpty {
@@ -701,6 +709,7 @@ final class AppModel {
                 kind = "text"
             }
             let fromMe = me.contains(message.from.normalized)
+            let isNew = newMessageIDs.contains(message.id)
             return ReaderPayload.Message(
                 id: message.id,
                 fromName: fromMe ? "me" : message.from.displayName,
@@ -712,8 +721,8 @@ final class AppModel {
                 time: Formatting.readerTime(message.date),
                 dateLong: Formatting.longDate(message.date),
                 snippet: message.snippet,
-                unread: message.isUnread,
-                expanded: message.isUnread || index == thread.messages.count - 1 || index == focusIndex,
+                isNew: isNew,
+                expanded: isNew || index == thread.messages.count - 1,
                 focus: index == focusIndex,
                 kind: kind,
                 text: kind == "text" ? message.plainText : nil,

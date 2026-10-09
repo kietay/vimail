@@ -1,5 +1,6 @@
 #if DEBUG
 import AppKit
+import WebKit
 
 /// Debug builds only: replays a key script through the real event path (key router, text
 /// fields, vim parser) so flows can be exercised without synthetic input permissions.
@@ -7,7 +8,9 @@ import AppKit
 ///     VIMAIL_SCRIPT='wait:1500 j j / type:coffee <CR> wait:500 e' build/app.noindex/vimail.app/Contents/MacOS/vimail
 ///
 /// Tokens: single characters, vim notation (`<Esc> <CR> <Tab> <Space> <BS> <Up> <Down> <C-d> <D-k> <S-Space>`),
-/// `type:text` (types characters), `wait:ms`, `activate` (bring the window to the front), `hide` (hide the app).
+/// `type:text` (types characters), `wait:ms`, `activate` (bring the window to the front), `hide` (hide the app),
+/// `snapshot:name` (saves the reader as `snapshots/name.png` in the data folder, and as `name.json`: which
+/// messages are collapsed, focused and on screen).
 @MainActor
 enum DebugScript {
     static func runIfRequested() {
@@ -26,6 +29,10 @@ enum DebugScript {
                 }
                 if token == "hide" {
                     NSApp.hide(nil)
+                    continue
+                }
+                if token.hasPrefix("snapshot:") {
+                    await snapshot(named: String(token.dropFirst(9)))
                     continue
                 }
                 if token.hasPrefix("type:") {
@@ -48,6 +55,41 @@ enum DebugScript {
             }
         }
     }
+
+    private static func snapshot(named name: String) async {
+        guard case .success(let model) = AppContainer.shared else { return }
+        let directory = AppPaths.root.appendingPathComponent("snapshots", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let webView = model.reader.webView
+        if let json = try? await webView.evaluateJavaScript(readerLayoutScript) as? String {
+            try? Data(json.utf8).write(to: directory.appendingPathComponent("\(name).json"))
+        }
+        if let image = try? await webView.takeSnapshot(configuration: nil), let tiff = image.tiffRepresentation,
+           let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+            try? png.write(to: directory.appendingPathComponent("\(name).png"))
+        }
+    }
+
+    private static let readerLayoutScript = """
+    (() => {
+      const top = window.scrollY;
+      return JSON.stringify({
+        subject: document.querySelector('h1.subject')?.textContent ?? null,
+        header: document.querySelector('.message.multi') ? document.querySelector('header.thread .time').textContent : null,
+        readToggle: document.querySelector('.menu [data-action="toggleRead"] .label')?.textContent ?? null,
+        scrollY: Math.round(top), viewport: window.innerHeight, height: document.documentElement.scrollHeight,
+        messages: Array.from(document.querySelectorAll('.message')).map((node) => {
+          const box = node.getBoundingClientRect();
+          return {
+            index: Number(node.dataset.index), from: node.querySelector('.name')?.textContent ?? null,
+            isNew: node.querySelector('.message-head .unread-dot') !== null,
+            classes: node.className.trim().split(/\\s+/), onScreen: box.bottom > 0 && box.top < window.innerHeight,
+            top: Math.round(box.top + top), height: Math.round(box.height),
+          };
+        }),
+      });
+    })()
+    """
 
     private static let specialKeys: [String: UInt16] = [
         "Esc": 53, "CR": 36, "Tab": 48, "Space": 49, "BS": 51, "Up": 126, "Down": 125, "Left": 123, "Right": 124,

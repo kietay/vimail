@@ -209,11 +209,13 @@ enum ReaderHTML {
         return doc.body.innerHTML;
       }
 
-      function richFrame(message, index) {
+      // `height`: the frame's size in the previous render, so the page does not jump while it reloads.
+      function richFrame(message, index, height) {
         const csp = `default-src 'none'; style-src 'unsafe-inline' data:; font-src data:; img-src data: cid: vimail-cid:${state.allowRemote ? ' https: http:' : ''};`;
         const doc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><base target="_blank">` +
           `<style>html,body{margin:0;padding:0;background:#ffffff;color:#1f2328;font-family:-apple-system,'Helvetica Neue',Arial,sans-serif;}img{max-width:100%;height:auto;}</style></head><body>${message.html}</body></html>`;
-        return `<div class="card"><iframe class="html" data-index="${index}" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" srcdoc="${esc(doc)}"></iframe></div>`;
+        const size = height ? ` style="height:${esc(height)}"` : '';
+        return `<div class="card"><iframe class="html" data-index="${index}"${size} sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" srcdoc="${esc(doc)}"></iframe></div>`;
       }
 
       function attachmentsHTML(message) {
@@ -226,8 +228,8 @@ enum ReaderHTML {
           </button>`).join('')}</div>`;
       }
 
-      function bodyHTML(message, index) {
-        if (message.kind === 'rich') return richFrame(message, index);
+      function bodyHTML(message, index, frameHeight) {
+        if (message.kind === 'rich') return richFrame(message, index, frameHeight);
         if (message.kind === 'html') {
           const counter = { blocked: 0 };
           const clean = sanitize(message.html, state.allowRemote, counter);
@@ -245,11 +247,14 @@ enum ReaderHTML {
             <button class="nav-button" data-action="previous" title="Previous (k)" ${state.hasPrevious ? '' : 'disabled'}>${icon('chevronLeft', 12)}</button>
             <button class="nav-button" data-action="next" title="Next (j)" ${state.hasNext ? '' : 'disabled'}>${icon('chevron', 12)}</button>
           </div>` : '';
+        // In a conversation, a dot marks the messages that are new.
+        const newDot = !withPosition && message.isNew ? '<span class="unread-dot" title="New"></span>' : '';
         return `
           <div class="meta-row">
             <div class="sender" data-toggle-details>
               <span class="avatar">${esc(message.initials)}</span>
               <span class="name">${esc(message.fromName)}</span>
+              ${newDot}
               <span class="to">${esc(message.toShort)}</span>
               ${icon('down', 10)}
             </div>
@@ -271,7 +276,21 @@ enum ReaderHTML {
           <button data-action="${esc(item.action)}">${icon(item.icon, 14)}<span class="label">${esc(item.title)}</span>${item.key ? `<kbd>${esc(item.key)}</kbd>` : ''}</button>`).join('')}</div>`;
       }
 
+      // What you expanded, focused and scrolled to. A render of the conversation already on screen (marked
+      // read, synced, starred, a reply arrived) keeps it. Messages not shown before start as the payload says.
+      function viewState() {
+        const expanded = new Map(), frameHeights = new Map();
+        document.querySelectorAll('.message[data-id]').forEach((node) => {
+          expanded.set(node.dataset.id, !node.classList.contains('collapsed'));
+          const frame = node.querySelector('iframe.html');
+          if (frame && frame.style.height) frameHeights.set(node.dataset.id, frame.style.height);
+        });
+        const focusedMessage = state.messages[focused];
+        return { expanded, frameHeights, focusedID: focusedMessage && focusedMessage.id, scrollY: window.scrollY };
+      }
+
       function render(payload) {
+        const kept = state && state.threadID && state.threadID === payload.threadID ? viewState() : null;
         state = payload;
         state.blockedImages = 0;
         document.documentElement.style.colorScheme = payload.dark ? 'dark' : 'light';
@@ -281,6 +300,7 @@ enum ReaderHTML {
         }
         const multi = payload.messages.length > 1;
         const first = payload.messages[0];
+        const newCount = payload.messages.filter((m) => m.isNew).length;
         let html = `
           <header class="thread">
             <div class="subject-row">
@@ -292,20 +312,21 @@ enum ReaderHTML {
             </div>
             ${multi ? `<div class="meta-row">
                 ${state.labels.map((l) => `<span class="chip" style="background:${l.soft};color:${l.fg}">${esc(l.name)}</span>`).join('')}
-                <span class="time">${payload.messages.length} messages</span>
+                <span class="time">${payload.messages.length} messages${newCount ? ` · ${newCount} new` : ''}</span>
                 <div class="position"><span class="count">${esc(state.position)}</span>
                   <button class="nav-button" data-action="previous" ${state.hasPrevious ? '' : 'disabled'}>${icon('chevronLeft', 12)}</button>
                   <button class="nav-button" data-action="next" ${state.hasNext ? '' : 'disabled'}>${icon('chevron', 12)}</button></div>
               </div>` : senderBlock(first, true)}
           </header>`;
         payload.messages.forEach((message, index) => {
-          const collapsed = multi && !message.expanded;
-          html += `<section class="message ${multi ? 'multi' : ''} ${collapsed ? 'collapsed' : ''}" data-index="${index}">`;
+          const expanded = kept && kept.expanded.has(message.id) ? kept.expanded.get(message.id) : message.expanded;
+          const collapsed = multi && !expanded;
+          html += `<section class="message ${multi ? 'multi' : ''} ${collapsed ? 'collapsed' : ''}" data-index="${index}" data-id="${esc(message.id)}">`;
           if (multi) {
             html += `<div class="message-head" data-toggle-message="${index}">
                 <span class="avatar">${esc(message.initials)}</span>
                 <span class="name">${esc(message.fromName)}</span>
-                ${message.unread ? '<span class="unread-dot"></span>' : ''}
+                ${message.isNew ? '<span class="unread-dot"></span>' : ''}
                 <span class="snippet">${esc(message.snippet)}</span>
                 <span class="when">${esc(message.time)}</span>
               </div>
@@ -313,7 +334,7 @@ enum ReaderHTML {
           } else {
             html += '<div class="message-content">';
           }
-          html += bodyHTML(message, index) + attachmentsHTML(message) + '</div></section>';
+          html += bodyHTML(message, index, kept && kept.frameHeights.get(message.id)) + attachmentsHTML(message) + '</div></section>';
         });
         if (state.blockedImages > 0 && !payload.allowRemote) {
           html = html.replace('</header>', `</header><div class="images-banner"><span>Remote images are hidden to protect your privacy.</span><button data-action="loadImages">Show images</button></div>`);
@@ -321,10 +342,11 @@ enum ReaderHTML {
         // Reply/Forward live in a native bar pinned to the bottom of the pane, so they never move.
         root.innerHTML = html;
         if (payload.showHints) document.body.classList.add('show-hints'); else document.body.classList.remove('show-hints');
-        focused = Math.max(0, payload.messages.findIndex((m) => m.focus));
+        const keptFocus = kept ? payload.messages.findIndex((m) => m.id === kept.focusedID) : -1;
+        focused = keptFocus >= 0 ? keptFocus : Math.max(0, payload.messages.findIndex((m) => m.focus));
         if (multi) markFocused(false);
-        if (payload.preserveScroll) window.scrollTo(0, payload.preserveScroll); else window.scrollTo(0, 0);
-        if (multi && focused > 0 && !payload.preserveScroll) {
+        window.scrollTo(0, kept ? kept.scrollY : 0);
+        if (multi && focused > 0 && !kept) {
           const node = document.querySelector(`.message[data-index="${focused}"]`);
           if (node) window.scrollTo(0, Math.max(0, node.offsetTop - 80));
         }
@@ -396,7 +418,6 @@ enum ReaderHTML {
         scrollLines(count) { window.scrollBy(0, count * 48); },
         scrollPage(fraction) { window.scrollBy(0, fraction * (window.innerHeight - 60)); },
         scrollTo(where) { window.scrollTo(0, where === 'top' ? 0 : document.body.scrollHeight); },
-        scrollPosition() { return window.scrollY; },
         focusMessage(delta) {
           const nodes = document.querySelectorAll('.message.multi');
           if (!nodes.length) { this.scrollPage(delta * 0.8); return; }
