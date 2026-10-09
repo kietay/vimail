@@ -151,8 +151,12 @@ public struct ThreadQuery: Hashable, Sendable {
     public var labelIDs: [String] = []
     /// Labels matched by name (case-insensitive), from `label:` search terms.
     public var labelNames: [String] = []
+    /// Labels that must be absent, by name (case-insensitive), from `-label:` search terms.
+    public var excludedLabelNames: [String] = []
     /// Substring match on sender name or address.
     public var senders: [String] = []
+    /// No message may be from a matching sender (name or address substring).
+    public var excludedSenders: [String] = []
     /// Substring match on recipient name or address.
     public var recipients: [String] = []
     /// Substring match on the subject.
@@ -166,6 +170,8 @@ public struct ThreadQuery: Hashable, Sendable {
     /// Full-text terms that must not appear.
     public var excludedTerms: [String] = []
     public var hasAttachment: Bool?
+    /// Some message has a List-Unsubscribe header (`is:list`).
+    public var isList: Bool?
     public var before: Date?
     public var after: Date?
     /// Restricts results to these conversation IDs (used to keep "sticky" rows in filtered lists).
@@ -197,13 +203,16 @@ public struct ThreadQuery: Hashable, Sendable {
         if let read = search.read { copy.read = read }
         if search.starred == true { copy.starredOnly = true }
         copy.labelNames += search.labelNames
+        copy.excludedLabelNames += search.excludedLabelNames
         copy.senders += search.from
+        copy.excludedSenders += search.excludedFrom
         copy.recipients += search.to
         copy.subjects += search.subject
         copy.terms += search.terms
         copy.phrases += search.phrases
         copy.excludedTerms += search.excluded
         if let hasAttachment = search.hasAttachment { copy.hasAttachment = hasAttachment }
+        if let isList = search.isList { copy.isList = isList }
         if let before = search.before { copy.before = before }
         if let after = search.after { copy.after = after }
         return copy

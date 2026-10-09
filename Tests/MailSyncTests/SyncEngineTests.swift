@@ -5,14 +5,27 @@ import Testing
 @testable import MailStore
 @testable import MailSync
 
+/// Stands in for the rules engine: counts how often sync wakes it.
+final class WakeRecorder: RuleWaking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var wakes: Int { lock.withLock { count } }
+
+    func wake() {
+        lock.withLock { count += 1 }
+    }
+}
+
 struct Harness {
     let directory: URL
     let provider: DummyMailProvider
     let store: MailStore
     let engine: SyncEngine
     let actions: MailActions
+    let rules = WakeRecorder()
 
-    init(failureRate: Double = 0, processors: [any MessageProcessor] = []) async throws {
+    init(failureRate: Double = 0) async throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("vimail-sync-\(UUID().uuidString)")
         var configuration = DummyMailProvider.Configuration()
         configuration.latency = 0...0
@@ -24,12 +37,8 @@ struct Harness {
         engine = SyncEngine(provider: provider, store: store, initialSyncLimit: 300)
         let engine = engine
         actions = MailActions(store: store, outboxChanged: { engine.wake() })
-        let coordinator = processors.isEmpty ? nil : ProcessingCoordinator(pipeline: ProcessingPipeline(processors), store: store, actions: actions)
-        await engine.attach(actions: actions, processing: coordinator)
-        processing = coordinator
+        await engine.attach(actions: actions, rules: rules)
     }
-
-    var processing: ProcessingCoordinator?
 
     func setFailureRate(_ rate: Double) async {
         var configuration = DummyMailProvider.Configuration()
@@ -165,19 +174,21 @@ struct SyncEngineTests {
         #expect(remote.allSatisfy { $0.labelIDs.contains(synced.id) })
     }
 
-    @Test func processorPipelineAddsLocalLabels() async throws {
-        let harness = try await Harness(processors: [KeywordLabeler(rules: [(keyword: "deployment", label: "deploys")])])
-        #expect(await harness.engine.cycle())
-        await harness.processing?.waitUntilIdle()
+    @Test func onlyArrivingMailWakesRules() async throws {
+        let harness = try await Harness()
+        // The first sync and the background download store old mail: rules never see it implicitly.
+        while try await harness.store.meta("backfill_done") == nil {
+            #expect(await harness.engine.cycle())
+        }
+        #expect(harness.rules.wakes == 0)
 
-        let labels = try await harness.store.labels()
-        let deploys = try #require(labels.first { $0.name == "deploys" })
-        #expect(deploys.kind == .local)
-        let labeled = try await harness.store.threads(.mailbox(.label(deploys.id)))
-        #expect(labeled.contains { $0.subject.hasPrefix("Deployment successful") })
-        // Local labels never reach the provider.
-        #expect(try await harness.store.outboxCount() == 0)
-        #expect(!(try await harness.provider.labels()).contains { $0.name == "deploys" })
+        try await harness.provider.deliverIncomingMail(count: 2)
+        #expect(await harness.engine.cycle())
+        #expect(harness.rules.wakes == 1)
+
+        // Nothing new: no wake.
+        #expect(await harness.engine.cycle())
+        #expect(harness.rules.wakes == 1)
     }
 
     @Test func snoozeWakesUpBackInInbox() async throws {

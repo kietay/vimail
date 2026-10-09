@@ -1,33 +1,7 @@
 import Foundation
+import HTTPKit
 import MailCore
 import VimailLog
-
-/// Sends HTTP requests. `URLSessionTransport` in the app; tests use a scripted fake.
-public protocol HTTPTransport: Sendable {
-    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse)
-}
-
-public struct URLSessionTransport: HTTPTransport {
-    private let session: URLSession
-
-    public init() {
-        let configuration = URLSessionConfiguration.default
-        // Slow networks (plane wifi) need patience; offline is detected by URLError, not by waiting.
-        configuration.timeoutIntervalForRequest = 60
-        configuration.timeoutIntervalForResource = 900
-        configuration.httpMaximumConnectionsPerHost = 8
-        configuration.waitsForConnectivity = false
-        configuration.urlCache = nil
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        session = URLSession(configuration: configuration)
-    }
-
-    public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw ProviderError.server("No HTTP response") }
-        return (data, http)
-    }
-}
 
 /// A small Gmail REST client: bearer token, gzip, quota pacing, retries and error mapping.
 struct GmailAPI: Sendable {
@@ -99,9 +73,9 @@ struct GmailAPI: Sendable {
             let response: HTTPURLResponse
             do {
                 (data, response) = try await transport.data(for: request)
-                await pacer.leave()
+                await pacer.leave(priority: priority)
             } catch {
-                await pacer.leave()
+                await pacer.leave(priority: priority)
                 let mapped = Self.providerError(for: error)
                 if mapped.isTransient, retry == .idempotent, attempt < maxAttempts {
                     let delay = Self.backoffDelay(attempt: attempt, retryAfter: nil)
@@ -223,6 +197,7 @@ struct GmailAPI: Sendable {
             return .offline(urlError.code == .timedOut ? "The network is too slow right now" : urlError.localizedDescription)
         }
         if error is CancellationError { return .offline("Cancelled") }
+        if error is NotHTTPResponse { return .server("No HTTP response") }
         return .server(error.localizedDescription)
     }
 
@@ -255,7 +230,7 @@ struct GmailAPI: Sendable {
 ///
 /// Bulk downloads yield to everything else: an archive or a send never waits behind the background download.
 actor QuotaPacer {
-    enum Priority { case bulk, interactive }
+    typealias Priority = PrioritySlots.Priority
 
     private let maxRate: Double
     private let minRate: Double = 3
@@ -269,9 +244,7 @@ actor QuotaPacer {
     private var lastChange = ContinuousClock.now
     private let maxConcurrent: Int
     private var concurrent: Int
-    private var inFlight = 0
-    private var interactiveWaiters: [CheckedContinuation<Void, Never>] = []
-    private var bulkWaiters: [CheckedContinuation<Void, Never>] = []
+    private let slots: PrioritySlots
 
     /// - Parameters:
     ///   - unitsPerSecond: the starting rate (12 units/s is 720 a minute).
@@ -283,6 +256,7 @@ actor QuotaPacer {
         available = burst
         self.maxConcurrent = maxConcurrent
         concurrent = maxConcurrent
+        slots = PrioritySlots(limit: maxConcurrent)
     }
 
     var currentLimits: (unitsPerSecond: Double, concurrent: Int) { (unitsPerSecond, concurrent) }
@@ -294,11 +268,12 @@ actor QuotaPacer {
             try? await Task.sleep(until: pausedUntil, clock: .continuous)
         }
         let now = ContinuousClock.now
-        probe(now)
+        let raised = probe(now)
         let elapsed = now - updated
         updated = now
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
         available = min(burst, available + seconds * unitsPerSecond) - Double(cost)
+        if raised { await slots.setLimit(concurrent) }
         // Negative means reserved ahead: bulk requests wait until the bucket refills to zero.
         if available < 0, priority == .bulk {
             let wait = Int(-available / unitsPerSecond * 1000)
@@ -307,18 +282,19 @@ actor QuotaPacer {
         }
     }
 
-    /// Probes for more room while Gmail has not complained for a while.
-    private func probe(_ now: ContinuousClock.Instant) {
+    /// Probes for more room while Gmail has not complained for a while. Returns true when it raised the limits.
+    private func probe(_ now: ContinuousClock.Instant) -> Bool {
         let interval: Duration = slowStart ? .seconds(20) : .seconds(30)
-        guard now - lastChange > interval, unitsPerSecond < maxRate || concurrent < maxConcurrent else { return }
+        guard now - lastChange > interval, unitsPerSecond < maxRate || concurrent < maxConcurrent else { return false }
         unitsPerSecond = min(maxRate, slowStart ? unitsPerSecond * 1.25 : unitsPerSecond + 1)
         concurrent = min(maxConcurrent, concurrent + 1)
         lastChange = now
         GmailAPI.log.debug("Pacing: \(Int(unitsPerSecond * 60)) units/min, \(concurrent) request(s) at a time")
+        return true
     }
 
     /// Gmail answered "rate limited": pause everything until the minute window drains.
-    func rateLimited(retryAfter: TimeInterval?, reason: String) {
+    func rateLimited(retryAfter: TimeInterval?, reason: String) async {
         let now = ContinuousClock.now
         // Requests already in flight report the same limit: one pause covers them.
         if let pausedUntil, pausedUntil > now { return }
@@ -335,25 +311,15 @@ actor QuotaPacer {
         lastChange = now
         available = min(available, 0)
         GmailAPI.log.notice("Gmail rate limit (\(reason)): pausing \(Int(pause))s\(halve ? ", then \(Int(unitsPerSecond * 60)) units/min and \(concurrent) request(s) at a time" : "")")
+        if halve { await slots.setLimit(concurrent) }
     }
 
     /// Waits for a request slot. Interactive requests get the next free slot before bulk ones.
     func enter(priority: Priority = .interactive) async {
-        if inFlight < concurrent {
-            inFlight += 1
-            return
-        }
-        await withCheckedContinuation { continuation in
-            if priority == .interactive { interactiveWaiters.append(continuation) } else { bulkWaiters.append(continuation) }
-        }
+        await slots.enter(priority: priority)
     }
 
-    func leave() {
-        inFlight -= 1
-        // Fill free slots (more than one when the limit was just raised), interactive first.
-        while inFlight < concurrent, !(interactiveWaiters.isEmpty && bulkWaiters.isEmpty) {
-            inFlight += 1
-            (interactiveWaiters.isEmpty ? bulkWaiters.removeFirst() : interactiveWaiters.removeFirst()).resume()
-        }
+    func leave(priority: Priority = .interactive) async {
+        await slots.leave(priority: priority)
     }
 }

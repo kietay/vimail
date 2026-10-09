@@ -93,6 +93,25 @@ struct MailStoreTests {
         #expect(!excluded.map(\.id).contains("t1"))
     }
 
+    @Test func negatedSendersAndLabelsAndMailingLists() async throws {
+        let store = try await seededStore()
+        var newsletter = message("m5", thread: "t5", from: EmailAddress(name: "The Browser", email: "hello@thebrowser.com"), subject: "Five ideas", labels: ["INBOX"], minutesAgo: 2)
+        newsletter.listUnsubscribe = "<mailto:unsub@thebrowser.com>"
+        try await store.upsertMessages([newsletter])
+        func ids(_ search: String) async throws -> Set<String> {
+            Set(try await store.threads(ThreadQuery(scope: .anywhere).narrowed(by: .parse(search))).map(\.id))
+        }
+
+        #expect(try await ids("is:list") == ["t5"])
+        #expect(try await ids("-from:nina") == ["t1", "t3", "t5"])
+        // Like -word, a conversation goes when any of its messages is from the sender (t1 has a reply from Sam).
+        #expect(try await ids("-from:alex") == ["t2", "t5"])
+        #expect(try await ids("-from:sam") == ["t2", "t3", "t5"])
+        #expect(try await ids("-label:work") == ["t1", "t2", "t5"])
+        #expect(try await ids("is:list -from:browser").isEmpty)
+        #expect(try await ids("budget -from:nina") == ["t1"])
+    }
+
     @Test func applyAndRevertMutationCancelsPendingOutbox() async throws {
         let store = try await seededStore()
         let applied = try await store.apply(LocalMutation(deltas: [

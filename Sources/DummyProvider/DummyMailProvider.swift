@@ -209,7 +209,7 @@ public actor DummyMailProvider: MailProvider {
 
     public func profile() async throws -> AccountProfile {
         try await network()
-        return AccountProfile(email: state!.account.email, displayName: state!.account.name ?? "", historyCursor: String(state!.historyID))
+        return AccountProfile(email: state!.account.email, displayName: state!.account.name ?? "", historyCursor: String(state!.historyID), aliases: [])
     }
 
     public func labels() async throws -> [MailLabel] {

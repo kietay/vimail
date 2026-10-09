@@ -173,6 +173,9 @@ extension MailStore {
         }
         if query.starredOnly { conditions.append("t.starred = 1") }
         if query.hasAttachment == true { conditions.append("t.has_attachments = 1") }
+        if query.isList == true {
+            conditions.append("EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND m.list_unsubscribe IS NOT NULL AND m.list_unsubscribe != '')")
+        }
         if let before = query.before {
             conditions.append("t.last_date < ?")
             args.append(before)
@@ -189,8 +192,18 @@ extension MailStore {
             conditions.append("EXISTS (SELECT 1 FROM thread_labels x JOIN labels l ON l.id = x.label_id WHERE x.thread_id = t.id AND lower(l.name) = ?)")
             args.append(name.lowercased())
         }
+        for name in query.excludedLabelNames {
+            conditions.append("NOT EXISTS (SELECT 1 FROM thread_labels x JOIN labels l ON l.id = x.label_id WHERE x.thread_id = t.id AND lower(l.name) = ?)")
+            args.append(name.lowercased())
+        }
         for sender in query.senders {
             conditions.append("EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND (lower(m.from_email) LIKE ? ESCAPE '\\' OR lower(m.from_name) LIKE ? ESCAPE '\\'))")
+            args.append(likePattern(sender))
+            args.append(likePattern(sender))
+        }
+        // Like `-word`: the conversation goes when any of its messages is from the sender.
+        for sender in query.excludedSenders {
+            conditions.append("NOT EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND (lower(m.from_email) LIKE ? ESCAPE '\\' OR lower(m.from_name) LIKE ? ESCAPE '\\'))")
             args.append(likePattern(sender))
             args.append(likePattern(sender))
         }

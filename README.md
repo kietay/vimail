@@ -50,7 +50,7 @@ in your browser; vimail receives the answer on `http://127.0.0.1:<random port>` 
   `waiting for Gmail · rate limit` during a pause. An unverified project in testing measured about
   600–900 units a minute, far below the documented 15,000: check *Google Cloud Console → APIs & Services →
   Gmail API → Quotas → Queries per minute per user*. A conversation download costs 10 units.
-- **What is local.** Drafts, snoozes, saved views, local labels and processor output stay on this Mac. Drafts
+- **What is local.** Drafts, snoozes, saved views and local labels stay on this Mac. Drafts
   saved in Gmail itself (web, phone) are not shown. Search covers the cached mail.
 - **Signatures.** vimail adds the signature itself (the API does not). You can pick the one from your Gmail
   settings ("Gmail") or one of your own Markdown signatures (Settings → Compose). Settings sets the default. At the
@@ -119,8 +119,9 @@ compose panel, with your normal config. `:w` updates the preview, `:wq` returns 
 **Read state:** a conversation is marked read after it stays selected for 1 second (Settings).
 In read-filtered lists (Unread tab, unread views) it stays visible until you refresh (`^l`, switch tab/view).
 
-**Search:** `from:` `to:` `subject:` `label:` `in:inbox|sent|trash|spam|snoozed|archive|anywhere`
-`is:unread|read|starred` `has:attachment` `before:` `after:` `older_than:` `newer_than:` `"phrases"` `-exclude`.
+**Search:** `from:` `-from:` `to:` `subject:` `label:` `-label:` `in:inbox|sent|trash|spam|snoozed|archive|anywhere`
+`is:unread|read|starred|list` (`is:list`: has an unsubscribe header) `has:attachment` `before:` `after:` `older_than:`
+`newer_than:` `"phrases"` `-exclude`.
 
 ## Where state lives
 
@@ -132,7 +133,7 @@ Everything is local:
     session.json                  last mailbox/view, filter, cursor per mailbox, sidebar
     google-oauth-client.json      your Google Cloud OAuth client (mode 600)
     accounts/<account>/mail.sqlite   mail cache + full-text index, outbox, drafts, snoozes,
-                                  saved views, local labels, processor results, contacts
+                                  saved views, local labels, annotations, contacts
     accounts/<account>/drafts/    draft attachments and vim buffers
     accounts/gmail-<email>/google-credential.json   Gmail refresh token (mode 600)
     dummy/server.json             the fake Gmail server's state
@@ -142,7 +143,7 @@ Everything is local:
 ```
 
 `<account>` is `dummy` or `gmail-<email>`. Each account has its own cache, drafts and views.
-Drafts, snoozes, saved views, local labels and processor output never leave this Mac.
+Drafts, snoozes, saved views and local labels never leave this Mac.
 Only mail actions (archive, read, star, labels, send) go to the provider, through the outbox.
 Access tokens are never written to disk. The refresh token is a file only you can read; it moves to
 the Keychain once the app has a stable signing identity (ad-hoc signatures change with every build).
@@ -152,9 +153,12 @@ the Keychain once the app has a stable signing identity (ad-hoc signatures chang
 
 ```
 Sources/
-  MailCore       Models, MailProvider protocol, search parser, reply rules, MessageProcessor API
+  MailCore       Models, MailProvider protocol, search parser, reply rules, rule model and planner
   MailStore      SQLite (WAL, separate reader/writer queues), FTS5 search, outbox, local-only state
-  MailSync       MailActions (optimistic, undoable), SyncEngine (push outbox, pull changes), ProcessingCoordinator
+  MailSync       MailActions (optimistic, undoable), SyncEngine (push outbox, pull changes)
+  MailRules      Rules engine (so far its status types)
+  MailAI         Claude model catalog and prices
+  HTTPKit        HTTP transport, private files, priority slots, backoff (shared by Gmail and Claude)
   DummyProvider  Fake Gmail: labels, threads, history cursors, latency/failure simulation, incoming mail
   GmailProvider  Gmail REST API: OAuth (loopback + PKCE), threads, history, batchModify, MIME send, dry-run wrapper
   VimailKit      Vim key-sequence parser, Markdown → email HTML, fuzzy matcher
@@ -168,10 +172,9 @@ Vendor/SwiftTerm Terminal emulator for the embedded editor (MIT, trimmed, see Ve
 - **Providers.** `MailProvider` (`Sources/MailCore/MailProvider.swift`) mirrors the Gmail API: `labels`,
   `threads`, `history` cursors, `messages.batchModify`, `send` (raw MIME), attachments. `GmailProvider` and
   `DummyMailProvider` implement it; `AppServices` picks one per account. Nothing else knows which is in use.
-- **AI classifier.** Implement `MessageProcessor` (`Sources/MailCore/Processing.swift`) and register it in
-  `AppPipeline` (`Sources/Vimail/Model/AppServices.swift`). Processors run in the background on new mail
-  (and `backfill()` for existing mail), once per message and version. Effects: add/remove labels
-  (local-only by default), annotations, mark read, archive, star. `KeywordLabeler` is a working example.
+- **Rules.** A rule is a search-syntax filter, optionally a question Claude decides, and labels to add
+  (`Sources/MailCore/Rules/`). Sync wakes the rules engine only for mail that has just arrived, never for
+  the first sync or the background download of older mail.
 - **Chat.** `MailStore` already exposes what a chat agent needs as tools: full-text `threads(query)`,
   `thread(id)`, `message(id)`, `contacts`, annotations. Actions go through `MailActions` for undo and sync.
 

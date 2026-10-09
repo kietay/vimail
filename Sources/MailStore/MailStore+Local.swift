@@ -159,7 +159,7 @@ extension MailStore {
         }
     }
 
-    // MARK: - Processor results
+    // MARK: - Annotations
 
     public func annotate(messageID: String, key: String, value: String, source: String) async throws {
         try await write { db, change in
@@ -174,41 +174,6 @@ extension MailStore {
     public func annotations(messageID: String) async throws -> [String: String] {
         try await read { db in
             Dictionary(try db.query("SELECT key, value FROM annotations WHERE message_id = ?", [messageID]) { ($0.string(0), $0.string(1)) }, uniquingKeysWith: { _, last in last })
-        }
-    }
-
-    /// True when the processor already handled this message at this version (or newer).
-    public func isProcessed(messageID: String, processorID: String, version: Int) async throws -> Bool {
-        try await read { db in
-            try db.scalar("SELECT COUNT(*) FROM processing_log WHERE message_id = ? AND processor_id = ? AND version >= ?", [messageID, processorID, version]) > 0
-        }
-    }
-
-    public func markProcessed(messageID: String, processorID: String, version: Int, error: String?) async throws {
-        try await write { db, _ in
-            try db.run(
-                """
-                INSERT INTO processing_log(message_id, processor_id, version, processed_at, error) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(message_id, processor_id) DO UPDATE SET version = excluded.version, processed_at = excluded.processed_at, error = excluded.error
-                """,
-                [messageID, processorID, version, Date(), error]
-            )
-        }
-    }
-
-    /// Received messages not yet handled by a processor version, newest first.
-    public func unprocessedMessageIDs(processorID: String, version: Int, limit: Int) async throws -> [String] {
-        try await read { db in
-            try db.query(
-                """
-                SELECT m.id FROM messages m
-                WHERE m.is_local = 0
-                  AND NOT EXISTS (SELECT 1 FROM message_labels ml WHERE ml.message_id = m.id AND ml.label_id IN ('SENT', 'DRAFT'))
-                  AND NOT EXISTS (SELECT 1 FROM processing_log p WHERE p.message_id = m.id AND p.processor_id = ? AND p.version >= ?)
-                ORDER BY m.date DESC LIMIT ?
-                """,
-                [processorID, version, limit]
-            ) { $0.string(0) }
         }
     }
 }

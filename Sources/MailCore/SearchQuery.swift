@@ -2,22 +2,28 @@ import Foundation
 
 /// Gmail-style search syntax, parsed for the local full-text index.
 ///
-/// Supported: free words (prefix match), `"exact phrase"`, `-excluded`, `from:`, `to:`, `subject:`,
-/// `label:`, `in:inbox|sent|trash|spam|starred|snoozed|drafts|archive|anywhere`,
-/// `is:unread|read|starred`, `has:attachment`, `before:YYYY-MM-DD`, `after:YYYY-MM-DD`,
+/// Supported: free words (prefix match), `"exact phrase"`, `-excluded`, `from:`, `-from:`, `to:`, `subject:`,
+/// `label:`, `-label:`, `in:inbox|sent|trash|spam|starred|snoozed|drafts|archive|anywhere`,
+/// `is:unread|read|starred|list`, `has:attachment`, `before:YYYY-MM-DD`, `after:YYYY-MM-DD`,
 /// `older_than:3d|2w|1m|1y`, `newer_than:...`.
 public struct SearchQuery: Hashable, Sendable {
     public var terms: [String] = []
     public var phrases: [String] = []
     public var excluded: [String] = []
     public var from: [String] = []
+    /// `-from:` values: the sender must not match.
+    public var excludedFrom: [String] = []
     public var to: [String] = []
     public var subject: [String] = []
     public var labelNames: [String] = []
+    /// `-label:` names: the label must be absent.
+    public var excludedLabelNames: [String] = []
     public var scope: ThreadQuery.Scope?
     public var read: ReadFilter?
     public var starred: Bool?
     public var hasAttachment: Bool?
+    /// `is:list`: mailing-list mail (it has a List-Unsubscribe header).
+    public var isList: Bool?
     public var before: Date?
     public var after: Date?
 
@@ -46,6 +52,8 @@ public struct SearchQuery: Hashable, Sendable {
             guard !value.isEmpty else { continue }
             switch key {
             case "from": query.from.append(value)
+            case "-from": query.excludedFrom.append(value)
+            case "-label": query.excludedLabelNames.append(value)
             case "to", "cc": query.to.append(value)
             case "subject": query.subject.append(value)
             case "label": query.labelNames.append(value)
@@ -67,6 +75,7 @@ public struct SearchQuery: Hashable, Sendable {
                 case "unread": query.read = .unread
                 case "read": query.read = .read
                 case "starred": query.starred = true
+                case "list": query.isList = true
                 default: query.terms.append(raw)
                 }
             case "has":

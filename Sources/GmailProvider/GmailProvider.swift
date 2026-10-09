@@ -1,4 +1,5 @@
 import Foundation
+import HTTPKit
 import MailCore
 import VimailLog
 
@@ -46,10 +47,14 @@ public actor GmailProvider: MailProvider {
             name = (try? await nameFromSentMail(email: profile.emailAddress)) ?? ""
         }
         let signature = primary?.signature?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let others = aliases.map(\.sendAsEmail).filter {
+            $0.caseInsensitiveCompare(profile.emailAddress) != .orderedSame
+                && $0.caseInsensitiveCompare(primary?.sendAsEmail ?? "") != .orderedSame
+        }
         Self.log.info("Profile: \(profile.emailAddress), history \(profile.historyId), \(profile.threadsTotal ?? 0) conversations on Gmail, \(aliases.count) send-as address(es), name \(name.isEmpty ? "unknown" : "found"), signature \(signature?.isEmpty == false ? "yes" : "no")")
         return AccountProfile(
             email: profile.emailAddress, displayName: name, historyCursor: profile.historyId,
-            signatureHTML: signature?.isEmpty == false ? signature : nil
+            signatureHTML: signature?.isEmpty == false ? signature : nil, aliases: others
         )
     }
 

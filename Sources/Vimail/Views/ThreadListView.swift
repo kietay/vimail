@@ -245,7 +245,7 @@ private struct SearchField: View {
         .onChange(of: focused) { _, isFocused in
             if isFocused { model.focusTarget = .search } else if model.focusTarget == .search { model.focusTarget = nil }
         }
-        .help("Gmail syntax: from: to: subject: label: in: is:unread has:attachment before: after:")
+        .help("Gmail syntax: from: -from: to: subject: label: -label: in: is:unread is:list has:attachment before: after:")
     }
 }
 

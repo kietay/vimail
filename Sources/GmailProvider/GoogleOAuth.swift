@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import HTTPKit
 import MailCore
 import VimailLog
 

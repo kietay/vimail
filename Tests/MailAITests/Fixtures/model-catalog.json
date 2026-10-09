@@ -1,0 +1,22 @@
+{
+  "comment": "List prices in dollars per million tokens (prompts up to 100K tokens), checked 2026-10-09. runOf1000 is the design's cost of judging 1,000 emails in one run: a 1,200-token cached prefix written once (5-minute TTL) and read 999 times, 1,500 uncached input and 320 output tokens per email.",
+  "pricesAsOf": "2026-10-09",
+  "default": "claude-haiku-5-5",
+  "models": [
+    {
+      "id": "claude-haiku-5-5", "name": "Haiku 5.5",
+      "input": 0.10, "cacheWrite5m": 0.125, "cacheWrite1h": 0.20, "cacheRead": 0.01, "output": 0.50,
+      "maxTokens": 2048, "fallbacks": false, "runOf1000": 0.32
+    },
+    {
+      "id": "claude-sonnet-5-5", "name": "Sonnet 5.5",
+      "input": 2, "cacheWrite5m": 2.50, "cacheWrite1h": 4, "cacheRead": 0.10, "output": 10,
+      "maxTokens": 4096, "fallbacks": true, "runOf1000": 6.32
+    },
+    {
+      "id": "claude-opus-5-5", "name": "Opus 5.5",
+      "input": 4, "cacheWrite5m": 5, "cacheWrite1h": 8, "cacheRead": 0.20, "output": 20,
+      "maxTokens": 4096, "fallbacks": true, "runOf1000": 12.65
+    }
+  ]
+}

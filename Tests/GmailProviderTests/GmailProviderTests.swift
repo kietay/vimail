@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import GmailProvider
+import HTTPKit
 @testable import MailCore
 
 /// A scripted HTTP server. Records every request; `route` answers them.
@@ -255,6 +256,27 @@ struct ProviderTests {
         let call = try #require(transport.apiCalls.first)
         #expect(call.path == "/gmail/v1/users/me/threads")
         #expect(call.query["labelIds"] == "INBOX" && call.query["pageToken"] == "p1" && call.query["maxResults"] == "25")
+    }
+
+    @Test func profileListsSendAsAliasesWithoutThePrimaryAddress() async throws {
+        let transport = FakeTransport { call in
+            switch call.path {
+            case "/gmail/v1/users/me/profile":
+                return (200, #"{"emailAddress":"me@example.com","historyId":"42"}"#)
+            case "/gmail/v1/users/me/settings/sendAs":
+                return (200, json(["sendAs": [
+                    ["sendAsEmail": "Me@Example.com", "displayName": "Sam Carter", "isPrimary": true],
+                    ["sendAsEmail": "sam@studio.co", "displayName": "Sam Carter"],
+                    ["sendAsEmail": "hello@studio.co"],
+                ]]))
+            default:
+                return (404, #"{"error":{"code":404,"message":"Not Found"}}"#)
+            }
+        }
+        let profile = try await makeProvider(transport).profile()
+        #expect(profile.email == "me@example.com")
+        #expect(profile.displayName == "Sam Carter")
+        #expect(profile.aliases == ["sam@studio.co", "hello@studio.co"])
     }
 
     @Test func fetchesThreadsAndBodiesSentByReference() async throws {

@@ -29,7 +29,7 @@ public struct MailLabel: Identifiable, Hashable, Codable, Sendable {
         case system
         /// Labels that exist on the provider and sync both ways.
         case user
-        /// Labels that only exist in this app's local database (for example classifier output).
+        /// Labels that only exist in this app's local database (for example labels a rule creates).
         /// They are never sent to the provider.
         case local
     }

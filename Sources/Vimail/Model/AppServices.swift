@@ -6,18 +6,6 @@ import MailStore
 import MailSync
 import VimailLog
 
-/// The incoming-mail processor pipeline. Empty in the first, non-AI version.
-///
-/// To add the AI classifier, implement `MessageProcessor` and register it here, for example
-/// `ProcessingPipeline([ClassifierProcessor(model: ...)])`. Its effects (labels, annotations,
-/// archive, ...) are applied through `MailActions`, stored locally, and labels default to
-/// local-only so classification never touches Gmail unless a processor asks for `.synced`.
-enum AppPipeline {
-    static func make() -> ProcessingPipeline {
-        ProcessingPipeline([])
-    }
-}
-
 /// Wires the local store, the provider and the sync engine for one account.
 @MainActor
 final class AppServices {
@@ -27,7 +15,6 @@ final class AppServices {
     let dummy: DummyMailProvider?
     let engine: SyncEngine
     let actions: MailActions
-    let processing: ProcessingCoordinator
     /// Debug builds with Gmail: where changes and sends are logged instead of reaching Gmail.
     let dryRunDirectory: URL?
 
@@ -70,13 +57,12 @@ final class AppServices {
         )
         self.engine = engine
         actions = MailActions(store: store, outboxChanged: { engine.wake() })
-        processing = ProcessingCoordinator(pipeline: AppPipeline.make(), store: store, actions: actions)
     }
 
     var isGmail: Bool { dummy == nil }
 
     func start() async {
-        await engine.attach(actions: actions, processing: processing)
+        await engine.attach(actions: actions, rules: nil)
         await engine.start()
         await dummy?.startSimulation()
     }

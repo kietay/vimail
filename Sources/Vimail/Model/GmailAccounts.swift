@@ -1,5 +1,6 @@
 import AppKit
 import GmailProvider
+import HTTPKit
 import MailCore
 import UniformTypeIdentifiers
 import VimailLog
@@ -29,7 +30,7 @@ enum GmailAccounts {
     // MARK: - OAuth client
 
     static func loadClient() -> GoogleOAuthClient? {
-        guard let data = try? Data(contentsOf: AppPaths.googleClient) else { return nil }
+        guard let data = PrivateFile.read(AppPaths.googleClient) else { return nil }
         return try? GoogleOAuthClient(clientSecretJSON: data)
     }
 
@@ -43,7 +44,7 @@ enum GmailAccounts {
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
         let data = try Data(contentsOf: url)
         let client = try GoogleOAuthClient(clientSecretJSON: data)
-        try writePrivately(data, to: AppPaths.googleClient)
+        try PrivateFile.write(data, to: AppPaths.googleClient)
         log.info("Saved the OAuth client (\(client.clientID.prefix(12))…)")
         return client
     }
@@ -51,14 +52,14 @@ enum GmailAccounts {
     // MARK: - Credentials
 
     static func credential(email: String) -> GoogleCredential? {
-        guard !email.isEmpty, let data = try? Data(contentsOf: AppPaths.googleCredential(account: accountKey(email: email))) else { return nil }
+        guard !email.isEmpty, let data = PrivateFile.read(AppPaths.googleCredential(account: accountKey(email: email))) else { return nil }
         return try? JSONDecoder().decode(GoogleCredential.self, from: data)
     }
 
     static func save(_ credential: GoogleCredential) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try writePrivately(try encoder.encode(credential), to: AppPaths.googleCredential(account: accountKey(email: credential.email)))
+        try PrivateFile.write(try encoder.encode(credential), to: AppPaths.googleCredential(account: accountKey(email: credential.email)))
     }
 
     /// Forgets the account's access. The mail cache and local drafts stay.
@@ -119,20 +120,5 @@ enum GmailAccounts {
         log.info("Step 4/4: signed in as \(credential.email) in \(clock.text). Credential saved")
         NSApp.activate()
         return credential
-    }
-
-    /// Writes a secret file that only the current user can read.
-    private static func writePrivately(_ data: Data, to url: URL) throws {
-        let manager = FileManager.default
-        try manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let temporary = url.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).tmp")
-        guard manager.createFile(atPath: temporary.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-        if manager.fileExists(atPath: url.path) {
-            _ = try manager.replaceItemAt(url, withItemAt: temporary)
-        } else {
-            try manager.moveItem(at: temporary, to: url)
-        }
     }
 }

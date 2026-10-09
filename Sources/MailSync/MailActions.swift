@@ -89,28 +89,6 @@ public final class MailActions: Sendable {
         outboxChanged()
     }
 
-    /// Label changes on individual messages (used by message processors).
-    public func modify(messageIDs: [String], add: Set<String>, remove: Set<String>) async throws {
-        let localLabels = Set(try await store.labels().filter { $0.kind == .local }.map(\.id))
-        let states = try await store.messageLabels(inThreads: try await threadIDs(of: messageIDs))
-        let local = Set(states.filter(\.isLocal).map(\.messageID))
-        var mutation = LocalMutation()
-        let remoteIDs = messageIDs.filter { !local.contains($0) }
-        mutation.deltas.append(PlannedDelta(LabelDelta(messageIDs: remoteIDs, add: add.subtracting(localLabels), remove: remove.subtracting(localLabels)), syncs: true))
-        mutation.deltas.append(PlannedDelta(LabelDelta(messageIDs: messageIDs, add: add.intersection(localLabels), remove: remove.intersection(localLabels)), syncs: false))
-        guard !mutation.isEmpty else { return }
-        _ = try await store.apply(mutation)
-        outboxChanged()
-    }
-
-    private func threadIDs(of messageIDs: [String]) async throws -> [String] {
-        var result: [String] = []
-        for id in messageIDs {
-            if let message = try await store.message(id: id), !result.contains(message.threadID) { result.append(message.threadID) }
-        }
-        return result
-    }
-
     /// Finds a label by name (case-insensitive) or creates it.
     public func ensureLabel(named name: String, kind: MailLabel.Kind) async throws -> MailLabel {
         let trimmed = name.trimmingCharacters(in: .whitespaces)

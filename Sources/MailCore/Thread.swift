@@ -49,7 +49,7 @@ public struct MailThread: Identifiable, Hashable, Sendable {
     public var messages: [MailMessage]
     public var labelIDs: Set<String>
     public var snoozedUntil: Date?
-    /// Local annotations from message processors, keyed by message ID then annotation key.
+    /// Local annotations, keyed by message ID then annotation key.
     public var annotations: [String: [String: String]]
 
     public init(id: String, subject: String, messages: [MailMessage], labelIDs: Set<String>, snoozedUntil: Date? = nil, annotations: [String: [String: String]] = [:]) {

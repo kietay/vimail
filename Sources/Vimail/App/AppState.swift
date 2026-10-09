@@ -7,7 +7,7 @@ import MailCore
 ///         settings.json            preferences
 ///         session.json             window/session state (mailbox, cursors, sidebar)
 ///         google-oauth-client.json the Google Cloud OAuth client (Gmail only, mode 600)
-///         accounts/<key>/mail.sqlite   mail cache, outbox, drafts, snoozes, views, processor results
+///         accounts/<key>/mail.sqlite   mail cache, outbox, drafts, snoozes, views, annotations
 ///         accounts/<key>/drafts/   draft attachments and vim editing buffers
 ///         accounts/gmail-<email>/google-credential.json   the Gmail refresh token (mode 600)
 ///         dummy/                   the fake Gmail server (dummy data mode only)

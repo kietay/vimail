@@ -57,6 +57,20 @@ struct SearchQueryTests {
     @Test func unknownOperatorsAreText() {
         #expect(SearchQuery.parse("re:hello").terms == ["re:hello"])
     }
+
+    @Test func negatedFromAndLabelAndIsList() {
+        let query = SearchQuery.parse("-from:linear -label:work is:list -other")
+        #expect(query.excludedFrom == ["linear"])
+        #expect(query.excludedLabelNames == ["work"])
+        #expect(query.isList == true)
+        #expect(query.excluded == ["other"])
+        #expect(query.terms.isEmpty && query.from.isEmpty)
+        // Other negated operators stay text, as before.
+        #expect(SearchQuery.parse("-subject:x").terms == ["-subject:x"])
+
+        let narrowed = ThreadQuery(scope: .anywhere).narrowed(by: query)
+        #expect(narrowed.excludedSenders == ["linear"] && narrowed.excludedLabelNames == ["work"] && narrowed.isList == true)
+    }
 }
 
 @Suite("Replies")

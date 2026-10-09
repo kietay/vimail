@@ -46,7 +46,7 @@ public actor SyncEngine {
     private let statusContinuation: AsyncStream<Status>.Continuation
     private let eventContinuation: AsyncStream<Event>.Continuation
 
-    private var processing: ProcessingCoordinator?
+    private var rules: (any RuleWaking)?
     private var actions: MailActions?
     private var pollInterval: Duration
     private let initialSyncLimit: Int
@@ -78,9 +78,10 @@ public actor SyncEngine {
         (events, eventContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(32))
     }
 
-    public func attach(actions: MailActions, processing: ProcessingCoordinator?) {
+    /// - Parameter rules: woken after newly arrived mail is stored, or nil when no rules run.
+    public func attach(actions: MailActions, rules: (any RuleWaking)?) {
         self.actions = actions
-        self.processing = processing
+        self.rules = rules
     }
 
     public func setPollInterval(_ interval: Duration) {
@@ -320,7 +321,6 @@ public actor SyncEngine {
         try await store.setMeta("initial_sync_done", "1")
         try await store.setMeta("initial_cursor", nil)
         Self.log.info("Initial sync done: \(fetched) inbox conversations in \(clock.text)")
-        if let processing { await processing.backfill() }
     }
 
     /// Caches one page of older conversations (all mail, newest first). Returns true while more remain.
@@ -341,7 +341,6 @@ public actor SyncEngine {
             page = try await provider.listThreadIDs(labelID: nil, pageToken: nil, pageSize: 100)
         }
         let inserted = try await download(page.ids, skipExisting: !resync)
-        if let processing, !inserted.isEmpty { await processing.enqueue(inserted) }
         count += page.ids.count
         Self.log.info("Background download: \(count) of \(initialSyncLimit) newest conversations checked, \(inserted.count) new messages stored, page took \(clock.text)")
 
@@ -424,6 +423,8 @@ public actor SyncEngine {
         try await store.setMeta("cursor", changes.cursor)
 
         guard !inserted.isEmpty else { return }
+        // Conversations fetched only as context for a reply did not arrive now, so they do not wake rules.
+        if inserted.contains(where: arrived.contains) { rules?.wake() }
         let me = store.selfAddresses
         let insertedSet = Set(inserted)
         let incoming = changes.upserted
@@ -433,7 +434,6 @@ public actor SyncEngine {
             Self.log.info("\(incoming.count) new message(s) in the inbox")
             eventContinuation.yield(.newMail(messageIDs: incoming))
         }
-        if let processing { await processing.enqueue(inserted) }
     }
 
     // MARK: - Push

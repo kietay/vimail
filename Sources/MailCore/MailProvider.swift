@@ -7,12 +7,15 @@ public struct AccountProfile: Hashable, Codable, Sendable {
     public var historyCursor: String
     /// The account's own signature (Gmail settings), as HTML.
     public var signatureHTML: String?
+    /// Other addresses the account sends as (Gmail "Send mail as"), without `email`.
+    public var aliases: [String]
 
-    public init(email: String, displayName: String, historyCursor: String, signatureHTML: String? = nil) {
+    public init(email: String, displayName: String, historyCursor: String, signatureHTML: String? = nil, aliases: [String] = []) {
         self.email = email
         self.displayName = displayName
         self.historyCursor = historyCursor
         self.signatureHTML = signatureHTML
+        self.aliases = aliases
     }
 
     public var address: EmailAddress { EmailAddress(name: displayName, email: email) }
