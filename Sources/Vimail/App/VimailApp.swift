@@ -100,6 +100,7 @@ struct AppCommands: Commands {
             Button("Star / Unstar") { model.toggleStar() }
             Button("Mark Read / Unread") { model.toggleRead() }
             Button("Snooze…") { model.openPicker(.snooze) }
+            Button("Quick Snooze") { model.quickSnooze() }
             Button("Label…") { model.openPicker(.label) }
             Button("Move to…") { model.openPicker(.move) }
         }

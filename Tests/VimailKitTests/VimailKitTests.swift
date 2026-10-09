@@ -15,6 +15,8 @@ struct KeymapTests {
         #expect(run([.char("e")]) == [.command(.archive, count: 1)])
         #expect(run([.char("G")]) == [.command(.bottom, count: 1)])
         #expect(run([.char("#")]) == [.command(.trash, count: 1)])
+        // No sequence starts with b, so it never waits for a second key.
+        #expect(run([.char("b")]) == [.command(.quickSnooze, count: 1)])
     }
 
     @Test func sequencesAndCounts() {

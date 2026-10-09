@@ -18,7 +18,8 @@ struct ReaderPayload: Encodable {
         var time: String
         var dateLong: String
         var snippet: String
-        var unread: Bool
+        /// Unread when the reader first showed it. Stays set after the conversation is marked read.
+        var isNew: Bool
         var expanded: Bool
         var focus: Bool
         /// "text", "html" (simple, rendered in theme colors) or "rich" (sandboxed iframe on a light card).
@@ -31,6 +32,8 @@ struct ReaderPayload: Encodable {
 
     var dark = true
     var emptyText: String?
+    /// A render of the conversation already on screen keeps what is expanded, focused and scrolled to.
+    var threadID: String?
     var subject = ""
     var labels: [LabelChip] = []
     var position = ""
@@ -39,7 +42,6 @@ struct ReaderPayload: Encodable {
     var canReplyAll = false
     var allowRemote = false
     var showHints = false
-    var preserveScroll: Double?
     var menu: [MenuItem] = []
     var messages: [Message] = []
 
@@ -136,11 +138,6 @@ final class ReaderController: NSObject, WKNavigationDelegate, WKUIDelegate {
     func toggleFocusedMessage() { run("vimail.toggleFocused()") }
     func expandAll() { run("vimail.expandAll()") }
     func closeMenu() { run("vimail.closeMenu()") }
-
-    func scrollPosition() async -> Double {
-        guard ready else { return 0 }
-        return (try? await webView.evaluateJavaScript("vimail.scrollPosition()") as? Double) ?? 0
-    }
 
     // MARK: - Navigation: open links outside the app
 

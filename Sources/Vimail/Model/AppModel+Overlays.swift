@@ -98,6 +98,7 @@ extension AppModel {
         let starred = current?.isStarred ?? false
         let unread = current?.isUnread ?? false
         let inTrash = currentMailbox == .trash
+        let quickSnoozeDate = SnoozeTimes.parseFuture(settings.quickSnooze)
         items += [
             OmniItem(id: "reply", title: "Reply to selected message", group: "Message actions", icon: .reply, shortcut: "r", disabled: !hasCursor) { self.reply(all: false) },
             OmniItem(id: "reply-all", title: "Reply all to selected message", group: "Message actions", icon: .reply, shortcut: "a", disabled: !hasCursor) { self.reply(all: true) },
@@ -112,6 +113,9 @@ extension AppModel {
                      keywords: "favorite important bookmark", shortcut: "s", disabled: !hasCursor) { self.toggleStar() },
             OmniItem(id: "snooze", title: "Snooze selected message…", group: "Message actions", icon: .clock, keywords: "remind later reminder", shortcut: "z",
                      disabled: !hasCursor) { self.openPicker(.snooze) },
+            OmniItem(id: "quick-snooze", title: quickSnoozeDate.map { "Snooze selected message until \(Formatting.snoozeDate($0))" } ?? "Quick snooze selected message",
+                     group: "Message actions", icon: .clock, keywords: "quick snooze remind later reminder", shortcut: "b",
+                     disabled: !hasCursor) { self.quickSnooze() },
             OmniItem(id: "remind-tomorrow", title: "Remind me tomorrow", group: "Message actions", icon: .clock, keywords: "snooze later reminder",
                      disabled: !hasCursor) {
                 if let tomorrow = SnoozeTimes.presets().first(where: { $0.key == "t" }) { self.perform(.snooze(until: tomorrow.date)) }
@@ -262,9 +266,9 @@ extension AppModel {
 
     var userLabels: [MailLabel] { labels.filter { $0.kind != .system } }
 
-    func openPicker(_ kind: PickerKind) {
+    func openPicker(_ kind: PickerKind, on ids: [String]? = nil) {
         if kind != .goToLabel {
-            pickerTargets = actionTargets.filter { !$0.hasPrefix("draft:") }
+            pickerTargets = (ids ?? actionTargets).filter { !$0.hasPrefix("draft:") }
             guard !pickerTargets.isEmpty else {
                 showToast("Select a conversation first.")
                 return
@@ -384,7 +388,7 @@ extension AppModel {
         ]),
         ("Act", [
             ("e", "Archive"), ("# / dd", "Move to trash"), ("s", "Toggle star"), ("U / I", "Mark unread / read"),
-            ("t", "Label"), ("m", "Move to"), ("z", "Snooze"), ("!", "Report spam"), ("u / ^r", "Undo / redo"), (".", "Repeat last action"),
+            ("t", "Label"), ("m", "Move to"), ("z", "Snooze"), ("b", "Quick snooze (time in Settings)"), ("!", "Report spam"), ("u / ^r", "Undo / redo"), (".", "Repeat last action"),
         ]),
         ("Select", [("v", "Visual mode (range)"), ("x", "Toggle one"), ("*a / *n", "Select all / none"), ("esc", "Clear selection")]),
         ("Write", [("c", "Compose"), ("r / a / f", "Reply / reply all / forward"), ("^g", "Edit the body in your editor"), ("⌘↵", "Send"), ("esc", "Vim keys, then compose keys, then close")]),

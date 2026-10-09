@@ -58,7 +58,9 @@ extension MailStore {
 
             var previous: [String: Date?] = [:]
             for (threadID, until) in mutation.snoozes {
-                previous[threadID] = try db.first("SELECT until FROM snoozes WHERE thread_id = ?", [threadID]) { $0.date(0) }
+                // updateValue keeps "not snoozed before" as a nil entry, so undo removes the snooze.
+                // `previous[threadID] = …` would infer Date?? and drop the key instead.
+                previous.updateValue(try db.first("SELECT until FROM snoozes WHERE thread_id = ?", [threadID]) { $0.date(0) }, forKey: threadID)
                 try Self.setSnooze(threadID, until: until, db)
                 change.threadIDs.insert(threadID)
                 change.snoozes = true

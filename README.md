@@ -92,6 +92,7 @@ Vim-first. `?` shows everything in the app. The essentials:
 | `n` `p` · `J` `K` · `space` | Next/previous message in thread · next/previous conversation from the reader · page down |
 | `e` `#`/`dd` `!` `s` `U` `I` | Archive, trash, spam, star, unread, read |
 | `t` `m` `z` | Label, move, snooze (pickers; snooze takes `2h`, `3d`, `tomorrow 9am`, `mon`) |
+| `b` | Quick snooze: no picker, until the time in Settings (default `tomorrow`, 8:00) |
 | `v` `x` `*a` `*n` | Visual range, toggle one, select all/none |
 | `u` `^r` `.` | Undo, redo, repeat last action |
 | `c` `r` `a` `f` | Compose, reply, reply all, forward |
@@ -193,3 +194,6 @@ VIMAIL_SCRIPT='activate wait:1500 gi j j / type:coffee <CR> e' build/app.noindex
 ```
 
 `activate` brings the window to the front; `hide` hides the app (to test background behaviour).
+`snapshot:name` saves the reader as `snapshots/name.png` in the data folder, and `name.json` with
+which messages are expanded, focused and on screen. It needs no screen-recording permission and works
+with the window in the background. Set `VIMAIL_HOME` to a scratch folder to test on fresh dummy data.

@@ -202,6 +202,17 @@ extension AppModel {
         perform(.snooze(until: date), on: pickerTargets.isEmpty ? nil : pickerTargets)
     }
 
+    /// b: snoozes without the picker, until the time in Settings. When that text is not a
+    /// future time ("tonight" after 8 pm, a typo), the picker opens so the snooze still happens.
+    func quickSnooze(on ids: [String]? = nil) {
+        guard let date = SnoozeTimes.parseFuture(settings.quickSnooze) else {
+            showToast("Quick snooze needs a future time. Pick one, or change it in Settings.")
+            openPicker(.snooze, on: ids)
+            return
+        }
+        perform(.snooze(until: date), on: ids)
+    }
+
     func toggleLabel(_ label: MailLabel, on targets: [String]) {
         let all = targets.allSatisfy { id in threads.first { $0.id == id }?.labelIDs.contains(label.id) ?? false }
         perform(all ? .removeLabel(label.id) : .addLabel(label.id), on: targets, labelName: label.name)
@@ -319,6 +330,7 @@ extension AppModel {
         case "trash": trash()
         case "star": toggleStar()
         case "snooze": openPicker(.snooze)
+        case "quickSnooze": quickSnooze()
         case "toggleRead": toggleRead()
         case "label": openPicker(.label)
         case "move": openPicker(.move)

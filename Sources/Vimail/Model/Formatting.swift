@@ -118,6 +118,13 @@ enum SnoozeTimes {
         return nil
     }
 
+    /// `parse`, but only a time that is still ahead. Quick snooze text is typed once and used
+    /// much later, when "tonight" or "today 5pm" may have passed.
+    static func parseFuture(_ text: String, now: Date = Date()) -> Date? {
+        guard let date = parse(text, now: now), date > now else { return nil }
+        return date
+    }
+
     private static func withTime(_ day: Date, _ word: String?, defaultHour: Int) -> Date? {
         let time = word.flatMap(parseTime) ?? (defaultHour, 0)
         return Calendar.current.date(bySettingHour: time.hour, minute: time.minute, second: 0, of: day)

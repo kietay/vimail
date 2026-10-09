@@ -6,6 +6,11 @@ struct ThreadListView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.theme) private var theme
     @State private var footerHover = false
+    @AppStorage("threadListWidth") private var width: Double = ThreadListView.defaultWidth
+    @State private var dragStartWidth: Double?
+
+    static let defaultWidth: Double = 370
+    static let widthRange: ClosedRange<Double> = 300...760
 
     var body: some View {
         VStack(spacing: 0) {
@@ -13,9 +18,29 @@ struct ThreadListView: View {
             list
             footer
         }
-        .frame(width: 370)
+        .frame(width: width)
         .background(theme.list.opacity(0.8))
         .overlay(alignment: .trailing) { Rectangle().fill(theme.border.opacity(0.6)).frame(width: 1) }
+        .overlay(alignment: .trailing) { resizeHandle }
+    }
+
+    /// Invisible strip over the trailing border: drag to resize, double-click to reset.
+    private var resizeHandle: some View {
+        Color.clear
+            .frame(width: 8)
+            .contentShape(Rectangle())
+            .offset(x: 4)
+            .pointerStyle(.columnResize)
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        let start = dragStartWidth ?? width
+                        dragStartWidth = start
+                        width = min(max(start + value.translation.width, Self.widthRange.lowerBound), Self.widthRange.upperBound)
+                    }
+                    .onEnded { _ in dragStartWidth = nil }
+            )
+            .onTapGesture(count: 2) { width = Self.defaultWidth }
     }
 
     // MARK: Header (px-5 pt-6 pb-4)
@@ -163,6 +188,7 @@ struct ThreadListView: View {
         Button("Label…") { model.cursorID = thread.id; model.openPicker(.label) }
         Button("Move to…") { model.cursorID = thread.id; model.openPicker(.move) }
         Button("Snooze…") { model.cursorID = thread.id; model.openPicker(.snooze) }
+        Button("Quick Snooze") { model.quickSnooze(on: targets) }
         Divider()
         Button("Report Spam") { model.perform(.spam, on: targets) }
     }

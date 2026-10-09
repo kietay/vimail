@@ -70,7 +70,7 @@ public enum KeyCommand: Hashable, Sendable {
     case readerPageDown, readerPageUp
     case visual, toggleSelection, selectAll, clearSelection
     case archive, trash, spam, toggleStar, markUnread, markRead
-    case label, move, snooze, undo, redo, repeatLast
+    case label, move, snooze, quickSnooze, undo, redo, repeatLast
     case compose, reply, replyAll, forward
     case go(GoTarget), goLabel, manageViews, nextView, previousView
     case search, omnibox, help, sync, toggleSidebar, openAttachments
@@ -96,7 +96,7 @@ public enum Keymap {
         ("v", .visual), ("V", .visual), ("x", .toggleSelection), ("*a", .selectAll), ("*n", .clearSelection),
         // Actions
         ("e", .archive), ("#", .trash), ("dd", .trash), ("!", .spam), ("s", .toggleStar),
-        ("U", .markUnread), ("I", .markRead), ("t", .label), ("m", .move), ("z", .snooze),
+        ("U", .markUnread), ("I", .markRead), ("t", .label), ("m", .move), ("z", .snooze), ("b", .quickSnooze),
         ("u", .undo), ("<C-r>", .redo), (".", .repeatLast),
         // Writing
         ("c", .compose), ("r", .reply), ("a", .replyAll), ("f", .forward),
