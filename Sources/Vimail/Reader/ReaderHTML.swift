@@ -147,6 +147,7 @@ enum ReaderHTML {
         folder: '<path d="M3 6h6l2 2h10v11H3Z"/>',
         spam: '<path d="M12 3 21 19H3Z M12 10v4 M12 17v.5"/>',
         inbox: '<path d="M4 4h16l2 10v6H2v-6L4 4Z"/><path d="M2 14h6l2 3h4l2-3h6"/>',
+        unsubscribe: '<path d="M21 12V5H3v14h9"/><path d="m3 6 9 7 9-7"/><path d="M15 18h6"/>',
       };
       const icon = (name, size) => `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24" stroke-width="1.5">${icons[name] || icons.file}</svg>`;
       const esc = (text) => String(text ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

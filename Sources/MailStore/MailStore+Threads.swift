@@ -286,16 +286,19 @@ extension MailStore {
             attachments: try decoder.decode([MailAttachment].self, from: Data(row.string(13).utf8)),
             messageIDHeader: row.optionalString(14), inReplyTo: row.optionalString(15),
             references: try decoder.decode([String].self, from: Data(row.string(16).utf8)),
-            listUnsubscribe: row.optionalString(17), sizeEstimate: row.int(18)
+            listUnsubscribe: row.optionalString(17), oneClickUnsubscribe: row.isNull(19) ? nil : row.bool(19),
+            sizeEstimate: row.int(18)
         )
     }
 
+    /// The message's labels come last, at `labelsColumn`.
     static let messageColumns = """
         m.id, m.thread_id, m.date, m.from_name, m.from_email, m.to_json, m.cc_json, m.bcc_json, m.reply_to_json,
         m.subject, m.snippet, m.text_body, m.html_body, m.attachments_json, m.message_id_header, m.in_reply_to,
-        m.references_json, m.list_unsubscribe, m.size,
+        m.references_json, m.list_unsubscribe, m.size, m.one_click_unsubscribe,
         (SELECT group_concat(label_id, ' ') FROM message_labels WHERE message_id = m.id)
         """
+    static let labelsColumn: Int32 = 20
 
     public func thread(id: String) async throws -> MailThread? {
         try await read { db in try Self.thread(id: id, db) }
@@ -303,7 +306,7 @@ extension MailStore {
 
     static func thread(id: String, _ db: SQLiteDatabase) throws -> MailThread? {
         let messages = try db.query("SELECT \(messageColumns) FROM messages m WHERE m.thread_id = ? ORDER BY m.date", [id]) { row in
-            try decodeMessage(row, labels: Set(row.string(19).split(separator: " ").map(String.init)))
+            try decodeMessage(row, labels: Set(row.string(labelsColumn).split(separator: " ").map(String.init)))
         }
         guard !messages.isEmpty else { return nil }
         let snoozed = try db.first("SELECT until FROM snoozes WHERE thread_id = ?", [id]) { $0.date(0) }
@@ -325,7 +328,7 @@ extension MailStore {
     public func message(id: String) async throws -> MailMessage? {
         try await read { db in
             try db.first("SELECT \(Self.messageColumns) FROM messages m WHERE m.id = ?", [id]) { row in
-                try Self.decodeMessage(row, labels: Set(row.string(19).split(separator: " ").map(String.init)))
+                try Self.decodeMessage(row, labels: Set(row.string(Self.labelsColumn).split(separator: " ").map(String.init)))
             }
         }
     }

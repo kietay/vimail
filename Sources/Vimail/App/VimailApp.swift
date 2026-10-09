@@ -103,6 +103,9 @@ struct AppCommands: Commands {
             Button("Quick Snooze") { model.quickSnooze() }
             Button("Label…") { model.openPicker(.label) }
             Button("Move to…") { model.openPicker(.move) }
+            Divider()
+            // In normal mode the keymap takes ⌘U first; this also covers the search field.
+            Button("Unsubscribe") { model.unsubscribe() }.keyboardShortcut("u", modifiers: .command)
         }
         CommandGroup(after: .sidebar) {
             Button("Toggle Sidebar") { model.session.sidebarCollapsed.toggle() }.keyboardShortcut("s", modifiers: [.command, .control])

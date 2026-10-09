@@ -144,10 +144,14 @@ enum DummyContent {
     struct Service {
         var address: EmailAddress
         var labels: Set<String>
+        /// The `List-Unsubscribe` header of its mail, and whether it is RFC 8058 one-click.
+        var listUnsubscribe: String?
+        var oneClickUnsubscribe = false
     }
 
     static let linear = Service(address: EmailAddress(name: "Linear", email: "notifications@linear.app"), labels: [updates, SystemLabel.categoryUpdates])
-    static let github = Service(address: EmailAddress(name: "GitHub", email: "notifications@github.com"), labels: [updates, SystemLabel.categoryUpdates])
+    static let github = Service(address: EmailAddress(name: "GitHub", email: "notifications@github.com"), labels: [updates, SystemLabel.categoryUpdates],
+                                listUnsubscribe: "<mailto:unsub@reply.github.example>, <https://github.example/notifications/unsubscribe?u=sam>", oneClickUnsubscribe: true)
     static let vercel = Service(address: EmailAddress(name: "Vercel", email: "notifications@vercel.com"), labels: [updates, SystemLabel.categoryUpdates])
     static let figma = Service(address: EmailAddress(name: "Figma", email: "comments-noreply@figma.com"), labels: [updates, SystemLabel.categoryUpdates])
     static let notion = Service(address: EmailAddress(name: "Notion", email: "notify@mail.notion.so"), labels: [updates, SystemLabel.categoryUpdates])
@@ -155,9 +159,13 @@ enum DummyContent {
     static let calendar = Service(address: EmailAddress(name: "Google Calendar", email: "calendar-notification@google.com"), labels: [work, SystemLabel.categoryPersonal])
     static let stripe = Service(address: EmailAddress(name: "Stripe", email: "receipts@stripe.com"), labels: [receipts, SystemLabel.categoryUpdates])
     static let airline = Service(address: EmailAddress(name: "Northwind Air", email: "itinerary@northwindair.com"), labels: [travel, SystemLabel.categoryUpdates])
-    static let theBrowser = Service(address: EmailAddress(name: "The Browser", email: "hello@thebrowser.com"), labels: [reading, SystemLabel.categoryPromotions])
-    static let arena = Service(address: EmailAddress(name: "Are.na", email: "hello@are.na"), labels: [reading, SystemLabel.categoryUpdates])
-    static let margins = Service(address: EmailAddress(name: "Margins Weekly", email: "letters@marginsweekly.com"), labels: [reading, SystemLabel.categoryPromotions])
+    // One newsletter per way to unsubscribe: one-click, email only, web page only.
+    static let theBrowser = Service(address: EmailAddress(name: "The Browser", email: "hello@thebrowser.com"), labels: [reading, SystemLabel.categoryPromotions],
+                                    listUnsubscribe: "<https://thebrowser.example/unsubscribe?u=sam>, <mailto:unsubscribe@thebrowser.example?subject=unsubscribe>", oneClickUnsubscribe: true)
+    static let arena = Service(address: EmailAddress(name: "Are.na", email: "hello@are.na"), labels: [reading, SystemLabel.categoryUpdates],
+                               listUnsubscribe: "<mailto:leave@are.na.example>")
+    static let margins = Service(address: EmailAddress(name: "Margins Weekly", email: "letters@marginsweekly.com"), labels: [reading, SystemLabel.categoryPromotions],
+                                 listUnsubscribe: "<https://marginsweekly.example/unsubscribe?u=sam>")
 
     static let spam: [(EmailAddress, String, String)] = [
         (EmailAddress(name: "Prize Center", email: "winner@prize-center.biz"), "You've been selected for an exclusive reward", "Claim your $500 gift card today. Offer ends at midnight."),

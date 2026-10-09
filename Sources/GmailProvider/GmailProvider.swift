@@ -12,6 +12,8 @@ public actor GmailProvider: MailProvider {
     public nonisolated var supportsPermanentDelete: Bool { false }
 
     private nonisolated let api: GmailAPI
+    /// For servers other than Google's (one-click unsubscribe).
+    private nonisolated let web: any HTTPTransport
     private let concurrency: Int
     private var knownLabels: [String: String] = [:]
     private var lastLabelCheck = Date.distantPast
@@ -19,12 +21,13 @@ public actor GmailProvider: MailProvider {
     /// - Parameters:
     ///   - credential: nil when signed out. Every call then fails with `ProviderError.unauthorized`.
     ///   - concurrency: parallel requests when downloading conversations.
-    public init(credential: GoogleCredential?, transport: any HTTPTransport = URLSessionTransport(), concurrency: Int = 8) {
-        self.init(credential: credential, transport: transport, concurrency: concurrency, pacer: QuotaPacer())
+    public init(credential: GoogleCredential?, transport: any HTTPTransport = URLSessionTransport(), web: any HTTPTransport = WebTransport(), concurrency: Int = 8) {
+        self.init(credential: credential, transport: transport, web: web, concurrency: concurrency, pacer: QuotaPacer())
     }
 
-    init(credential: GoogleCredential?, transport: any HTTPTransport, concurrency: Int, pacer: QuotaPacer) {
+    init(credential: GoogleCredential?, transport: any HTTPTransport, web: any HTTPTransport, concurrency: Int, pacer: QuotaPacer) {
         api = GmailAPI(transport: transport, tokens: GoogleTokenSource(credential: credential, transport: transport), pacer: pacer)
+        self.web = web
         self.concurrency = concurrency
     }
 
@@ -257,6 +260,45 @@ public actor GmailProvider: MailProvider {
             snippet: HTMLText.snippet(from: message.textBody), date: Date(), textBody: message.textBody, htmlBody: message.htmlBody,
             messageIDHeader: messageID, inReplyTo: message.inReplyTo, references: message.references
         )
+    }
+
+    /// The list's own server, not Gmail: no token, no cookies, no redirects, one attempt. A server error
+    /// is `.server`: the outbox tries again later without holding up mail (see `SyncEngine`). Only a
+    /// Mac without a network is `.offline`.
+    public func unsubscribe(oneClick url: URL) async throws {
+        guard url.scheme?.lowercased() == "https" else { throw ProviderError.rejected("One-click unsubscribe needs an https address") }
+        // Only the host is logged: the rest of the address identifies you to the list.
+        let host = url.host ?? "the list's server"
+        var request = URLRequest(url: url, timeoutInterval: 20)
+        request.httpMethod = "POST"
+        request.httpShouldHandleCookies = false
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data("List-Unsubscribe=One-Click".utf8)
+        let clock = Stopwatch()
+        let status: Int
+        do {
+            status = try await web.data(for: request).1.statusCode
+        } catch let error as URLError {
+            Self.log.notice("One-click unsubscribe at \(host): \(GmailAPI.describe(error)) after \(clock.text)")
+            if Self.isOffline(error) { throw ProviderError.offline(error.localizedDescription) }
+            throw ProviderError.server("\(host) could not be reached")
+        }
+        switch status {
+        case 200..<400:
+            // RFC 8058 forbids redirects. A server that sends one anyway still received the request.
+            Self.log.info("One-click unsubscribe at \(host): \(status) in \(clock.text)")
+        case 408, 429, 500...:
+            Self.log.notice("One-click unsubscribe at \(host): \(status) after \(clock.text)")
+            throw ProviderError.server("\(host) answered \(status)")
+        default:
+            Self.log.error("One-click unsubscribe at \(host): \(status) after \(clock.text)")
+            throw ProviderError.rejected("\(host) answered \(status)")
+        }
+    }
+
+    /// This Mac has no network (or sync is stopping), so the list's server is not to blame.
+    static func isOffline(_ error: URLError) -> Bool {
+        [.notConnectedToInternet, .dataNotAllowed, .internationalRoamingOff, .callIsActive, .cancelled].contains(error.code)
     }
 
     public func createLabel(name: String) async throws -> MailLabel {

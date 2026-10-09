@@ -146,6 +146,12 @@ extension AppModel {
     }
 
     func undo() {
+        // ⌘U is still checking how to unsubscribe: stop it before it has done anything.
+        if let check = unsubscribeChecks.popLast() {
+            check.cancelled = true
+            showToast("Unsubscribe cancelled.")
+            return
+        }
         guard let entry = undoStack.popLast() else {
             showToast("Nothing to undo.")
             return
@@ -183,6 +189,24 @@ extension AppModel {
                 } else {
                     AppModel.log.info("Undo send: outbox #\(outboxID) had already left")
                     showToast("Too late: the message was already sent.")
+                }
+            }
+        case .unsubscribe(let outboxIDs, let lists, let archive):
+            Task {
+                let cancelled = (try? await services.store.cancelOutboxItems(outboxIDs)) ?? []
+                AppModel.log.info("Undo unsubscribe: \(cancelled.count) of \(outboxIDs.count) cancelled before they left")
+                if let archive {
+                    try? await services.actions.undo(archive)
+                    await reloadList()
+                    if let first = archive.threadIDs.first, threads.contains(where: { $0.id == first }) { cursorID = first }
+                }
+                let one = lists.count == 1 ? lists[0] : nil
+                if cancelled.count == outboxIDs.count {
+                    showToast(one.map { "Still subscribed to \($0)." } ?? "Unsubscribes cancelled.")
+                } else if cancelled.isEmpty {
+                    showToast(one.map { "Too late: already unsubscribed from \($0)." } ?? "Too late: already unsubscribed.")
+                } else {
+                    showToast("Cancelled \(cancelled.count) of \(outboxIDs.count) unsubscribes. The others had already gone.")
                 }
             }
         }
@@ -343,6 +367,7 @@ extension AppModel {
         case "label": openPicker(.label)
         case "move": openPicker(.move)
         case "spam": spam()
+        case "unsubscribe": unsubscribe()
         case "previous": moveCursor(by: -1)
         case "next": moveCursor(by: 1)
         case "open": openCurrent()

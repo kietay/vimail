@@ -68,6 +68,10 @@ public actor DryRunProvider: MailProvider {
         )
     }
 
+    public func unsubscribe(oneClick url: URL) async throws {
+        log("unsubscribe one-click host=\(url.host ?? "?")")
+    }
+
     public func createLabel(name: String) async throws -> MailLabel {
         log("createLabel \(name)")
         return MailLabel(id: "dryrun-label-\(UUID().uuidString.prefix(8).lowercased())", name: name, kind: .user)

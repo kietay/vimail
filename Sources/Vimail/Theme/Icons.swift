@@ -4,6 +4,7 @@ import SwiftUI
 nonisolated enum IconName: String, CaseIterable {
     case inbox, send, file, archive, trash, star, search, plus, arrow, reply, chevron, chevronLeft, down
     case more, panel, command, settings, check, close, clock, link, pin, views, tag, folder, attach, spam, refresh, edit
+    case unsubscribe
 }
 
 struct Icon: View {
@@ -77,6 +78,8 @@ nonisolated struct IconShape: Shape {
         case .spam: [.path("M12 3 21 19H3Z M12 10v4 M12 17v.5")]
         case .refresh: [.path("M20 11a8 8 0 1 0-2 6 M20 5v6h-6")]
         case .edit: [.path("M4 20h4L19 9l-4-4L4 16Z M13 7l4 4")]
+        // An envelope with a minus sign.
+        case .unsubscribe: [.path("M21 12V5H3v14h9"), .path("m3 6 9 7 9-7"), .path("M15 18h6")]
         }
     }
 }

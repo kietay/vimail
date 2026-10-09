@@ -49,6 +49,10 @@ public struct MailMessage: Identifiable, Hashable, Codable, Sendable {
     public var inReplyTo: String?
     public var references: [String]
     public var listUnsubscribe: String?
+    /// RFC 8058 one-click unsubscribe: the sender accepts one POST to the HTTPS address in
+    /// `listUnsubscribe`, and a DKIM signature the provider verified covers both headers.
+    /// Nil for mail cached before vimail checked.
+    public var oneClickUnsubscribe: Bool?
     public var sizeEstimate: Int
 
     public init(
@@ -70,6 +74,7 @@ public struct MailMessage: Identifiable, Hashable, Codable, Sendable {
         inReplyTo: String? = nil,
         references: [String] = [],
         listUnsubscribe: String? = nil,
+        oneClickUnsubscribe: Bool? = nil,
         sizeEstimate: Int = 0
     ) {
         self.id = id
@@ -90,6 +95,7 @@ public struct MailMessage: Identifiable, Hashable, Codable, Sendable {
         self.inReplyTo = inReplyTo
         self.references = references
         self.listUnsubscribe = listUnsubscribe
+        self.oneClickUnsubscribe = oneClickUnsubscribe
         self.sizeEstimate = sizeEstimate
     }
 

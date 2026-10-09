@@ -127,6 +127,8 @@ extension AppModel {
             OmniItem(id: "label", title: "Label selected message…", group: "Message actions", icon: .tag, keywords: "tag", shortcut: "t", disabled: !hasCursor) { self.openPicker(.label) },
             OmniItem(id: "move", title: "Move selected message to…", group: "Message actions", icon: .folder, keywords: "folder", shortcut: "m", disabled: !hasCursor) { self.openPicker(.move) },
             OmniItem(id: "spam", title: currentMailbox == .spam ? "Not spam" : "Report spam", group: "Message actions", icon: .spam, shortcut: "!", disabled: !hasCursor) { self.spam() },
+            OmniItem(id: "unsubscribe", title: "Unsubscribe from the mailing list", group: "Message actions", icon: .unsubscribe,
+                     keywords: "newsletter list stop emails opt out", shortcut: "⌘U", disabled: !hasCursor) { self.unsubscribe() },
             OmniItem(id: "attachment", title: "Open attachment", group: "Message actions", icon: .attach, keywords: "file download", shortcut: "go",
                      disabled: !(currentThread?.messages.contains { !$0.fileAttachments.isEmpty } ?? false)) { self.openFirstAttachment() },
             OmniItem(id: "images", title: "Load remote images in this message", group: "Message actions", icon: .file, keywords: "pictures privacy", disabled: !hasCursor) {
@@ -389,6 +391,7 @@ extension AppModel {
         ("Act", [
             ("e", "Archive"), ("# / dd", "Move to trash"), ("s", "Toggle star"), ("U / I", "Mark unread / read"),
             ("t", "Label"), ("m", "Move to"), ("z", "Snooze"), ("b", "Quick snooze (time in Settings)"), ("!", "Report spam"), ("u / ^r", "Undo / redo"), (".", "Repeat last action"),
+            ("⌘U", "Unsubscribe and archive"),
         ]),
         ("Select", [("v", "Visual mode (range)"), ("x", "Toggle one"), ("*a / *n", "Select all / none"), ("esc", "Clear selection")]),
         ("Write", [("c", "Compose"), ("r / a / f", "Reply / reply all / forward"), ("^g", "Edit the body in your editor"), ("⌘↵", "Send"), ("esc", "Vim keys, then compose keys, then close")]),

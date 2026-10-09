@@ -209,6 +209,63 @@ struct MailStoreTests {
         #expect(byName.first?.email == nina.email)
     }
 
+    @Test func oneClickUnsubscribeIsStoredAndOldMailIsUnknown() async throws {
+        let store = try await seededStore()
+        var news = message("n1", thread: "n1", from: EmailAddress(name: "News", email: "hello@news.co"))
+        news.listUnsubscribe = "<https://news.co/u>"
+        news.oneClickUnsubscribe = true
+        var checked = message("n2", thread: "n2")
+        checked.oneClickUnsubscribe = false
+        try await store.upsertMessages([news, checked])
+        #expect(try await store.message(id: "n1")?.oneClickUnsubscribe == true)
+        #expect(try await store.thread(id: "n1")?.messages.first?.listUnsubscribe == "<https://news.co/u>")
+        #expect(try await store.message(id: "n2")?.oneClickUnsubscribe == false)
+        #expect(try await store.message(id: "m3")?.labelIDs == ["INBOX"])
+    }
+
+    @Test func mailCachedBeforeTheMigrationIsUnknown() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vimail-tests-\(UUID().uuidString)")
+            .appendingPathComponent("mail.sqlite")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        do {
+            // A cache from before one-click unsubscribe: schema version 1.
+            let old = try SQLiteDatabase(path: url.path)
+            try old.execute(Schema.migrations[0])
+            try old.execute("PRAGMA user_version = 1")
+            try old.run("INSERT INTO messages(id, thread_id, date, from_email, list_unsubscribe) VALUES ('m1', 't1', 0, 'hello@news.co', '<https://news.co/u>')")
+            try old.run("INSERT INTO message_labels(message_id, label_id) VALUES ('m1', 'INBOX')")
+        }
+        let store = try MailStore(url: url)
+        let message = try #require(try await store.message(id: "m1"))
+        #expect(message.oneClickUnsubscribe == nil && message.needsOneClickCheck)
+        #expect(message.labelIDs == ["INBOX"])
+    }
+
+    @Test func unsubscribeEmailsAreNotContacts() async throws {
+        let store = try await seededStore()
+        let sent = message("s1", thread: "s1", from: me, to: [EmailAddress(email: "leave-123@lists.example")], subject: "Unsubscribe", labels: ["SENT"])
+        try await store.upsertMessages([sent], recordsContacts: false)
+        #expect(try await store.contacts(matching: "leave").isEmpty)
+        #expect(try await store.threads(.mailbox(.sent)).map(\.id).contains("s1"))
+    }
+
+    @Test func queuedUnsubscribeWaitsAndCanBeCancelled() async throws {
+        let store = try await seededStore()
+        let request = UnsubscribeRequest(method: .oneClick(URL(string: "https://news.co/u")!), list: "News")
+        let id = try await store.enqueue(.unsubscribe(request), notBefore: Date().addingTimeInterval(5))
+        #expect(try await store.outboxItems().first?.operation == .unsubscribe(request))
+        #expect(try await store.claimNextOutboxItem() == nil)
+        #expect(try await store.cancelOutboxItems([id]) == [id])
+        #expect(try await store.outboxCount() == 0)
+
+        // Several at once go in one transaction, in order.
+        let other = UnsubscribeRequest(method: .oneClick(URL(string: "https://other.co/u")!), list: "Other")
+        let ids = try await store.enqueue([.unsubscribe(request), .unsubscribe(other)], notBefore: Date().addingTimeInterval(5))
+        #expect(ids.count == 2 && ids[0] < ids[1])
+        #expect(try await store.outboxItems().map(\.operation) == [.unsubscribe(request), .unsubscribe(other)])
+    }
+
     @Test func savedViewQueries() async throws {
         let store = try await seededStore()
         try await store.seedDefaultViewsIfNeeded(workLabelID: "Label_1")

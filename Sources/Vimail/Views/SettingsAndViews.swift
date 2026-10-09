@@ -68,7 +68,7 @@ struct SettingsView: View {
                         .labelsHidden()
                         .frame(width: 200)
                     }
-                    row("Undo send", detail: "Time to press u before a message leaves.") {
+                    row("Undo send", detail: "Time to press u before a message or an unsubscribe (⌘U) leaves.") {
                         Picker("", selection: $model.settings.undoSendSeconds) {
                             Text("Off").tag(0.0)
                             Text("5 seconds").tag(5.0)

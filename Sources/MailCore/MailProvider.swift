@@ -113,6 +113,10 @@ public protocol MailProvider: Sendable {
     /// `isRetry` is true when an earlier attempt may have reached the provider (a timeout, or a crash
     /// mid-send). The provider should then check whether the message already went out.
     func send(_ message: OutgoingMessage, fileData: [String: Data], isRetry: Bool) async throws -> MailMessage
+    /// RFC 8058 one-click unsubscribe: one HTTPS POST of `List-Unsubscribe=One-Click`, without cookies
+    /// or credentials. Not a Gmail API call, but it leaves the Mac like one, so dry runs and dummy data
+    /// intercept it here.
+    func unsubscribe(oneClick url: URL) async throws
     func attachmentData(messageID: String, attachmentID: String) async throws -> Data
 
     func createLabel(name: String) async throws -> MailLabel

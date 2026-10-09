@@ -316,14 +316,15 @@ struct ToastView: View {
 
     var body: some View {
         if let toast = model.toast {
+            let detail = toast.detail.map { " \($0)" } ?? ""
             HStack(spacing: 14) {
                 if let deadline = toast.countdownTo {
                     TimelineView(.periodic(from: .now, by: 0.25)) { context in
                         let seconds = max(1, Int(deadline.timeIntervalSince(context.date).rounded(.up)))
-                        Text("\(toast.text) in \(seconds)s.")
+                        Text("\(toast.text) in \(seconds)s.\(detail)")
                     }
                 } else {
-                    Text(toast.text)
+                    Text(toast.text + detail)
                 }
                 if toast.undoable {
                     Button { model.toast = nil; model.undo() } label: {

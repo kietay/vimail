@@ -63,8 +63,8 @@ in your browser; vimail receives the answer on `http://127.0.0.1:<random port>` 
 **Testing against real mail.** Debug builds (`make dev`) cannot change a real mailbox:
 
 - they only ever ask Google for `gmail.readonly`, so Google rejects any change;
-- every change and send goes to a dry-run log instead of Gmail (`accounts/<key>/dry-run/changes.log`, sent
-  messages as `.eml` files);
+- every change, send and unsubscribe goes to a dry-run log instead of Gmail or the list
+  (`accounts/<key>/dry-run/changes.log`, sent messages as `.eml` files);
 - they keep their data in `~/Library/Application Support/vimail-debug`, apart from the installed app.
 
 `VIMAIL_GMAIL_TOKEN_FILE=/path/to/token.json` makes a debug build use a token file from Google's own
@@ -91,6 +91,7 @@ Vim-first. `?` shows everything in the app. The essentials:
 | `h` `l` · `↵`/`o` | Focus list / reader · open (edits drafts) |
 | `n` `p` · `J` `K` · `space` | Next/previous message in thread · next/previous conversation from the reader · page down |
 | `e` `#`/`dd` `!` `s` `U` `I` | Archive, trash, spam, star, unread, read |
+| `⌘U` | Unsubscribe from the mailing list, then archive (see below) |
 | `t` `m` `z` | Label, move, snooze (pickers; snooze takes `2h`, `3d`, `tomorrow 9am`, `mon`) |
 | `b` | Quick snooze: no picker, until the time in Settings (default `tomorrow`, 8:00) |
 | `v` `x` `*a` `*n` | Visual range, toggle one, select all/none |
@@ -122,6 +123,19 @@ In read-filtered lists (Unread tab, unread views) it stays visible until you ref
 
 **Search:** `from:` `to:` `subject:` `label:` `in:inbox|sent|trash|spam|snoozed|archive|anywhere`
 `is:unread|read|starred` `has:attachment` `before:` `after:` `older_than:` `newer_than:` `"phrases"` `-exclude`.
+
+**Unsubscribe (`⌘U`)** uses the fastest way the sender offers, from its `List-Unsubscribe` header:
+
+1. One-click (RFC 8058): one request in the background, nothing opens. Only when a DKIM signature that Gmail
+   verified covers the header, so nobody along the way can have added it.
+2. An email to the list's unsubscribe address, from your account. It shows in Sent.
+3. The sender's unsubscribe page, in your browser. Without a header, the "unsubscribe" link in the message.
+
+The conversation is archived at once. The first two wait out the undo window, like a send (Settings → Undo send),
+so `u` takes the unsubscribe back and returns the conversation. When a list's server does not answer, vimail
+tries again for about 8 minutes without holding up your mail, then says so. Mail in Spam is not unsubscribed: that only tells
+a spammer your address works. With several conversations selected, one `⌘U` opens at most 5 pages; the rest stay
+selected for the next `⌘U`. Mail cached before vimail checked for one-click is downloaded again first.
 
 ## Where state lives
 

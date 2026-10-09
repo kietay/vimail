@@ -140,6 +140,8 @@ enum Schema {
             last_seen INTEGER NOT NULL DEFAULT 0
         );
         """,
+        // 2: RFC 8058 one-click unsubscribe. NULL: cached before vimail checked.
+        "ALTER TABLE messages ADD COLUMN one_click_unsubscribe INTEGER;",
     ]
 
     static func migrate(_ db: SQLiteDatabase) throws {

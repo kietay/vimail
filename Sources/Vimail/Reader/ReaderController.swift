@@ -139,6 +139,14 @@ final class ReaderController: NSObject, WKNavigationDelegate, WKUIDelegate {
     func expandAll() { run("vimail.expandAll()") }
     func closeMenu() { run("vimail.closeMenu()") }
 
+    #if DEBUG
+    /// Debug scripts: clicks the ⋯ button (`menu`) or the button with that `data-action`, through the page.
+    func debugClick(_ target: String) {
+        guard !target.isEmpty, target.allSatisfy({ $0.isLetter || $0.isNumber }) else { return }
+        run("document.querySelector('\(target == "menu" ? "[data-menu]" : "[data-action=\"\(target)\"]")')?.click()")
+    }
+    #endif
+
     // MARK: - Navigation: open links outside the app
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {

@@ -37,6 +37,10 @@ public actor SyncEngine {
         case sendFailed(draft: Draft, reason: String)
         /// The provider rejected another queued change. The affected mail was refetched.
         case operationFailed(String)
+        /// A queued unsubscribe went through.
+        case unsubscribed(list: String)
+        /// A queued unsubscribe failed for good: the list refused it, or its server never answered.
+        case unsubscribeFailed(outboxID: Int64, list: String, reason: String)
     }
 
     public let provider: any MailProvider
@@ -446,6 +450,17 @@ public actor SyncEngine {
                 try await execute(item.operation, isRetry: item.attempts > 0)
                 try await store.completeOutboxItem(item.id)
                 Self.log.info("\(name): done in \(clock.text)")
+            } catch let error as ProviderError where error.isTransient && Self.isListServerFailure(item.operation, error) {
+                // Not Gmail: mail keeps syncing while the list's server gets more tries, then the unsubscribe is given up.
+                if item.attempts + 1 >= Self.unsubscribeAttempts {
+                    Self.log.error("\(name): \(error.localizedDescription) after \(clock.text). Giving up")
+                    try await store.completeOutboxItem(item.id)
+                    try await handleRejected(item, error: error)
+                } else {
+                    let backoff = min(pow(2, Double(item.attempts + 1)), 300)
+                    Self.log.notice("\(name): \(error.localizedDescription) after \(clock.text). Retry in \(Int(backoff))s")
+                    try await store.retryOutboxItem(item.id, error: error.localizedDescription, retryAt: Date().addingTimeInterval(backoff))
+                }
             } catch let error as ProviderError where error.isTransient {
                 let backoff = min(pow(2, Double(item.attempts + 1)), 300)
                 Self.log.notice("\(name): \(error.localizedDescription) after \(clock.text). Retry in \(Int(backoff))s")
@@ -455,9 +470,19 @@ public actor SyncEngine {
                 // The provider refused it. Drop the operation and restore the provider's truth.
                 Self.log.error("\(name): refused after \(clock.text): \((error as? LocalizedError)?.errorDescription ?? String(describing: error)). Undoing it locally")
                 try await store.completeOutboxItem(item.id)
-                try await handleRejected(item.operation, error: error)
+                try await handleRejected(item, error: error)
             }
         }
+    }
+
+    /// Attempts at a list's one-click address before the unsubscribe is given up (about 8 minutes).
+    static let unsubscribeAttempts = 8
+
+    /// Trouble at a list's one-click address. A Mac without a network (`.offline`) waits like everything else.
+    static func isListServerFailure(_ operation: OutboxOperation, _ error: ProviderError) -> Bool {
+        guard case .unsubscribe(let request) = operation, case .oneClick = request.method else { return false }
+        if case .offline = error { return false }
+        return true
     }
 
     private func execute(_ operation: OutboxOperation, isRetry: Bool) async throws {
@@ -489,12 +514,23 @@ public actor SyncEngine {
             _ = try await provider.renameLabel(id: id, to: name)
         case .deleteLabel(let id):
             try await provider.deleteLabel(id: id)
+        case .unsubscribe(let request):
+            switch request.method {
+            case .oneClick(let url):
+                try await provider.unsubscribe(oneClick: url)
+            case .email(let message):
+                let sent = try await provider.send(message, fileData: [:], isRetry: isRetry)
+                // It went out, so nothing may throw from here. Stored now, the sync does not record the
+                // list's address as a contact to suggest in compose.
+                _ = try? await store.upsertMessages([sent], recordsContacts: false)
+            }
+            eventContinuation.yield(.unsubscribed(list: request.list))
         }
     }
 
-    private func handleRejected(_ operation: OutboxOperation, error: Error) async throws {
+    private func handleRejected(_ item: OutboxItem, error: Error) async throws {
         let reason = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-        switch operation {
+        switch item.operation {
         case .send(let draft, _, let localMessageID, _):
             try await store.restoreFailedSend(draft: draft, localMessageID: localMessageID)
             eventContinuation.yield(.sendFailed(draft: draft, reason: reason))
@@ -510,6 +546,8 @@ public actor SyncEngine {
         case .renameLabel, .deleteLabel:
             try await store.replaceProviderLabels(try await provider.labels())
             eventContinuation.yield(.operationFailed("Could not change label: \(reason)"))
+        case .unsubscribe(let request):
+            eventContinuation.yield(.unsubscribeFailed(outboxID: item.id, list: request.list, reason: reason))
         }
     }
 
@@ -519,6 +557,11 @@ public actor SyncEngine {
         for id in messageIDs {
             if let message = try await store.message(id: id), !threadIDs.contains(message.threadID) { threadIDs.append(message.threadID) }
         }
+        try await refresh(threadIDs: threadIDs)
+    }
+
+    /// Downloads conversations again, for example to read headers an older vimail did not store.
+    public func refresh(threadIDs: [String]) async throws {
         guard !threadIDs.isEmpty else { return }
         let threads = try await provider.threads(ids: threadIDs)
         _ = try await store.applyRemoteChanges(ChangeSet(cursor: "", upserted: threads.flatMap { $0 }))

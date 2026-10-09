@@ -301,6 +301,7 @@ extension AppModel {
         case .toggleStar: toggleStar()
         case .markUnread: perform(.markUnread)
         case .markRead: perform(.markRead)
+        case .unsubscribe: unsubscribe()
         case .label: openPicker(.label)
         case .move: openPicker(.move)
         case .snooze: openPicker(.snooze)

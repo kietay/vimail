@@ -44,6 +44,8 @@ struct Toast: Identifiable, Equatable {
     var isError = false
     /// When set, the toast shows the whole seconds left until this time and stays up until it passes.
     var countdownTo: Date?
+    /// A second sentence, after the countdown.
+    var detail: String?
 }
 
 enum Mode: String {
@@ -54,6 +56,13 @@ enum UndoEntry {
     case action(UndoRecord)
     /// `archived` is the archive that archive-on-send did with it, if any.
     case send(outboxID: Int64, draft: Draft, localMessageID: String, archived: UndoRecord?)
+    /// Unsubscribes waiting in the outbox, and the archive that went with them.
+    case unsubscribe(outboxIDs: [Int64], lists: [String], archive: UndoRecord?)
+}
+
+/// A ⌘U still checking how to unsubscribe. `u` cancels it then, before it has done anything.
+final class UnsubscribeCheck {
+    var cancelled = false
 }
 
 @MainActor
@@ -143,6 +152,11 @@ final class AppModel {
     @ObservationIgnored var undoStack: [UndoEntry] = []
     @ObservationIgnored var redoStack: [UndoRecord] = []
     @ObservationIgnored var lastAction: (action: ThreadAction, labelName: String?)?
+    /// Unsubscribes that went through in a row, so a batch gets one toast.
+    @ObservationIgnored private var unsubscribed: (count: Int, until: Date) = (0, .distantPast)
+    /// Conversations a ⌘U is still working on, so a second ⌘U does not queue them again.
+    @ObservationIgnored var unsubscribing = Set<String>()
+    @ObservationIgnored var unsubscribeChecks: [UnsubscribeCheck] = []
     @ObservationIgnored var pickerTargets: [String] = []
     @ObservationIgnored private var pendingChange = StoreChange()
     @ObservationIgnored private var reloadScheduled = false
@@ -297,6 +311,19 @@ final class AppModel {
             undoStack.removeAll { if case .send(_, let pending, _, _) = $0 { return pending.id == draft.id } else { return false } }
         case .operationFailed(let reason):
             showToast(reason, isError: true)
+        case .unsubscribed(let list):
+            let now = Date()
+            unsubscribed = (unsubscribed.until > now ? unsubscribed.count + 1 : 1, now.addingTimeInterval(4))
+            showToast(unsubscribed.count == 1 ? "Unsubscribed from \(list)." : "Unsubscribed from \(unsubscribed.count) lists.")
+        case .unsubscribeFailed(let outboxID, let list, let reason):
+            showToast("Could not unsubscribe from \(list): \(reason)", isError: true)
+            // u must not claim it went through: it only brings the conversation back.
+            undoStack = undoStack.compactMap { entry in
+                guard case .unsubscribe(let ids, let lists, let archive) = entry, ids.contains(outboxID) else { return entry }
+                let kept = ids.indices.filter { ids[$0] != outboxID }
+                if kept.isEmpty { return archive.map(UndoEntry.action) }
+                return .unsubscribe(outboxIDs: kept.map { ids[$0] }, lists: kept.map { lists[$0] }, archive: archive)
+            }
         }
     }
 
@@ -800,8 +827,15 @@ final class AppModel {
             Item(title: thread.isUnread ? "Mark as read" : "Mark as unread", icon: "check", key: thread.isUnread ? "I" : "U", action: "toggleRead"),
             Item(title: "Label…", icon: "tag", key: "t", action: "label"),
             Item(title: "Move to…", icon: "folder", key: "m", action: "move"),
+        ] + unsubscribeMenu(for: thread) + [
             Item(title: thread.labelIDs.contains(SystemLabel.spam) ? "Not spam" : "Report spam", icon: "spam", key: "!", action: "spam"),
         ]
+    }
+
+    /// Only where ⌘U can do something: not in Spam, and the mail says how to unsubscribe.
+    private func unsubscribeMenu(for thread: MailThread) -> [ReaderPayload.MenuItem] {
+        guard !thread.labelIDs.contains(SystemLabel.spam), thread.unsubscribeTarget(excluding: services.store.selfAddresses) != nil else { return [] }
+        return [ReaderPayload.MenuItem(title: "Unsubscribe", icon: "unsubscribe", key: "⌘U", action: "unsubscribe")]
     }
 
     private func scheduleMarkRead() {
@@ -888,8 +922,8 @@ final class AppModel {
         NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
-    func showToast(_ text: String, undoable: Bool = false, isError: Bool = false, countdownTo: Date? = nil) {
-        toast = Toast(text: text, undoable: undoable, isError: isError, countdownTo: countdownTo)
+    func showToast(_ text: String, undoable: Bool = false, isError: Bool = false, countdownTo: Date? = nil, detail: String? = nil) {
+        toast = Toast(text: text, undoable: undoable, isError: isError, countdownTo: countdownTo, detail: detail)
         toastTask?.cancel()
         let duration = countdownTo.map { max(0, $0.timeIntervalSinceNow) } ?? (isError ? 6 : 3.5)
         toastTask = Task {

@@ -209,4 +209,95 @@ struct SyncEngineTests {
         let remote = try await reopened.threads(ids: [thread.id]).flatMap { $0 }
         #expect(remote.allSatisfy { $0.labelIDs.contains("TRASH") })
     }
+
+    @Test func dummyNewslettersUnsubscribeInDifferentWays() async throws {
+        let harness = try await Harness()
+        #expect(await harness.engine.cycle())
+        let inbox = try await harness.store.threads(.mailbox(.inbox))
+        func method(_ subject: String) async throws -> UnsubscribeMethod? {
+            let summary = try #require(inbox.first { $0.subject == subject })
+            return try await harness.store.thread(id: summary.id)?.unsubscribeTarget(excluding: ["sam@hey.com"])?.method
+        }
+        #expect(try await method("Five things worth your time") == .oneClick(URL(string: "https://thebrowser.example/unsubscribe?u=sam")!))
+        #expect(try await method("New connections in your channels") == .email(to: EmailAddress(email: "leave@are.na.example"), subject: "Unsubscribe", body: "Unsubscribe"))
+        #expect(try await method("Coffee on Thursday?") == nil)
+    }
+
+    @Test func unsubscribeLeavesAfterTheUndoWindow() async throws {
+        let harness = try await Harness()
+        #expect(await harness.engine.cycle())
+        let url = URL(string: "https://thebrowser.example/unsubscribe?u=sam")!
+        let request = UnsubscribeRequest(method: .oneClick(url), list: "The Browser")
+        let id = try await harness.store.enqueue(.unsubscribe(request), notBefore: Date().addingTimeInterval(60))
+        #expect(await harness.engine.cycle())
+        #expect(await harness.provider.oneClickUnsubscribes.isEmpty)
+        // u within the window: nothing ever left.
+        #expect(try await harness.store.cancelOutboxItems([id]) == [id])
+
+        _ = try await harness.store.enqueue(.unsubscribe(request), notBefore: Date())
+        #expect(await harness.engine.cycle())
+        #expect(await harness.provider.oneClickUnsubscribes == [url])
+        #expect(try await harness.store.outboxCount() == 0)
+    }
+
+    @Test func emailUnsubscribeIsSentButNotSuggested() async throws {
+        let harness = try await Harness()
+        #expect(await harness.engine.cycle())
+        let me = EmailAddress(name: "Sam Carter", email: "sam@hey.com")
+        let method = UnsubscribeMethod.email(to: EmailAddress(email: "leave@are.na.example"), subject: "unsubscribe", body: "Unsubscribe")
+        let request = try #require(UnsubscribeRequest(method, list: "Are.na", from: me))
+        _ = try await harness.store.enqueue(.unsubscribe(request), notBefore: Date())
+        #expect(await harness.engine.cycle())
+        #expect(try await harness.store.threads(.mailbox(.sent)).first?.subject == "unsubscribe")
+        // The next sync brings Gmail's copy; the list's address still stays out of compose suggestions.
+        #expect(await harness.engine.cycle())
+        #expect(try await harness.store.contacts(matching: "leave").isEmpty)
+    }
+
+    @Test func refreshReadsWhatOlderCachesLack() async throws {
+        let harness = try await Harness()
+        #expect(await harness.engine.cycle())
+        let summary = try #require(try await harness.store.threads(.mailbox(.inbox)).first { $0.subject == "Five things worth your time" })
+        var cached = try #require(try await harness.store.thread(id: summary.id)?.messages.first)
+        cached.oneClickUnsubscribe = nil
+        try await harness.store.upsertMessages([cached])
+        #expect(try await harness.store.message(id: cached.id)?.needsOneClickCheck == true)
+
+        try await harness.engine.refresh(threadIDs: [summary.id])
+        #expect(try await harness.store.message(id: cached.id)?.oneClickUnsubscribe == true)
+    }
+
+    @Test func aListServerThatIsDownDoesNotHoldUpMail() async throws {
+        let harness = try await Harness()
+        #expect(await harness.engine.cycle())
+        let thread = try #require(try await harness.store.threads(.mailbox(.inbox)).first)
+        let request = UnsubscribeRequest(method: .oneClick(URL(string: "https://down.example/u")!), list: "Down")
+        _ = try await harness.store.enqueue(.unsubscribe(request), notBefore: Date())
+        try await harness.actions.perform(.archive, threads: [thread.id])
+
+        // The cycle succeeds and the archive reaches the provider; the unsubscribe waits for another try.
+        #expect(await harness.engine.cycle())
+        let remote = try await harness.provider.threads(ids: [thread.id]).flatMap { $0 }
+        #expect(remote.allSatisfy { !$0.labelIDs.contains("INBOX") })
+        let waiting = try #require(try await harness.store.outboxItems().first)
+        #expect(waiting.operation == .unsubscribe(request))
+        #expect(waiting.attempts == 1 && waiting.notBefore > Date())
+
+        // After the last attempt it is given up and the outbox is clear.
+        for _ in 0..<(SyncEngine.unsubscribeAttempts - 2) {
+            try await harness.store.retryOutboxItem(waiting.id, error: "test", retryAt: Date())
+        }
+        #expect(await harness.engine.cycle())
+        #expect(try await harness.store.outboxCount() == 0)
+        #expect(await harness.provider.oneClickUnsubscribes.isEmpty)
+    }
+
+    @Test func aListThatRefusesIsGivenUpAtOnce() async throws {
+        let harness = try await Harness()
+        #expect(await harness.engine.cycle())
+        let request = UnsubscribeRequest(method: .oneClick(URL(string: "https://gone.example/u")!), list: "Gone")
+        _ = try await harness.store.enqueue(.unsubscribe(request), notBefore: Date())
+        #expect(await harness.engine.cycle())
+        #expect(try await harness.store.outboxCount() == 0)
+    }
 }

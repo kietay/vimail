@@ -70,6 +70,7 @@ public enum KeyCommand: Hashable, Sendable {
     case readerPageDown, readerPageUp
     case visual, toggleSelection, selectAll, clearSelection
     case archive, trash, spam, toggleStar, markUnread, markRead
+    case unsubscribe
     case label, move, snooze, quickSnooze, undo, redo, repeatLast
     case compose, reply, replyAll, forward
     case go(GoTarget), goLabel, manageViews, nextView, previousView
@@ -98,6 +99,8 @@ public enum Keymap {
         ("e", .archive), ("#", .trash), ("dd", .trash), ("!", .spam), ("s", .toggleStar),
         ("U", .markUnread), ("I", .markRead), ("t", .label), ("m", .move), ("z", .snooze), ("b", .quickSnooze),
         ("u", .undo), ("<C-r>", .redo), (".", .repeatLast),
+        // ⌘U as in Superhuman and Shortwave on the Mac (^u is half a page up).
+        ("<D-u>", .unsubscribe),
         // Writing
         ("c", .compose), ("r", .reply), ("a", .replyAll), ("f", .forward),
         // Go to
