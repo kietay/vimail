@@ -42,6 +42,8 @@ struct Toast: Identifiable, Equatable {
     var text: String
     var undoable = false
     var isError = false
+    /// When set, the toast shows the whole seconds left until this time and stays up until it passes.
+    var countdownTo: Date?
 }
 
 enum Mode: String {
@@ -871,11 +873,12 @@ final class AppModel {
         NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
-    func showToast(_ text: String, undoable: Bool = false, isError: Bool = false) {
-        toast = Toast(text: text, undoable: undoable, isError: isError)
+    func showToast(_ text: String, undoable: Bool = false, isError: Bool = false, countdownTo: Date? = nil) {
+        toast = Toast(text: text, undoable: undoable, isError: isError, countdownTo: countdownTo)
         toastTask?.cancel()
+        let duration = countdownTo.map { max(0, $0.timeIntervalSinceNow) } ?? (isError ? 6 : 3.5)
         toastTask = Task {
-            try? await Task.sleep(for: .seconds(isError ? 6 : 3.5))
+            try? await Task.sleep(for: .seconds(duration))
             guard !Task.isCancelled else { return }
             toast = nil
         }

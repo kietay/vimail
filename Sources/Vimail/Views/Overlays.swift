@@ -122,7 +122,8 @@ struct OmniboxView: View {
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(theme.border.opacity(0.8), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.4), radius: 50, y: 24)
-        .onAppear { focused = true }
+        // Focus set in the same pass that inserts the overlay is dropped; defer it one turn.
+        .onAppear { DispatchQueue.main.async { focused = true } }
         .onChange(of: model.focusTarget) { _, target in focused = target == .omnibox }
     }
 }
@@ -195,7 +196,7 @@ struct PickerView: View {
                 .frame(maxHeight: 340)
             }
         }
-        .onAppear { focused = true }
+        .onAppear { DispatchQueue.main.async { focused = true } }
     }
 
     private var footer: String {
@@ -316,7 +317,14 @@ struct ToastView: View {
     var body: some View {
         if let toast = model.toast {
             HStack(spacing: 14) {
-                Text(toast.text)
+                if let deadline = toast.countdownTo {
+                    TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                        let seconds = max(1, Int(deadline.timeIntervalSince(context.date).rounded(.up)))
+                        Text("\(toast.text) in \(seconds)s.")
+                    }
+                } else {
+                    Text(toast.text)
+                }
                 if toast.undoable {
                     Button { model.toast = nil; model.undo() } label: {
                         HStack(spacing: 6) {

@@ -160,15 +160,16 @@ extension AppModel {
             attachments: draft.attachments.map { MailAttachment(id: $0.id, filename: $0.filename, mimeType: $0.mimeType, size: $0.size) }
         )
         let delay = max(0, settings.undoSendSeconds)
+        let sendAt = Date().addingTimeInterval(delay)
         self.compose = nil
         focusTarget = nil
         blurTextInput()
         Task {
             do {
-                let outboxID = try await services.store.queueSend(draft: draft, message: outgoing, localCopy: localCopy, notBefore: Date().addingTimeInterval(delay))
+                let outboxID = try await services.store.queueSend(draft: draft, message: outgoing, localCopy: localCopy, notBefore: sendAt)
                 AppModel.log.info("Queued send as outbox #\(outboxID) (\(outgoing.messageID ?? "?"), \(outgoing.attachments.count) attachment(s), sends in \(Int(delay))s)")
                 undoStack.append(.send(outboxID: outboxID, draft: draft, localMessageID: localCopy.id))
-                showToast(delay > 0 ? "Sending in \(Int(delay))s." : "Sending…", undoable: delay > 0)
+                if delay > 0 { showToast("Sending", undoable: true, countdownTo: sendAt) } else { showToast("Sending…") }
                 services.engine.wake()
             } catch {
                 AppModel.log.error("Could not queue a send: \(error)")
