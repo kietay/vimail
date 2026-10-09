@@ -89,6 +89,8 @@ struct AppCommands: Commands {
             Button("Manage Views…") { model.overlay = .views }
             Button("Sync Now") { model.syncNow() }.keyboardShortcut("r", modifiers: [.command, .shift])
             Button("Simulate Incoming Mail") { model.simulateIncomingMail() }
+            Divider()
+            Button(model.settings.ai.pauseAll ? "Resume Rules" : "Pause All Rules") { model.setRulesPaused(!model.settings.ai.pauseAll) }
         }
         CommandMenu("Message") {
             Button("Reply") { model.reply(all: false) }.keyboardShortcut("r", modifiers: .command)
@@ -103,6 +105,9 @@ struct AppCommands: Commands {
             Button("Quick Snooze") { model.quickSnooze() }
             Button("Label…") { model.openPicker(.label) }
             Button("Move to…") { model.openPicker(.move) }
+            Divider()
+            Button("Why These Labels?") { model.openExplain() }
+            Button("Run Rules") { model.runRulesOnSelection() }
         }
         CommandGroup(after: .sidebar) {
             Button("Toggle Sidebar") { model.session.sidebarCollapsed.toggle() }.keyboardShortcut("s", modifiers: [.command, .control])

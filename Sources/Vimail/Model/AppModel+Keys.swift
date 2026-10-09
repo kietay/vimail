@@ -21,6 +21,7 @@ extension KeyStroke {
     var isEscape: Bool { if case .escape = key { true } else { false } }
     var isEnter: Bool { if case .enter = key { true } else { false } }
     var isDown: Bool { if case .down = key { true } else { false } }
+    var isUp: Bool { if case .up = key { true } else { false } }
 }
 
 extension GoTarget {
@@ -82,6 +83,10 @@ extension AppModel {
         case .viewEditor:
             if stroke.isEscape { overlay = .views; return true }
             return false
+        case .explain:
+            return handleExplainKey(stroke)
+        case .aiConsent:
+            return handleConsentKey(stroke, context: context)
         case .help, .settings, .views:
             if stroke.isEscape || (!context.textFocused && (stroke.isChar("q") || (overlay == .help && stroke.isChar("?")))) {
                 overlay = nil
@@ -96,6 +101,50 @@ extension AppModel {
             return handleSearchFieldKey(stroke)
         }
         return handleNormalKey(stroke)
+    }
+
+    /// "Why these labels?": j/k move, x a s d u act on the highlighted line.
+    private func handleExplainKey(_ stroke: KeyStroke) -> Bool {
+        if stroke.isEscape || stroke.isChar("q") || stroke.isChar("?") {
+            overlay = nil
+        } else if stroke.isChar("j") || stroke.isDown || stroke.isControl("n") {
+            moveExplain(1)
+        } else if stroke.isChar("k") || stroke.isUp || stroke.isControl("p") {
+            moveExplain(-1)
+        } else if stroke.isChar("x") {
+            explainWrong()
+        } else if stroke.isChar("a") {
+            explainShouldMatch()
+        } else if stroke.isChar("s") {
+            cycleSenderRule()
+        } else if stroke.isChar("d") {
+            disableExplainedRule()
+        } else if stroke.isChar("u") {
+            undoExplainedRun()
+        }
+        return !stroke.command
+    }
+
+    /// The consent panel: j/k pick the model, e edits the budget, ↵ allows, esc is "not now".
+    private func handleConsentKey(_ stroke: KeyStroke, context: KeyContext) -> Bool {
+        if context.textFocused {
+            guard stroke.isEscape || stroke.isEnter else { return false }
+            focusTarget = nil
+            blurTextInput()
+            return true
+        }
+        if stroke.isEscape || stroke.isChar("q") {
+            declineConsent()
+        } else if stroke.isChar("j") || stroke.isDown {
+            moveConsentModel(1)
+        } else if stroke.isChar("k") || stroke.isUp {
+            moveConsentModel(-1)
+        } else if stroke.isChar("e") {
+            focusTarget = .consentBudget
+        } else if stroke.isEnter {
+            allowClaude()
+        }
+        return !stroke.command
     }
 
     private func handleSearchFieldKey(_ stroke: KeyStroke) -> Bool {
@@ -323,6 +372,8 @@ extension AppModel {
         case .sync: syncNow()
         case .toggleSidebar: session.sidebarCollapsed.toggle()
         case .openAttachments: openFirstAttachment()
+        case .explainLabels: openExplain()
+        case .runRules: runRulesOnSelection()
         }
     }
 }

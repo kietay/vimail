@@ -27,6 +27,14 @@ struct KeymapTests {
         #expect(run([.char("*"), .char("a")]) == [.pending, .command(.selectAll, count: 1)])
     }
 
+    @Test func rulesKeys() {
+        #expect(run([.char("g"), .char("?")]) == [.pending, .command(.explainLabels, count: 1)])
+        // No sequence starts with =, so it never waits for a second key.
+        #expect(run([.char("=")]) == [.command(.runRules, count: 1)])
+        // ? alone is still help.
+        #expect(run([.char("?")]) == [.command(.help, count: 1)])
+    }
+
     @Test func modifiersAndSpecialKeys() {
         #expect(run([KeyStroke(.char("d"), control: true)]) == [.command(.halfPageDown, count: 1)])
         #expect(run([KeyStroke(.char("k"), command: true)]) == [.command(.omnibox, count: 1)])

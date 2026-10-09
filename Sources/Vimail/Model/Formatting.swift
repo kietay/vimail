@@ -1,5 +1,6 @@
 import Foundation
 import MailCore
+import MailRules
 
 enum Formatting {
     private static let time: DateFormatter = make("HH:mm")
@@ -35,6 +36,11 @@ enum Formatting {
 
     static func longDate(_ date: Date) -> String { long.string(from: date) }
     static func snoozeDate(_ date: Date) -> String { snooze.string(from: date) }
+
+    /// "$1.06" from micro-dollars, as the rules status shows it.
+    static func dollars(_ micros: Int64) -> String { Dollars.text(micros) }
+    /// "≈ $0.23/mo".
+    static func monthly(_ micros: Int64) -> String { Dollars.monthly(micros) }
 
     static func fileSize(_ bytes: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)

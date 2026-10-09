@@ -94,6 +94,14 @@ extension RuleEngine {
         return Int64((email + prefix + answer).rounded(.up))
     }
 
+    /// What Claude would cost for live mail over `days` if it judged all of `messagesPerDay`, a call
+    /// priced as before any call was made. Consent and Settings show it per model ("≈ $0.23/mo"); the
+    /// spend guard reserves the daily figure for live mail until there is real live spend.
+    public static func projectedLiveMicros(messagesPerDay: Double, days: Double = 1, prices: TokenPrices) -> Int64 {
+        guard messagesPerDay.isFinite, messagesPerDay > 0, days > 0 else { return 0 }
+        return Int64((messagesPerDay * days * Double(localCallMicros(prices))).rounded(.up))
+    }
+
     /// One call's price, and whether it comes from this model's recent calls.
     func callPrice() async throws -> (micros: Int64, fromHistory: Bool) {
         if let mean = try await store.meanCallCostMicros(model: config.model) { return (mean, true) }

@@ -45,6 +45,13 @@ struct RuleEngineRunTests {
         #expect(deploys.needClaude == 0 && deploys.micros == 0)
     }
 
+    @Test func liveProjection() {
+        // 130 micro-dollars a call.
+        #expect(RuleEngine.projectedLiveMicros(messagesPerDay: 60, days: 30, prices: testConfig.prices) == 234_000)
+        #expect(RuleEngine.projectedLiveMicros(messagesPerDay: 60, prices: testConfig.prices) == 7_800)
+        #expect(RuleEngine.projectedLiveMicros(messagesPerDay: 0, days: 30, prices: testConfig.prices) == 0)
+    }
+
     @Test func estimatesSubtractWhatIsDecidedAlready() async throws {
         let judge = FakeJudge(matching: ["r1": ["receipt"]])
         let harness = try await Harness(rules: [receiptsRule], judge: judge)

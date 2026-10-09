@@ -151,11 +151,12 @@ struct SyncEngineTests {
     @Test func incomingMailArrivesThroughHistory() async throws {
         let harness = try await Harness()
         #expect(await harness.engine.cycle())
-        let before = try await harness.store.count(.mailbox(.inbox))
+        // Count messages, not conversations: incoming mail is sometimes a reply in a conversation already in the inbox.
+        let messages = { try await harness.store.read { db in try db.scalar("SELECT COUNT(*) FROM message_labels WHERE label_id = 'INBOX'") } }
+        let before = try await messages()
         try await harness.provider.deliverIncomingMail(count: 2)
         #expect(await harness.engine.cycle())
-        let after = try await harness.store.count(.mailbox(.inbox))
-        #expect(after >= before + 1)
+        #expect(try await messages() == before + 2)
     }
 
     @Test func labelCreatedOfflineGetsRemapped() async throws {

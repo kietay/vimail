@@ -26,6 +26,20 @@ public enum UserLabelChange: Sendable, Hashable {
     case undone(LabelEdit)
 }
 
+/// What a label edit meant for the rules that add that label, for the toast after it.
+public struct LabelEditNote: Sendable, Hashable {
+    /// For a removal: the names of the rules that had added the label to these conversations. They
+    /// do not add it there again.
+    public var stoppedRules: [String] = []
+    /// The names of the rules that learned an example from the edit: ✖ for a removal, ✔ for an addition.
+    public var taughtRules: [String] = []
+
+    public init(stoppedRules: [String] = [], taughtRules: [String] = []) {
+        self.stoppedRules = stoppedRules
+        self.taughtRules = taughtRules
+    }
+}
+
 /// What rules learn from your label edits, and why a conversation carries its labels.
 extension RuleEngine {
     /// Records your edit of a label that a rule adds.
@@ -40,14 +54,17 @@ extension RuleEngine {
     /// - Undoing the edit deletes the marks and examples it made.
     ///
     /// Only rules with an ASK learn from examples. Edits of labels no rule adds are not recorded.
-    public func noteUserChange(_ change: UserLabelChange) async throws {
+    /// Returns which rules stopped adding the label and which learned from the edit.
+    @discardableResult
+    public func noteUserChange(_ change: UserLabelChange) async throws -> LabelEditNote {
+        var note = LabelEditNote()
         switch change {
         case .undone(let edit):
             try await writing { try await store.deleteMarksAndExamples(undoKey: edit.undoKey) }
         case .applied(let edit):
             try await loadIfNeeded()
             let targeting = records.map(\.rule).filter { $0.labelTargets.contains { $0.id == edit.labelID } }
-            guard !targeting.isEmpty, !edit.messageIDs.isEmpty else { return }
+            guard !targeting.isEmpty, !edit.messageIDs.isEmpty else { return note }
             let threadIDs = Set(try await store.messageFacts(edit.messageIDs).map(\.threadID)).sorted()
             let me = store.selfAddresses
             let received = try await store.messageLabels(inThreads: threadIDs)
@@ -60,9 +77,11 @@ extension RuleEngine {
                 try await store.setLabelMarks(messageIDs: marked, labelID: edit.labelID, present: edit.added, undoKey: edit.undoKey)
             }
 
+            if !edit.added { note.stoppedRules = targeting.filter { owners[$0.id] != nil }.map(\.name) }
             var taught = 0
             for rule in targeting where rule.editsTeach && rule.asksClaude {
                 let labeled = Set(owners[rule.id] ?? [])
+                var learned = false
                 for threadID in threadIDs {
                     let messages = received.filter { $0.threadID == threadID }
                     let owned = messages.first { labeled.contains($0.messageID) }
@@ -72,11 +91,28 @@ extension RuleEngine {
                         try await store.setExample(ruleID: rule.id, messageID: example.messageID, matches: edit.added, origin: .edit, undoKey: edit.undoKey)
                     }
                     taught += 1
+                    learned = true
                 }
+                if learned { note.taughtRules.append(rule.name) }
             }
             Self.log.info("Label edit noted: \(marked.count) mark(s), \(taught) example(s)")
         }
         refreshStatus()
+        return note
+    }
+
+    /// Your verdict on one message for one rule, from "why these labels?" (`x` it's wrong, `a` it
+    /// should match): a ✖ or ✔ example under the label edit's undo key, so undoing the edit deletes
+    /// it, also when the edit changed no label. Returns the rule's name when it learns from examples
+    /// (it has an ASK), else nil.
+    @discardableResult
+    public func teach(ruleID: String, messageID: String, matches: Bool, undoKey: String) async throws -> String? {
+        try await loadIfNeeded()
+        try await writing {
+            _ = try await store.setExample(ruleID: ruleID, messageID: messageID, matches: matches, origin: .explain, undoKey: undoKey)
+        }
+        guard let rule = records.first(where: { $0.id == ruleID })?.rule, rule.asksClaude else { return nil }
+        return rule.name
     }
 
     /// Why a conversation's messages carry their labels: the rules that own each, how they decided

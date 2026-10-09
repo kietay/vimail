@@ -121,6 +121,7 @@ enum ReaderHTML {
     .action.secondary:hover { color: var(--foreground); }
     .empty { display: flex; height: calc(100vh - 80px); align-items: center; justify-content: center; color: var(--muted-foreground); font-size: 14px; }
     .annotations { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .annotations .provenance { flex-basis: 100%; font: 10px 'IBM Plex Mono', monospace; color: var(--muted-foreground); overflow-wrap: anywhere; }
     """
 
     static let script = #"""
@@ -239,8 +240,19 @@ enum ReaderHTML {
         return textBody(message.text || '');
       }
 
+      // A chip's tooltip says how rules added the label.
+      function chipHTML(l) {
+        const title = l.source ? ` title="${esc(l.source)}"` : '';
+        return `<span class="chip" style="background:${l.soft};color:${l.fg}"${title}>${esc(l.name)}</span>`;
+      }
+
+      function provenanceHTML() {
+        if (!state.provenance || !state.provenance.length) return '';
+        return `<div class="annotations">${state.provenance.map((line) => `<span class="provenance">${esc(line)}</span>`).join('')}</div>`;
+      }
+
       function senderBlock(message, withPosition) {
-        const chips = withPosition ? state.labels.map((l) => `<span class="chip" style="background:${l.soft};color:${l.fg}">${esc(l.name)}</span>`).join('') : '';
+        const chips = withPosition ? state.labels.map(chipHTML).join('') : '';
         const position = withPosition ? `
           <div class="position">
             <span class="count">${esc(state.position)}</span>
@@ -311,12 +323,13 @@ enum ReaderHTML {
               </div>
             </div>
             ${multi ? `<div class="meta-row">
-                ${state.labels.map((l) => `<span class="chip" style="background:${l.soft};color:${l.fg}">${esc(l.name)}</span>`).join('')}
+                ${state.labels.map(chipHTML).join('')}
                 <span class="time">${payload.messages.length} messages${newCount ? ` · ${newCount} new` : ''}</span>
                 <div class="position"><span class="count">${esc(state.position)}</span>
                   <button class="nav-button" data-action="previous" ${state.hasPrevious ? '' : 'disabled'}>${icon('chevronLeft', 12)}</button>
                   <button class="nav-button" data-action="next" ${state.hasNext ? '' : 'disabled'}>${icon('chevron', 12)}</button></div>
               </div>` : senderBlock(first, true)}
+            ${provenanceHTML()}
           </header>`;
         payload.messages.forEach((message, index) => {
           const expanded = kept && kept.expanded.has(message.id) ? kept.expanded.get(message.id) : message.expanded;

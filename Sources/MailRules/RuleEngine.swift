@@ -24,7 +24,7 @@ public actor RuleEngine: RuleWaking {
     public struct JudgeConfig: Sendable, Hashable {
         public var model: String
         public var effort: String
-        /// The judge prompt's version: MailAI's `JudgePrompt.version` "v1" is 1.
+        /// The judge prompt's version: MailAI's `JudgePrompt.versionNumber`.
         public var promptVersion: Int
         /// The model's list prices, for estimates before it made any call here.
         public var prices: TokenPrices

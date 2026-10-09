@@ -1,4 +1,5 @@
 import Foundation
+import MailAI
 import MailCore
 
 /// Where vimail keeps local state. Everything lives on this Mac:
@@ -7,6 +8,8 @@ import MailCore
 ///         settings.json            preferences
 ///         session.json             window/session state (mailbox, cursors, sidebar)
 ///         google-oauth-client.json the Google Cloud OAuth client (Gmail only, mode 600)
+///         anthropic-api-key        the Anthropic API key for Claude rules (mode 600)
+///         ai-usage.json            Claude spend per day for 60 days, for every account (mode 600)
 ///         accounts/<key>/mail.sqlite   mail cache, outbox, drafts, snoozes, views, annotations
 ///         accounts/<key>/drafts/   draft attachments and vim editing buffers
 ///         accounts/gmail-<email>/google-credential.json   the Gmail refresh token (mode 600)
@@ -45,6 +48,9 @@ enum AppPaths {
     static func database(account key: String) -> URL { account(key).appendingPathComponent("mail.sqlite") }
     static func draftFiles(account key: String) -> URL { account(key).appendingPathComponent("drafts", isDirectory: true) }
     static var googleClient: URL { root.appendingPathComponent("google-oauth-client.json") }
+    /// One key pays for every account.
+    static var anthropicKey: URL { root.appendingPathComponent("anthropic-api-key") }
+    static var aiUsage: URL { root.appendingPathComponent("ai-usage.json") }
     /// `~/Library/Logs/vimail/vimail.log` (Console.app lists it under Log Reports).
     static let logs: URL = {
         let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
@@ -135,6 +141,8 @@ struct AppSettings: Codable, Equatable {
     var dummySimulateIncomingMail = true
     var dummyLatencyMilliseconds = 120
     var dummyFailureRate = 0.0
+    /// Claude for rules: model, consent per account, budgets, pause.
+    var ai = AISettings.buildDefault
 
     init() {}
 
@@ -177,12 +185,17 @@ struct AppSettings: Codable, Equatable {
         dummySimulateIncomingMail = (try? container.decode(Bool.self, forKey: .dummySimulateIncomingMail)) ?? defaults.dummySimulateIncomingMail
         dummyLatencyMilliseconds = (try? container.decode(Int.self, forKey: .dummyLatencyMilliseconds)) ?? defaults.dummyLatencyMilliseconds
         dummyFailureRate = (try? container.decode(Double.self, forKey: .dummyFailureRate)) ?? defaults.dummyFailureRate
+        ai = (try? AISettings(from: container.superDecoder(forKey: .ai), defaults: defaults.ai)) ?? defaults.ai
+        #if DEBUG
+        // VIMAIL_AI_BUDGET raises saved budgets too.
+        ai = ai.raisingBudgets()
+        #endif
     }
 
     enum CodingKeys: String, CodingKey {
         case appearance, lightTheme, darkTheme, markReadDelay, undoSendSeconds, quickSnooze, loadRemoteImages, editorCommand
         case composeStartsInVim, showComposePreview, signatures, defaultSignature, alwaysShowKeyHints, dataSource, gmailAccount, pollSeconds
-        case dummySimulateIncomingMail, dummyLatencyMilliseconds, dummyFailureRate
+        case dummySimulateIncomingMail, dummyLatencyMilliseconds, dummyFailureRate, ai
         case legacyTheme = "theme"
         case legacySignature = "signature"
         case legacyUseGmailSignature = "useGmailSignature"
@@ -209,6 +222,7 @@ struct AppSettings: Codable, Equatable {
         try container.encode(dummySimulateIncomingMail, forKey: .dummySimulateIncomingMail)
         try container.encode(dummyLatencyMilliseconds, forKey: .dummyLatencyMilliseconds)
         try container.encode(dummyFailureRate, forKey: .dummyFailureRate)
+        try container.encode(ai, forKey: .ai)
     }
 
     /// The theme to show for a system appearance.
@@ -218,6 +232,17 @@ struct AppSettings: Codable, Equatable {
         case .dark: darkTheme
         case .auto: systemIsDark ? darkTheme : lightTheme
         }
+    }
+}
+
+extension AISettings {
+    /// Debug builds read real mail with real spend, so they start with smaller budgets.
+    static var buildDefault: AISettings {
+        #if DEBUG
+        AISettings.defaults(debug: true)
+        #else
+        AISettings.defaults(debug: false)
+        #endif
     }
 }
 

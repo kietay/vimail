@@ -1,5 +1,7 @@
 import AppKit
+import MailAI
 import MailCore
+import MailRules
 import MailStore
 import MailSync
 import Observation
@@ -15,6 +17,7 @@ enum FocusTarget: Hashable {
     case composeTo, composeCc, composeBcc, composeSubject, composeBody
     case viewName, viewSender, viewText
     case settingsSignature, settingsEditor
+    case consentBudget
 }
 
 enum PickerKind: Equatable { case label, move, snooze, goToLabel }
@@ -27,10 +30,20 @@ enum Overlay: Equatable {
     case viewEditor(SavedView)
     case picker(PickerKind)
     case confirm(Confirmation)
+    /// "Why these labels?" for a conversation (`g?`).
+    case explain(threadID: String)
+    /// May this account's mail go to Claude?
+    case aiConsent
 }
 
 struct Confirmation: Equatable {
-    enum Action: Equatable { case deleteForever([String]), discardDraft(String), resetDummy, signOut }
+    enum Action: Equatable {
+        case deleteForever([String]), discardDraft(String), resetDummy, signOut
+        /// `=` on these messages, above 5¢.
+        case runRules([String])
+        case undoRuleRun(Int64)
+        case deleteClaudeResults
+    }
     var title: String
     var message: String
     var confirmTitle: String
@@ -51,8 +64,19 @@ enum Mode: String {
 }
 
 enum UndoEntry {
-    case action(UndoRecord)
+    /// With the label edit rules were told about, so undoing it takes back what they learned.
+    case action(UndoRecord, LabelEdit?)
     case send(outboxID: Int64, draft: Draft, localMessageID: String)
+    /// `=`: undoing takes off the labels the run added. There is no redo: press `=` again.
+    case ruleRun(Int64)
+    /// `x` or `a` in "why these labels?" when the label was already like that: undoing deletes the
+    /// rule's example. There is no redo.
+    case teaching(LabelEdit)
+}
+
+/// Where Settings opens scrolled to.
+enum SettingsSection: Hashable {
+    case rules
 }
 
 @MainActor
@@ -62,6 +86,8 @@ final class AppModel {
 
     /// The open account. Replaced when you switch between dummy data and Gmail.
     private(set) var services: AppServices
+    /// Claude for every account: key, limiter, spend. Survives account switches.
+    let ai: AIServices
     let reader = ReaderController()
     @ObservationIgnored private let settingsFile = JSONFile<AppSettings>(AppPaths.settings)
     @ObservationIgnored private let sessionFile = JSONFile<SessionState>(AppPaths.session)
@@ -103,6 +129,11 @@ final class AppModel {
     var accountSignatureHTML: String?
     /// True while Google sign-in is open in the browser.
     var signingIn = false
+    var rulesStatus = RuleEngineStatus()
+    /// Labels from rules that Gmail refused, since you last looked at the rules status.
+    var rulesGmailRejected = 0
+    /// Received mail a day over the last 30 days, for Claude estimates. nil until counted.
+    var mailVolume: Double?
 
     // MARK: UI state
 
@@ -136,6 +167,13 @@ final class AppModel {
     }
     var pickerHighlighted = 0
 
+    // "Why these labels?", consent and Settings.
+    var explainLines: [ExplainLine] = []
+    var explainHighlighted = 0
+    /// The model and budgets the consent panel offers.
+    var consentDraft = AISettings()
+    var settingsSection: SettingsSection?
+
     // MARK: Internals
 
     @ObservationIgnored var parser = KeySequenceParser()
@@ -159,6 +197,12 @@ final class AppModel {
     @ObservationIgnored private var newMessageIDs = Set<String>()
     @ObservationIgnored private var storeObserver: UUID?
     @ObservationIgnored var signInTask: Task<Void, Never>?
+    /// Why each recently shown conversation carries its labels, for the reader's provenance.
+    @ObservationIgnored var explanationCache: [String: ThreadExplanation] = [:]
+    /// Runs once you allow Claude in the consent panel.
+    @ObservationIgnored var afterConsent: (() -> Void)?
+    /// The latest report of a label edit to the rules. Each waits for the one before.
+    @ObservationIgnored var ruleReport: Task<LabelEditNote?, Never>?
     static let pageSize = 400
 
     static let log = Log("app")
@@ -176,7 +220,9 @@ final class AppModel {
         let settings = settingsFile.load(default: AppSettings())
         self.settings = settings
         self.session = sessionFile.load(default: SessionState())
-        services = try AppServices(settings: settings)
+        let ai = AIServices(settings: settings.ai)
+        self.ai = ai
+        services = try AppServices(settings: settings, ai: ai)
         reader.setTheme(.of(settings.theme(systemIsDark: systemIsDark)))
         appearanceObservation = NSApp?.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
             Task { @MainActor in
@@ -206,7 +252,9 @@ final class AppModel {
         await reloadList()
         await reloadCounts()
         listenToSync()
-        await services.start()
+        listenToRules()
+        await services.start(ai: ai, paused: settings.ai.pauseAll)
+        await refreshMailVolume()
     }
 
     private func reloadAccount() async {
@@ -222,19 +270,20 @@ final class AppModel {
             await compose.finish()
             self.compose = nil
         }
-        let old = services
-        await old.stop()
-        if let storeObserver { old.store.removeObserver(storeObserver) }
+        // Opened before the old account stops: when it can't be opened, the old one keeps running
+        // (a stopped rules engine can't start again).
+        let next: AppServices
         do {
-            services = try AppServices(settings: settings)
+            next = try AppServices(settings: settings, ai: ai)
         } catch {
             Self.log.error("Could not open the account: \(error)")
             showToast("Could not open the account: \(error.localizedDescription)", isError: true)
-            services = old
-            observeStore()
-            await old.start()
             return
         }
+        let old = services
+        await old.stop()
+        if let storeObserver { old.store.removeObserver(storeObserver) }
+        services = next
         threads = []
         totalCount = 0
         hasMore = false
@@ -249,8 +298,12 @@ final class AppModel {
         redoStack.removeAll()
         lastAction = nil
         threadCache.removeAll()
+        explanationCache.removeAll()
         renderedThreadID = nil
         syncStatus = SyncEngine.Status()
+        rulesStatus = RuleEngineStatus()
+        rulesGmailRejected = 0
+        mailVolume = nil
         // Saved views belong to an account; another account may not have the one that was open.
         if case .view = session.destination { session.destination = .mailbox(.inbox) }
         cursorID = nil
@@ -292,9 +345,9 @@ final class AppModel {
             undoStack.removeAll { if case .send(_, let pending, _) = $0 { return pending.id == draft.id } else { return false } }
         case .operationFailed(let reason):
             showToast(reason, isError: true)
-        case .rulesGmailRejected:
+        case .rulesGmailRejected(let count):
             // Not a toast: the rules status reports it.
-            break
+            rulesGmailRejected += count
         }
     }
 
@@ -316,14 +369,23 @@ final class AppModel {
     private func apply(_ change: StoreChange) async {
         if change.labels || change.reset { await reloadLabels() }
         if change.views || change.reset { await reloadViews() }
-        for id in change.threadIDs { threadCache[id] = nil }
-        if change.reset { threadCache.removeAll() }
+        for id in change.threadIDs {
+            threadCache[id] = nil
+            explanationCache[id] = nil
+        }
+        if change.reset {
+            threadCache.removeAll()
+            explanationCache.removeAll()
+        }
         await reloadList()
         await reloadCounts()
         if let id = cursorID, change.reset || change.threadIDs.contains(id) || (change.drafts && id.hasPrefix("draft:")) {
             await loadCurrentThread(refresh: true)
+        } else if change.rules {
+            await refreshProvenance()
         }
         if change.reset { await reloadAccount() }
+        if case .explain(let id) = overlay, change.reset || change.rules || change.threadIDs.contains(id) { await loadExplanation(threadID: id) }
         let inboxUnread = unreadCounts[SystemLabel.inbox] ?? 0
         NSApp.dockTile.badgeLabel = inboxUnread > 0 ? "\(inboxUnread)" : nil
     }
@@ -608,10 +670,16 @@ final class AppModel {
             render(cached)
         }
         threadTask = Task {
-            guard let thread = try? await services.store.thread(id: id), !Task.isCancelled, cursorID == id else { return }
+            let store = services.store
+            guard let thread = try? await store.thread(id: id), !Task.isCancelled, cursorID == id else { return }
+            let explanation = try? await store.explain(threadID: id)
+            guard !Task.isCancelled, cursorID == id else { return }
             threadCache[id] = thread
             if threadCache.count > 60 { threadCache.removeAll() }
-            if thread != currentThread || renderedThreadID != id || refresh {
+            let explained = explanation != explanationCache[id]
+            if explanationCache.count > 60 { explanationCache.removeAll() }
+            explanationCache[id] = explanation
+            if thread != currentThread || renderedThreadID != id || refresh || explained {
                 currentThread = thread
                 render(thread)
             }
@@ -624,14 +692,25 @@ final class AppModel {
         for neighbor in [index - 1, index + 1] where threads.indices.contains(neighbor) {
             let id = threads[neighbor].id
             guard threadCache[id] == nil, !id.hasPrefix("draft:") else { continue }
+            let store = services.store
             Task {
-                if let thread = try? await services.store.thread(id: id) { threadCache[id] = thread }
+                if let thread = try? await store.thread(id: id) { threadCache[id] = thread }
+                if let explanation = try? await store.explain(threadID: id) { explanationCache[id] = explanation }
             }
         }
     }
 
     func rerenderReader() {
         if let currentThread { render(currentThread) } else { Task { await loadCurrentThread(refresh: true) } }
+    }
+
+    /// Rules changed: shows the conversation's new provenance, if it has any.
+    private func refreshProvenance() async {
+        guard let thread = currentThread, renderedThreadID == thread.id else { return }
+        let explanation = try? await services.store.explain(threadID: thread.id)
+        guard currentThread?.id == thread.id, renderedThreadID == thread.id, explanation != explanationCache[thread.id] else { return }
+        explanationCache[thread.id] = explanation
+        render(thread)
     }
 
     private func render(_ thread: MailThread) {
@@ -693,7 +772,11 @@ final class AppModel {
         payload.hasNext = (cursorIndex ?? 0) < threads.count - 1
         payload.allowRemote = settings.loadRemoteImages || remoteImagesAllowed.contains(thread.id)
         payload.showHints = settings.alwaysShowKeyHints
-        payload.labels = chips(for: thread.labelIDs)
+        let explanation = explanationCache[thread.id]
+        payload.labels = chips(for: thread.labelIDs, explanation: explanation)
+        payload.provenance = labels.filter { thread.labelIDs.contains($0.id) }.flatMap { label in
+            (explanation?.provenance(ofLabel: label.id) ?? []).map { "◆ \(label.name) · \($0)" }
+        }
         if let snoozed = thread.snoozedUntil {
             payload.labels.append(.init(name: "snoozed · \(Formatting.snoozeDate(snoozed))", fg: theme.palette.yellow, soft: theme.palette.yellowSoft))
         }
@@ -772,13 +855,15 @@ final class AppModel {
     /// navigation, filter or search changes, and on refresh (^l).
     @ObservationIgnored var stickyIDs = Set<String>()
 
-    func chips(for labelIDs: some Sequence<String>) -> [ReaderPayload.LabelChip] {
+    /// Label chips; with an explanation, each says how rules added it (a tooltip).
+    func chips(for labelIDs: some Sequence<String>, explanation: ThreadExplanation? = nil) -> [ReaderPayload.LabelChip] {
         let palette = theme.palette.labelColors
         return labels
             .filter { $0.kind != .system && labelIDs.contains($0.id) }
             .map { label in
                 let pair = palette[label.paletteIndex(count: palette.count)]
-                return ReaderPayload.LabelChip(name: label.name, fg: pair.fg, soft: pair.soft)
+                let source = explanation?.provenance(ofLabel: label.id) ?? []
+                return ReaderPayload.LabelChip(name: label.name, fg: pair.fg, soft: pair.soft, source: source.isEmpty ? nil : source.joined(separator: "\n"))
             }
     }
 
@@ -797,6 +882,8 @@ final class AppModel {
             Item(title: "Quick snooze", icon: "clock", key: "b", action: "quickSnooze"),
             Item(title: thread.isUnread ? "Mark as read" : "Mark as unread", icon: "check", key: thread.isUnread ? "I" : "U", action: "toggleRead"),
             Item(title: "Label…", icon: "tag", key: "t", action: "label"),
+            Item(title: "Why these labels?", icon: "tag", key: "g?", action: "explain"),
+            Item(title: "Run rules", icon: "check", key: "=", action: "runRules"),
             Item(title: "Move to…", icon: "folder", key: "m", action: "move"),
             Item(title: thread.labelIDs.contains(SystemLabel.spam) ? "Not spam" : "Report spam", icon: "spam", key: "!", action: "spam"),
         ]
@@ -862,6 +949,8 @@ final class AppModel {
     // MARK: - Overlays, focus and toasts
 
     private func overlayChanged(from old: Overlay?) {
+        // Closing the consent panel any way but ↵ drops what waited for it.
+        if old == .aiConsent { afterConsent = nil }
         switch overlay {
         case .omnibox:
             omniQuery = ""
@@ -906,6 +995,7 @@ final class AppModel {
         switch overlay {
         case .omnibox: return .command
         case .picker, .viewEditor: return .insert
+        case .aiConsent where focusTarget == .consentBudget: return .insert
         default: break
         }
         if focusTarget == .search { return .search }
@@ -931,6 +1021,7 @@ final class AppModel {
         if settings.loadRemoteImages != old.loadRemoteImages || settings.alwaysShowKeyHints != old.alwaysShowKeyHints {
             rerenderReader()
         }
+        if settings.ai != old.ai { aiSettingsChanged(from: old.ai) }
         let services = services
         let settings = settings
         Task { await services.apply(settings) }

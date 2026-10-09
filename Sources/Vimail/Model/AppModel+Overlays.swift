@@ -135,6 +135,18 @@ extension AppModel {
             OmniItem(id: "undo", title: "Undo last action", group: "Message actions", icon: .refresh, shortcut: "u", disabled: undoStack.isEmpty) { self.undo() },
         ]
 
+        let paused = settings.ai.pauseAll
+        items += [
+            OmniItem(id: "rules-explain", title: "Why these labels?", group: "Rules", icon: .tag, keywords: "explain rules claude provenance", shortcut: "g?",
+                     disabled: !hasCursor) { self.openExplain() },
+            OmniItem(id: "rules-run", title: "Run rules on selected messages", group: "Rules", icon: .refresh, keywords: "apply rules filters claude now",
+                     shortcut: "=", disabled: !hasCursor) { self.runRulesOnSelection() },
+            OmniItem(id: "rules-pause", title: paused ? "Resume rules" : "Pause all rules", group: "Rules", icon: paused ? .refresh : .clock,
+                     keywords: "rules stop start claude") { self.setRulesPaused(!paused) },
+            OmniItem(id: "rules-settings", title: "Rules and Claude settings", group: "Rules", icon: .settings,
+                     keywords: "anthropic api key model budget consent") { self.openSettings(at: .rules) },
+        ]
+
         if let dummy = services.dummy {
             _ = dummy
             items += [
@@ -391,6 +403,10 @@ extension AppModel {
             ("t", "Label"), ("m", "Move to"), ("z", "Snooze"), ("b", "Quick snooze (time in Settings)"), ("!", "Report spam"), ("u / ^r", "Undo / redo"), (".", "Repeat last action"),
         ]),
         ("Select", [("v", "Visual mode (range)"), ("x", "Toggle one"), ("*a / *n", "Select all / none"), ("esc", "Clear selection")]),
+        ("Rules", [
+            ("g?", "Why these labels?"), ("x / a", "…the rule was wrong / should have matched (teaches it)"),
+            ("s / d / u", "…sender rule / turn the rule off / undo its run"), ("=", "Run rules on the selection now (u undoes)"),
+        ]),
         ("Write", [("c", "Compose"), ("r / a / f", "Reply / reply all / forward"), ("^g", "Edit the body in your editor"), ("⌘↵", "Send"), ("esc", "Vim keys, then compose keys, then close")]),
         ("Compose body (esc)", [
             ("i a I A o O", "Insert mode"), ("h j k l w b e", "Move (counts work)"), ("0 ^ $ gg G { }", "Line, top, bottom, paragraph"),

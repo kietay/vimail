@@ -56,6 +56,16 @@ public struct UndoRecord: Sendable {
     public let action: ThreadAction
     public let threadIDs: [String]
     let applied: AppliedMutation
+
+    /// The messages the action added `labelID` to (or removed it from): only those that changed, not
+    /// those that already had it (or never had it). Your label edits are reported to rules with them.
+    public func messageIDs(changing labelID: String, added: Bool) -> [String] {
+        var seen = Set<String>()
+        return applied.deltas
+            .filter { (added ? $0.delta.add : $0.delta.remove).contains(labelID) }
+            .flatMap(\.delta.messageIDs)
+            .filter { seen.insert($0).inserted }
+    }
 }
 
 /// Applies actions optimistically to the local store and queues them for the provider.

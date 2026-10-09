@@ -74,6 +74,10 @@ public enum KeyCommand: Hashable, Sendable {
     case compose, reply, replyAll, forward
     case go(GoTarget), goLabel, manageViews, nextView, previousView
     case search, omnibox, help, sync, toggleSidebar, openAttachments
+    /// Why the conversation carries its labels, and rules that decided no.
+    case explainLabels
+    /// Every enabled rule on the selection now.
+    case runRules
 }
 
 public enum Keymap {
@@ -105,6 +109,8 @@ public enum Keymap {
         ("gz", .go(.snoozed)), ("g!", .go(.spam)), ("g#", .go(.trash)), ("gA", .go(.allMail)),
         ("gl", .goLabel), ("gv", .manageViews), ("L", .nextView), ("H", .previousView),
         ("go", .openAttachments),
+        // Rules
+        ("g?", .explainLabels), ("=", .runRules),
         // Modes and app
         ("/", .search), (":", .omnibox), ("<D-k>", .omnibox), ("?", .help), ("<C-l>", .sync),
         ("<C-\\>", .toggleSidebar),

@@ -1,3 +1,4 @@
+import MailAI
 import MailCore
 import SwiftUI
 
@@ -6,130 +7,148 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.theme) private var theme
+    /// A key being typed in, never saved before Anthropic accepts it.
+    @State private var newKey = ""
+    @State private var replacingKey = false
+    @State private var savingKey = false
+    @State private var spend: SpendGuard.Snapshot?
 
     var body: some View {
         @Bindable var model = model
         DialogShell(title: "Settings", width: 600, onClose: { model.overlay = nil }) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    divider("ACCOUNT")
-                    row("Mail", detail: accountDetail) {
-                        if model.gmailAccount != nil {
-                            Picker("", selection: Binding(get: { model.settings.dataSource }, set: { model.switchDataSource($0) })) {
-                                Text("Gmail · \(model.gmailAccount ?? "")").tag(DataSource.gmail)
-                                Text("Dummy data").tag(DataSource.dummy)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        divider("ACCOUNT")
+                        row("Mail", detail: accountDetail) {
+                            if model.gmailAccount != nil {
+                                Picker("", selection: Binding(get: { model.settings.dataSource }, set: { model.switchDataSource($0) })) {
+                                    Text("Gmail · \(model.gmailAccount ?? "")").tag(DataSource.gmail)
+                                    Text("Dummy data").tag(DataSource.dummy)
+                                }
+                                .labelsHidden()
+                                .frame(width: 260)
+                            } else {
+                                Text("Dummy data").font(AppFonts.sans(12)).foregroundStyle(theme.mutedForeground)
                             }
-                            .labelsHidden()
-                            .frame(width: 260)
-                        } else {
-                            Text("Dummy data").font(AppFonts.sans(12)).foregroundStyle(theme.mutedForeground)
                         }
-                    }
-                    HStack(spacing: 10) {
-                        if model.signingIn {
-                            settingsButton("Waiting for the browser… Cancel", key: nil) { model.cancelSignIn() }
-                        } else if model.gmailAccount == nil {
-                            settingsButton("Connect Gmail…", key: nil) { model.connectGmail() }
-                        } else {
-                            settingsButton("Sign in again", key: nil) { model.connectGmail() }
-                            settingsButton("Sign out", key: nil) { model.confirmSignOut() }
+                        HStack(spacing: 10) {
+                            if model.signingIn {
+                                settingsButton("Waiting for the browser… Cancel", key: nil) { model.cancelSignIn() }
+                            } else if model.gmailAccount == nil {
+                                settingsButton("Connect Gmail…", key: nil) { model.connectGmail() }
+                            } else {
+                                settingsButton("Sign in again", key: nil) { model.connectGmail() }
+                                settingsButton("Sign out", key: nil) { model.confirmSignOut() }
+                            }
                         }
-                    }
 
-                    divider("APPEARANCE")
-                    row("Appearance", detail: "Auto follows macOS light and dark mode.") {
-                        Picker("", selection: $model.settings.appearance) {
-                            ForEach(AppearanceMode.allCases) { Text($0.title).tag($0) }
-                        }
-                        .labelsHidden()
-                        .frame(width: 200)
-                    }
-                    row("Dark theme") {
-                        Picker("", selection: $model.settings.darkTheme) {
-                            ForEach(ThemeID.darkThemes) { Text($0.title).tag($0) }
-                        }
-                        .labelsHidden()
-                        .frame(width: 200)
-                    }
-                    row("Light theme") {
-                        Picker("", selection: $model.settings.lightTheme) {
-                            ForEach(ThemeID.lightThemes) { Text($0.title).tag($0) }
-                        }
-                        .labelsHidden()
-                        .frame(width: 200)
-                    }
-                    row("Mark as read", detail: "After a conversation stays selected this long.") {
-                        Picker("", selection: $model.settings.markReadDelay) {
-                            Text("Immediately").tag(0.0)
-                            Text("After 1 second").tag(1.0)
-                            Text("After 3 seconds").tag(3.0)
-                            Text("Only when opened (↵)").tag(-1.0)
-                        }
-                        .labelsHidden()
-                        .frame(width: 200)
-                    }
-                    row("Undo send", detail: "Time to press u before a message leaves.") {
-                        Picker("", selection: $model.settings.undoSendSeconds) {
-                            Text("Off").tag(0.0)
-                            Text("5 seconds").tag(5.0)
-                            Text("10 seconds").tag(10.0)
-                            Text("20 seconds").tag(20.0)
-                        }
-                        .labelsHidden()
-                        .frame(width: 200)
-                    }
-                    row("Quick snooze", detail: quickSnoozeDetail) {
-                        TextField("tomorrow", text: $model.settings.quickSnooze)
-                            .fieldStyle()
-                            .frame(width: 200)
-                    }
-                    toggle("Load remote images", detail: "Off blocks tracking pixels. Show per message from the reader.", isOn: $model.settings.loadRemoteImages)
-                    toggle("Always show key hints", detail: "Otherwise hints appear on hover.", isOn: $model.settings.alwaysShowKeyHints)
-
-                    divider("COMPOSE")
-                    toggle("Show HTML preview", detail: "The exact email recipients get, next to the editor.", isOn: $model.settings.showComposePreview)
-                    toggle("Reply and forward start in vim", detail: "Ctrl+G toggles vim in any compose window.", isOn: $model.settings.composeStartsInVim)
-                    VStack(alignment: .leading, spacing: 8) {
-                        label("Editor command", detail: "Empty uses $VISUAL, $EDITOR, then nvim from your login shell. Mail-only settings: ~/.config/vimail/vimrc.")
-                        TextField("nvim", text: $model.settings.editorCommand).fieldStyle()
-                    }
-                    signatures
-
-                    divider("DATA")
-                    if model.services.dummy != nil {
-                        toggle("Simulate incoming mail", detail: "The dummy server delivers new mail every few minutes.", isOn: $model.settings.dummySimulateIncomingMail)
-                        row("Simulated latency", detail: "Per server call. Local actions stay instant.") {
-                            Picker("", selection: $model.settings.dummyLatencyMilliseconds) {
-                                Text("None").tag(0)
-                                Text("120 ms").tag(120)
-                                Text("600 ms").tag(600)
-                                Text("2 s").tag(2000)
+                        divider("APPEARANCE")
+                        row("Appearance", detail: "Auto follows macOS light and dark mode.") {
+                            Picker("", selection: $model.settings.appearance) {
+                                ForEach(AppearanceMode.allCases) { Text($0.title).tag($0) }
                             }
                             .labelsHidden()
                             .frame(width: 200)
                         }
-                        row("Simulated failures", detail: "Test the offline queue and retries.") {
-                            Picker("", selection: $model.settings.dummyFailureRate) {
-                                Text("None").tag(0.0)
-                                Text("20% of calls").tag(0.2)
-                                Text("Offline (100%)").tag(1.0)
+                        row("Dark theme") {
+                            Picker("", selection: $model.settings.darkTheme) {
+                                ForEach(ThemeID.darkThemes) { Text($0.title).tag($0) }
                             }
                             .labelsHidden()
                             .frame(width: 200)
                         }
+                        row("Light theme") {
+                            Picker("", selection: $model.settings.lightTheme) {
+                                ForEach(ThemeID.lightThemes) { Text($0.title).tag($0) }
+                            }
+                            .labelsHidden()
+                            .frame(width: 200)
+                        }
+                        row("Mark as read", detail: "After a conversation stays selected this long.") {
+                            Picker("", selection: $model.settings.markReadDelay) {
+                                Text("Immediately").tag(0.0)
+                                Text("After 1 second").tag(1.0)
+                                Text("After 3 seconds").tag(3.0)
+                                Text("Only when opened (↵)").tag(-1.0)
+                            }
+                            .labelsHidden()
+                            .frame(width: 200)
+                        }
+                        row("Undo send", detail: "Time to press u before a message leaves.") {
+                            Picker("", selection: $model.settings.undoSendSeconds) {
+                                Text("Off").tag(0.0)
+                                Text("5 seconds").tag(5.0)
+                                Text("10 seconds").tag(10.0)
+                                Text("20 seconds").tag(20.0)
+                            }
+                            .labelsHidden()
+                            .frame(width: 200)
+                        }
+                        row("Quick snooze", detail: quickSnoozeDetail) {
+                            TextField("tomorrow", text: $model.settings.quickSnooze)
+                                .fieldStyle()
+                                .frame(width: 200)
+                        }
+                        toggle("Load remote images", detail: "Off blocks tracking pixels. Show per message from the reader.", isOn: $model.settings.loadRemoteImages)
+                        toggle("Always show key hints", detail: "Otherwise hints appear on hover.", isOn: $model.settings.alwaysShowKeyHints)
+
+                        divider("COMPOSE")
+                        toggle("Show HTML preview", detail: "The exact email recipients get, next to the editor.", isOn: $model.settings.showComposePreview)
+                        toggle("Reply and forward start in vim", detail: "Ctrl+G toggles vim in any compose window.", isOn: $model.settings.composeStartsInVim)
+                        VStack(alignment: .leading, spacing: 8) {
+                            label("Editor command", detail: "Empty uses $VISUAL, $EDITOR, then nvim from your login shell. Mail-only settings: ~/.config/vimail/vimrc.")
+                            TextField("nvim", text: $model.settings.editorCommand).fieldStyle()
+                        }
+                        signatures
+
+                        rulesSection
+
+                        divider("DATA")
+                        if model.services.dummy != nil {
+                            toggle("Simulate incoming mail", detail: "The dummy server delivers new mail every few minutes.", isOn: $model.settings.dummySimulateIncomingMail)
+                            row("Simulated latency", detail: "Per server call. Local actions stay instant.") {
+                                Picker("", selection: $model.settings.dummyLatencyMilliseconds) {
+                                    Text("None").tag(0)
+                                    Text("120 ms").tag(120)
+                                    Text("600 ms").tag(600)
+                                    Text("2 s").tag(2000)
+                                }
+                                .labelsHidden()
+                                .frame(width: 200)
+                            }
+                            row("Simulated failures", detail: "Test the offline queue and retries.") {
+                                Picker("", selection: $model.settings.dummyFailureRate) {
+                                    Text("None").tag(0.0)
+                                    Text("20% of calls").tag(0.2)
+                                    Text("Offline (100%)").tag(1.0)
+                                }
+                                .labelsHidden()
+                                .frame(width: 200)
+                            }
+                        }
+                        HStack(spacing: 10) {
+                            settingsButton("Keyboard shortcuts", key: "?") { model.overlay = .help }
+                            settingsButton("Show data folder", key: nil) { model.revealDataFolder() }
+                        }
+                        Text("All app state lives on this Mac in ~/Library/Application Support/\(AppPaths.folderName).")
+                            .font(AppFonts.sans(10))
+                            .foregroundStyle(theme.mutedForeground)
                     }
-                    HStack(spacing: 10) {
-                        settingsButton("Keyboard shortcuts", key: "?") { model.overlay = .help }
-                        settingsButton("Show data folder", key: nil) { model.revealDataFolder() }
-                    }
-                    Text("All app state lives on this Mac in ~/Library/Application Support/\(AppPaths.folderName).")
-                        .font(AppFonts.sans(10))
-                        .foregroundStyle(theme.mutedForeground)
+                    .padding(24)
                 }
-                .padding(24)
+                .frame(maxHeight: 600)
+                .onAppear { scroll(proxy) }
+                .onChange(of: model.settingsSection) { _, _ in scroll(proxy) }
             }
-            .frame(maxHeight: 600)
         }
+    }
+
+    /// Opens at the section asked for (the rules status opens the rules section).
+    private func scroll(_ proxy: ScrollViewProxy) {
+        guard let section = model.settingsSection else { return }
+        model.settingsSection = nil
+        DispatchQueue.main.async { proxy.scrollTo(section, anchor: .top) }
     }
 
     private var accountDetail: String {
@@ -149,6 +168,147 @@ struct SettingsView: View {
             return "Not a future time. Try 3h, 2d, tomorrow 9am or mon."
         }
         return "b snoozes without asking. Pressed now: \(Formatting.snoozeDate(date))."
+    }
+
+    // MARK: Rules and Claude
+
+    private var rulesSection: some View {
+        @Bindable var model = model
+        let ai = model.ai
+        return VStack(alignment: .leading, spacing: 22) {
+            divider("RULES & CLAUDE").id(SettingsSection.rules)
+            #if DEBUG
+            if model.services.isGmail, ai.hasKey, !ai.usesSimulator {
+                Text("DEBUG · real mail, real spend").font(AppFonts.mono(10, .semibold)).foregroundStyle(theme.orange)
+            }
+            #endif
+            label("API key", detail: keyDetail)
+            if replacingKey {
+                HStack(spacing: 10) {
+                    SecureField("sk-ant-…", text: $newKey)
+                        .fieldStyle()
+                        .onSubmit(saveKey)
+                    settingsButton(savingKey ? "Checking…" : "Check and save", key: "↵", action: saveKey)
+                        .frame(width: 170)
+                }
+            }
+            HStack(spacing: 10) {
+                settingsButton(ai.hasKey ? "Replace key…" : "Add key…", key: nil) {
+                    newKey = ""
+                    replacingKey.toggle()
+                }
+                if ai.hasKey {
+                    settingsButton("Remove key", key: nil) { model.removeAnthropicKey() }
+                }
+            }
+            row("Model", detail: modelDetail) {
+                Picker("", selection: $model.settings.ai.model) {
+                    ForEach(modelOptions, id: \.id) { Text(verbatim: $0.title).tag($0.id) }
+                }
+                .labelsHidden()
+                .frame(width: 260)
+            }
+            row("This account", detail: consentDetail) {
+                if ai.usesSimulator {
+                    EmptyView()
+                } else if ai.hasConsent(model.services.accountKey) {
+                    settingsButton("Revoke", key: nil) { model.revokeConsent() }.frame(width: 120)
+                } else {
+                    settingsButton("Allow…", key: nil) { model.openConsent() }.frame(width: 120)
+                }
+            }
+            row("Monthly budget", detail: "For every account together. Claude stops for the month here.") {
+                budgetField($model.settings.ai.monthlyBudgetUSD)
+            }
+            row("Daily budget", detail: "Starts again at midnight.") {
+                budgetField($model.settings.ai.dailyBudgetUSD)
+            }
+            row("Previews", detail: "A day, for trying rules in the editor.") {
+                budgetField($model.settings.ai.previewDailyUSD)
+            }
+            if let spend {
+                Text(verbatim: "Spent \(Formatting.dollars(spend.spendMonth)) this month, \(Formatting.dollars(spend.spendToday)) today."
+                    + (spend.fallbacksUnavailable ? " Fallback models are not available to this key: refusals stay unlabeled." : ""))
+                    .font(AppFonts.sans(10))
+                    .foregroundStyle(theme.mutedForeground)
+            }
+            toggle("Pause all rules", detail: "On every account. Arriving mail waits until you resume.", isOn: $model.settings.ai.pauseAll)
+            HStack(spacing: 10) {
+                settingsButton("Delete Claude results…", key: nil) { model.confirmDeleteClaudeResults() }
+            }
+        }
+        .task(id: model.settings.ai.model) {
+            if model.mailVolume == nil { await model.refreshMailVolume() }
+            spend = await ai.spend.snapshot()
+            if ai.hasKey, !ai.usesSimulator, ai.keyState == .unknown { await ai.verifyKey() }
+        }
+    }
+
+    private func saveKey() {
+        let key = newKey
+        guard !savingKey, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        savingKey = true
+        Task {
+            if await model.saveAnthropicKey(key) {
+                replacingKey = false
+                newKey = ""
+            }
+            savingKey = false
+        }
+    }
+
+    /// Whether there is a key and what its last check said. Never the key itself.
+    private var keyDetail: String {
+        let ai = model.ai
+        guard ai.hasKey else { return "None. Claude rules wait for one; filter rules run without it. Get a key at console.anthropic.com." }
+        let saved = ai.keyFromEnvironment ? "From the environment (debug build)" : "Saved on this Mac (mode 600)"
+        switch ai.keyState {
+        case .unknown: return saved + "."
+        case .verifying: return saved + " · checking…"
+        case .valid(let at):
+            let minutes = Int(Date().timeIntervalSince(at) / 60)
+            return saved + " · verified " + (minutes < 1 ? "just now" : "\(minutes) min ago")
+        case .badKey: return saved + " · Anthropic rejected it. Check the key."
+        case .modelUnavailable: return saved + " · it can't use \(AppModel.modelName(model.settings.ai.model)). Pick another model."
+        case .offline: return saved + " · could not reach Anthropic to check it."
+        }
+    }
+
+    /// Each model with what it would cost a month at your volume. Debug builds add the offline simulator.
+    private var modelOptions: [(id: String, title: String)] {
+        var options = ClaudeModel.allCases.map { option in
+            (id: option.rawValue, title: option.displayName + (model.mailVolume.map { " · " + Formatting.monthly(AIServices.monthlyEstimate(option, messagesPerDay: $0)) } ?? ""))
+        }
+        #if DEBUG
+        options.append((id: AIServices.simulatorModel, title: "Offline simulator · free (debug)"))
+        #endif
+        if !options.contains(where: { $0.id == model.settings.ai.model }) {
+            options.append((id: model.settings.ai.model, title: "\(model.settings.ai.model) · not available"))
+        }
+        return options
+    }
+
+    private var modelDetail: String {
+        let prices = "Prices as of \(ClaudeModel.pricesAsOf.formatted(date: .abbreviated, time: .omitted))."
+        guard let volume = model.mailVolume else { return prices }
+        return "\(prices) Estimates assume Claude judges all \(Int(volume.rounded())) messages a day you receive here; filters send fewer."
+    }
+
+    private var consentDetail: String {
+        if model.ai.usesSimulator { return "The offline simulator judges: nothing leaves this Mac." }
+        guard let since = model.settings.ai.consents[model.services.accountKey] else {
+            return "Claude judges this account's mail only once you allow it. Filter rules run without it."
+        }
+        return "Mail from this account may go to Claude, since \(since.formatted(date: .abbreviated, time: .omitted))."
+    }
+
+    private func budgetField(_ value: Binding<Double>) -> some View {
+        HStack(spacing: 4) {
+            Text("$").font(AppFonts.sans(12)).foregroundStyle(theme.mutedForeground)
+            TextField("", value: value, format: .number.precision(.fractionLength(0...2)))
+                .fieldStyle()
+                .frame(width: 90)
+        }
     }
 
     // MARK: Signatures

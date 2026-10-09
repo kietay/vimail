@@ -4,7 +4,13 @@ import WebKit
 
 /// Data for one reader render. Encoded to JSON and passed to `vimail.render`.
 struct ReaderPayload: Encodable {
-    struct LabelChip: Encodable { var name: String; var fg: String; var soft: String }
+    struct LabelChip: Encodable {
+        var name: String
+        var fg: String
+        var soft: String
+        /// How rules added the label, as a tooltip ("rule Receipts · Claude: payment receipt for Figma").
+        var source: String?
+    }
     struct MenuItem: Encodable { var title = ""; var icon = ""; var key: String?; var action = ""; var separator = false }
     struct AttachmentItem: Encodable { var id: String; var name: String; var kind: String; var size: String }
     struct Message: Encodable {
@@ -36,6 +42,8 @@ struct ReaderPayload: Encodable {
     var threadID: String?
     var subject = ""
     var labels: [LabelChip] = []
+    /// Under the header, one line per label a rule added: "◆ receipts · rule Receipts · Claude: …".
+    var provenance: [String] = []
     var position = ""
     var hasPrevious = false
     var hasNext = false

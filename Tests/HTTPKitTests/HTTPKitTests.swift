@@ -164,6 +164,49 @@ struct PrivateFileTests {
     }
 }
 
+@Suite("Secret store")
+struct SecretStoreTests {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("vimail-secret-\(UUID().uuidString)")
+
+    @Test func savesAPrivateFileAndReadsItBackTrimmed() throws {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FileSecretStore(url: directory.appendingPathComponent("anthropic-api-key"))
+        #expect(store.read() == nil)
+        try store.save("  sk-ant-test\n")
+        #expect(store.read() == "sk-ant-test")
+        let mode = try #require(try FileManager.default.attributesOfItem(atPath: store.url.path)[.posixPermissions] as? Int)
+        #expect(mode == 0o600)
+
+        try store.save("sk-ant-other")
+        #expect(store.read() == "sk-ant-other")
+        try store.remove()
+        #expect(store.read() == nil)
+        // Removing again is fine.
+        try store.remove()
+    }
+
+    @Test func refusesABlankSecretAndKeepsTheOldOne() throws {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FileSecretStore(url: directory.appendingPathComponent("anthropic-api-key"))
+        try store.save("sk-ant-test")
+        #expect(throws: EmptySecret.self) { try store.save(" \n") }
+        #expect(store.read() == "sk-ant-test")
+    }
+
+    @Test func environmentVariableWinsOverItsFile() throws {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("key")
+        try FileSecretStore(url: file).save("sk-from-file")
+        let read = { (environment: [String: String]) in
+            EnvironmentSecret.read(variable: "ANTHROPIC_API_KEY", fileVariable: "VIMAIL_ANTHROPIC_KEY_FILE", environment: environment)
+        }
+        #expect(read(["ANTHROPIC_API_KEY": "sk-from-env", "VIMAIL_ANTHROPIC_KEY_FILE": file.path]) == "sk-from-env")
+        #expect(read(["ANTHROPIC_API_KEY": " ", "VIMAIL_ANTHROPIC_KEY_FILE": file.path]) == "sk-from-file")
+        #expect(read(["VIMAIL_ANTHROPIC_KEY_FILE": directory.appendingPathComponent("missing").path]) == nil)
+        #expect(read([:]) == nil)
+    }
+}
+
 /// Highest number of concurrent holders seen.
 final class Peak: @unchecked Sendable {
     private let lock = NSLock()

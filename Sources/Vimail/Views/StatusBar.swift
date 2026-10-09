@@ -1,3 +1,4 @@
+import MailRules
 import SwiftUI
 
 /// The vim-style status line.
@@ -27,6 +28,10 @@ struct StatusBar: View {
                 }
                 Text("│").padding(.horizontal, 12)
                 syncText
+                if let rules = model.rulesStatusLine {
+                    Text("│").padding(.horizontal, 12)
+                    rulesText(rules)
+                }
                 let pending = model.compose?.bodyPendingKeys ?? model.pendingKeys
                 if !pending.isEmpty {
                     Text(pending)
@@ -101,6 +106,21 @@ struct StatusBar: View {
             .onTapGesture {
                 if status.phase == .signedOut { model.connectGmail() } else { model.syncNow() }
             }
+    }
+
+    /// What rules are doing, after the sync state; hidden when there is nothing to say. Tapping it
+    /// opens Settings at the rules.
+    private func rulesText(_ line: RulesStatusLine) -> some View {
+        let color = switch line.tone {
+        case .normal: theme.statusText
+        case .busy: theme.yellow
+        case .warning: theme.orange
+        case .error: theme.red
+        }
+        return Text(verbatim: line.text)
+            .foregroundStyle(color)
+            .help("Rules and Claude · click for settings")
+            .onTapGesture { model.openRulesStatus() }
     }
 
     private var position: String {

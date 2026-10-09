@@ -1,5 +1,6 @@
 import AppKit
 import MailCore
+import MailRules
 import MailStore
 import MailSync
 import UniformTypeIdentifiers
@@ -9,8 +10,12 @@ extension AppModel {
     // MARK: - Conversation actions
 
     /// Runs an action on conversations: updates the list instantly, writes the local store,
-    /// queues the provider change, and records undo.
-    func perform(_ action: ThreadAction, on ids: [String]? = nil, labelName: String? = nil, recordUndo: Bool = true, silent: Bool = false) {
+    /// queues the provider change, and records undo. A label edit is reported to the rules, which stop
+    /// re-adding a label you removed; with `teaching`, the rule also gets an example under the same undo.
+    func perform(
+        _ action: ThreadAction, on ids: [String]? = nil, labelName: String? = nil, recordUndo: Bool = true, silent: Bool = false,
+        teaching: RuleTeaching? = nil
+    ) {
         var targets = ids ?? actionTargets
         let draftRows = targets.filter { $0.hasPrefix("draft:") }
         targets.removeAll { $0.hasPrefix("draft:") }
@@ -29,24 +34,91 @@ extension AppModel {
             clearSelection()
             if action.isRepeatable { lastAction = (action, labelName) }
         }
-        let actions = services.actions
+        let services = services
         Task {
             do {
-                guard let record = try await actions.perform(action, threads: targets, labelName: labelName) else {
+                guard let record = try await services.actions.perform(action, threads: targets, labelName: labelName) else {
                     if case .deleteForever = action, !silent { showToast(action.summary(count: targets.count)) }
+                    if let teaching { await teachUnchanged(action, teaching, labelName: labelName, in: services) }
                     return
                 }
-                if recordUndo {
-                    undoStack.append(.action(record))
-                    if undoStack.count > 100 { undoStack.removeFirst() }
-                    redoStack.removeAll()
+                let edit = Self.labelEdit(record)
+                if recordUndo { pushUndo(.action(record, edit)) }
+                var summary = record.summary
+                if let edit {
+                    let note = await noteLabelEdit(.applied(edit), teaching: teaching, in: services)
+                    let name = labelName ?? labels.first { $0.id == edit.labelID }?.name ?? "label"
+                    if let text = note?.removalToast(labelName: name) { summary = text }
                 }
-                if !silent { showToast(record.summary, undoable: recordUndo) }
+                if !silent { showToast(summary, undoable: recordUndo) }
             } catch {
                 showToast("Could not update mail: \(error.localizedDescription)", isError: true)
                 await reloadList()
             }
         }
+    }
+
+    /// Records a step `u` can undo. A new step ends what redo could bring back.
+    func pushUndo(_ entry: UndoEntry) {
+        undoStack.append(entry)
+        if undoStack.count > 100 { undoStack.removeFirst() }
+        redoStack.removeAll()
+    }
+
+    /// Tells the rules about a label edit or its undo, and teaches the rule an example when asked to.
+    /// Reports go out one at a time in the order of your edits, so undoing an edit never overtakes the
+    /// edit's own report. Failures are logged: the edit itself stands.
+    @discardableResult
+    func noteLabelEdit(_ change: UserLabelChange, teaching: RuleTeaching? = nil, in services: AppServices) async -> LabelEditNote? {
+        let previous = ruleReport
+        let report = Task { () -> LabelEditNote? in
+            _ = await previous?.value
+            do {
+                var note = try await services.rules.noteUserChange(change)
+                if let teaching, case .applied(let edit) = change,
+                   let name = try await services.rules.teach(ruleID: teaching.ruleID, messageID: teaching.messageID, matches: teaching.matches, undoKey: edit.undoKey),
+                   !note.taughtRules.contains(name) {
+                    // It learns from this even when its edits don't teach.
+                    note.taughtRules.append(name)
+                }
+                return note
+            } catch {
+                AppModel.log.error("Could not tell rules about a label edit: \(String(describing: type(of: error)))")
+                return nil
+            }
+        }
+        ruleReport = report
+        return await report.value
+    }
+
+    /// `x` or `a` in "why these labels?" when the label was already like that: the rule still gets
+    /// its example, and `u` takes it back.
+    private func teachUnchanged(_ action: ThreadAction, _ teaching: RuleTeaching, labelName: String?, in services: AppServices) async {
+        let labelID: String
+        switch action {
+        case .addLabel(let id), .removeLabel(let id): labelID = id
+        default: return
+        }
+        let edit = LabelEdit(undoKey: UUID().uuidString, labelID: labelID, added: teaching.matches, messageIDs: [])
+        pushUndo(.teaching(edit))
+        let note = await noteLabelEdit(.applied(edit), teaching: teaching, in: services)
+        let name = labelName ?? labels.first { $0.id == labelID }?.name ?? "label"
+        showToast(note?.unchangedToast(labelName: name, added: teaching.matches) ?? "Nothing changed: the label was already like that.", undoable: true)
+    }
+
+    /// The label a label action added or removed, with the messages that really changed, or nil for
+    /// other actions. Moving to a label adds it.
+    static func labelEdit(_ record: UndoRecord) -> LabelEdit? {
+        let labelID: String
+        let added: Bool
+        switch record.action {
+        case .addLabel(let id), .moveToLabel(let id): (labelID, added) = (id, true)
+        case .removeLabel(let id): (labelID, added) = (id, false)
+        default: return nil
+        }
+        let messageIDs = record.messageIDs(changing: labelID, added: added)
+        guard !messageIDs.isEmpty else { return nil }
+        return LabelEdit(undoKey: UUID().uuidString, labelID: labelID, added: added, messageIDs: messageIDs)
     }
 
     /// Updates the in-memory list immediately; the store reload a few milliseconds later reconciles.
@@ -151,10 +223,12 @@ extension AppModel {
             return
         }
         switch entry {
-        case .action(let record):
+        case .action(let record, let edit):
+            let services = services
             Task {
                 do {
                     try await services.actions.undo(record)
+                    if let edit { await noteLabelEdit(.undone(edit), in: services) }
                     redoStack.append(record)
                     showToast("Undone: \(record.summary)")
                     if let first = record.threadIDs.first {
@@ -177,9 +251,19 @@ extension AppModel {
                     showToast("Too late: the message was already sent.")
                 }
             }
+        case .ruleRun(let runID):
+            undoRuleRun(runID)
+        case .teaching(let edit):
+            let services = services
+            Task {
+                await noteLabelEdit(.undone(edit), in: services)
+                showToast("Undone: the rule forgot that example.")
+            }
         }
     }
 
+    /// Redoes an undone action. Its label edit reaches the rules again, as a new edit. Runs of `=` and
+    /// examples taught without a label change are not redone.
     func redo() {
         guard let record = redoStack.popLast() else {
             showToast("Nothing to redo.")
@@ -272,6 +356,12 @@ extension AppModel {
             resetDummyData()
         case .signOut:
             signOutGmail()
+        case .runRules(let messageIDs):
+            runRules(on: messageIDs, confirmed: true)
+        case .undoRuleRun(let runID):
+            undoRuleRun(runID)
+        case .deleteClaudeResults:
+            deleteClaudeResults()
         }
     }
 
@@ -333,6 +423,8 @@ extension AppModel {
         case "quickSnooze": quickSnooze()
         case "toggleRead": toggleRead()
         case "label": openPicker(.label)
+        case "explain": openExplain()
+        case "runRules": runRulesOnSelection()
         case "move": openPicker(.move)
         case "spam": spam()
         case "previous": moveCursor(by: -1)

@@ -70,6 +70,13 @@ in your browser; vimail receives the answer on `http://127.0.0.1:<random port>` 
 `VIMAIL_GMAIL_TOKEN_FILE=/path/to/token.json` makes a debug build use a token file from Google's own
 libraries (for example the read-only `token.json` of `read_inbox.py`) instead of signing in.
 
+**Claude in debug builds** reads real mail with real spend, so Settings shows "DEBUG · real mail, real
+spend" and the budgets start at $5 a month and $1 a day (`VIMAIL_AI_BUDGET=50` raises them, saved ones
+too, to $50 a month, `50/8` also to $8 a day). Each run over stored mail takes at most 200 messages. Gmail
+labels that rules add stay on this Mac (dry run), marked "simulated (debug)" in `g?`. `ANTHROPIC_API_KEY` or
+`VIMAIL_ANTHROPIC_KEY_FILE=/path/to/key` supplies a key without saving one; `VIMAIL_AI_FAKE=1`, or the
+"Offline simulator" model in Settings, judges with a local simulator that sends nothing and costs nothing.
+
 ## Logs
 
 `~/Library/Logs/vimail/vimail.log` (debug builds: `~/Library/Logs/vimail-debug/`), rotated at 5 MB, three
@@ -99,6 +106,7 @@ Vim-first. `?` shows everything in the app. The essentials:
 | `gi gs gt gd ga gz g# g! gA` `gl` | Go to Inbox, Starred, Sent, Drafts, Archive, Snoozed, Trash, Spam, All mail, label… |
 | `H` `L` · `⌘⇧[` `⌘⇧]` · `gv` | Cycle Inbox + pinned views · manage views |
 | `/` · `:`/`⌘K` · `^l` | Search (Gmail syntax) · omnibox · refresh + sync |
+| `g?` · `=` | Why these labels? (`x` wrong, `a` should match, `s` sender rule, `d` turn the rule off, `u` undo its run) · run rules on the selection now (`u` undoes) |
 
 **Compose:** you write Markdown. The pane on the right shows the exact HTML recipients get.
 `⌘↵` sends (with a 5s undo window, `u`). In To, Cc and Bcc, an address becomes a pill when you type `,` `;` or
@@ -133,6 +141,8 @@ Everything is local:
     settings.json                 preferences (theme, delays, editor, signature, account)
     session.json                  last mailbox/view, filter, cursor per mailbox, sidebar
     google-oauth-client.json      your Google Cloud OAuth client (mode 600)
+    anthropic-api-key             your Anthropic API key for Claude rules (mode 600)
+    ai-usage.json                 Claude spend per day for 60 days, all accounts (mode 600)
     accounts/<account>/mail.sqlite   mail cache + full-text index, outbox, drafts, snoozes,
                                   saved views, local labels, annotations, contacts, rules
     accounts/<account>/drafts/    draft attachments and vim buffers
@@ -146,6 +156,8 @@ Everything is local:
 `<account>` is `dummy` or `gmail-<email>`. Each account has its own cache, drafts and views.
 Drafts, snoozes, saved views and local labels never leave this Mac.
 Only mail actions (archive, read, star, labels, send) go to the provider, through the outbox.
+Mail goes to Claude only for accounts you allowed (Settings → Rules & Claude), and only for Claude rules;
+the key and the budgets are shared by every account.
 Access tokens are never written to disk. The refresh token is a file only you can read; it moves to
 the Keychain once the app has a stable signing identity (ad-hoc signatures change with every build).
 `make reset-data` deletes it all. The omnibox has "Regenerate dummy mailbox".
@@ -159,7 +171,7 @@ Sources/
                  FTS5 search, outbox, local-only state, rules and their work queue
   MailSync       MailActions (optimistic, undoable), SyncEngine (push outbox, pull changes)
   MailRules      Rules engine: queue passes, runs over stored mail, preview, breaker, offline judge
-  MailAI         Claude model catalog and prices
+  MailAI         Claude for rules: API client, judge and drafter, model catalog and prices, limiter, spend, settings
   HTTPKit        HTTP transport, private files, priority slots, backoff (shared by Gmail and Claude)
   DummyProvider  Fake Gmail: labels, threads, history cursors, latency/failure simulation, incoming mail
   GmailProvider  Gmail REST API: OAuth (loopback + PKCE), threads, history, batchModify, MIME send, dry-run wrapper

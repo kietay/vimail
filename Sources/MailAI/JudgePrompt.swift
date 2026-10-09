@@ -11,7 +11,9 @@ import MailCore
 public struct JudgePrompt: Sendable {
     /// Part of each verdict's judge hash. Bump it when the instructions, the email format or the
     /// schema change, so cached verdicts are judged again.
-    public static let version = "v1"
+    public static let versionNumber = 1
+    /// "v1".
+    public static let version = "v\(versionNumber)"
     /// Fixed: changing it invalidates the prompt cache.
     public static let effort = MessagesRequest.effort
 

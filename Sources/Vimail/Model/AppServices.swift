@@ -2,11 +2,12 @@ import Foundation
 import DummyProvider
 import GmailProvider
 import MailCore
+import MailRules
 import MailStore
 import MailSync
 import VimailLog
 
-/// Wires the local store, the provider and the sync engine for one account.
+/// Wires the local store, the provider, the sync engine and the rules engine for one account.
 @MainActor
 final class AppServices {
     let accountKey: String
@@ -15,10 +16,20 @@ final class AppServices {
     let dummy: DummyMailProvider?
     let engine: SyncEngine
     let actions: MailActions
+    let rules: RuleEngine
     /// Debug builds with Gmail: where changes and sends are logged instead of reaching Gmail.
     let dryRunDirectory: URL?
 
-    init(settings: AppSettings) throws {
+    /// Debug builds read real mail with real spend: each run over stored mail takes at most this many messages.
+    static var runMessageLimit: Int? {
+        #if DEBUG
+        200
+        #else
+        nil
+        #endif
+    }
+
+    init(settings: AppSettings, ai: AIServices) throws {
         switch settings.dataSource {
         case .dummy:
             accountKey = "dummy"
@@ -57,19 +68,42 @@ final class AppServices {
         )
         self.engine = engine
         actions = MailActions(store: store, outboxChanged: { engine.wake() })
+        rules = RuleEngine(
+            store: store, judge: ai.judge(forAccount: accountKey), config: ai.judgeConfig, simulatedSync: dryRunDirectory != nil,
+            runMessageLimit: Self.runMessageLimit, spend: ai.spendFigures, outboxChanged: { engine.wake() }
+        )
     }
 
     var isGmail: Bool { dummy == nil }
 
-    func start() async {
-        await engine.attach(actions: actions, rules: nil)
+    /// Starts syncing, then the rules, with Claude as `ai` allows and all rules paused when `paused`.
+    func start(ai: AIServices, paused: Bool) async {
+        await engine.attach(actions: actions, rules: rules)
         await engine.start()
+        await configureRules(ai)
+        await setRulesPaused(paused)
+        await rules.start()
         await dummy?.startSimulation()
     }
 
-    /// Stops syncing before another account takes over. Returns once no sync cycle is writing.
+    /// The key, the model, consent or a budget changed: the rules get the judge and Claude's state.
+    func configureRules(_ ai: AIServices) async {
+        await rules.configure(judge: ai.judge(forAccount: accountKey), aiPause: ai.aiPause(forAccount: accountKey), config: ai.judgeConfig)
+    }
+
+    /// Pauses or resumes all rules (Settings' "Pause all rules"). Failures are logged.
+    func setRulesPaused(_ paused: Bool) async {
+        do {
+            try await rules.setPaused(paused)
+        } catch {
+            Log("app").error("Could not \(paused ? "pause" : "resume") rules: \(String(describing: type(of: error)))")
+        }
+    }
+
+    /// Stops syncing, then the rules, before another account takes over. Returns once neither writes.
     func stop() async {
         await engine.stop()
+        await rules.stop()
         await dummy?.stopSimulation()
     }
 

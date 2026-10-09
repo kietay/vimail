@@ -38,6 +38,8 @@ struct OverlayHost: View {
         case .viewEditor(let view): ViewEditorView(original: view)
         case .picker(let kind): PickerView(kind: kind)
         case .confirm(let confirmation): ConfirmView(confirmation: confirmation)
+        case .explain: ExplainView()
+        case .aiConsent: ConsentView()
         }
     }
 }

@@ -26,7 +26,8 @@ struct RuleFeedbackTests {
     @Test func removalTeachesByDefault() async throws {
         let (harness, judge, label) = try await labeledReceipt()
         try await harness.actions.perform(.removeLabel(label), threads: ["t1"])
-        try await harness.engine.noteUserChange(.applied(LabelEdit(undoKey: "u1", labelID: label, added: false, messageIDs: ["m1"])))
+        let note = try await harness.engine.noteUserChange(.applied(LabelEdit(undoKey: "u1", labelID: label, added: false, messageIDs: ["m1"])))
+        #expect(note == LabelEditNote(stoppedRules: ["Receipts"], taughtRules: ["Receipts"]))
 
         #expect(try await marks(harness).map { "\($0.messageID) \($0.present)" } == ["m1 false"])
         let rule = try await harness.rule("Receipts")
@@ -53,7 +54,8 @@ struct RuleFeedbackTests {
         workflow.editsTeach = false
         let (harness, judge, label) = try await labeledReceipt(workflow)
         try await harness.actions.perform(.removeLabel(label), threads: ["t1"])
-        try await harness.engine.noteUserChange(.applied(LabelEdit(undoKey: "u1", labelID: label, added: false, messageIDs: ["m1"])))
+        let note = try await harness.engine.noteUserChange(.applied(LabelEdit(undoKey: "u1", labelID: label, added: false, messageIDs: ["m1"])))
+        #expect(note == LabelEditNote(stoppedRules: ["Receipts"], taughtRules: []))
 
         #expect(try await marks(harness).map(\.present) == [false])
         #expect(try await harness.store.examples(ruleID: harness.rule("Receipts").id).isEmpty)
@@ -87,7 +89,8 @@ struct RuleFeedbackTests {
             mail("m3", thread: "t1", from: stripe, subject: "Re: Your order", minutesAgo: 10),
         ])
         try await harness.actions.perform(.addLabel(label), threads: ["t1"])
-        try await harness.engine.noteUserChange(.applied(LabelEdit(undoKey: "u2", labelID: label, added: true, messageIDs: ["m1", "m2", "m3"])))
+        let note = try await harness.engine.noteUserChange(.applied(LabelEdit(undoKey: "u2", labelID: label, added: true, messageIDs: ["m1", "m2", "m3"])))
+        #expect(note == LabelEditNote(stoppedRules: [], taughtRules: ["Receipts"]))
 
         #expect(try await marks(harness).filter(\.present).map(\.messageID).sorted() == ["m1", "m3"])
         // ✔ on the latest received message.
@@ -99,8 +102,61 @@ struct RuleFeedbackTests {
         let harness = try await Harness(rules: [receiptsRule])
         try await harness.store.upsertMessages([mail("m1", subject: "Hello")])
         try await harness.actions.perform(.addLabel("Label_1"), threads: ["m1"])
-        try await harness.engine.noteUserChange(.applied(LabelEdit(undoKey: "u3", labelID: "Label_1", added: true, messageIDs: ["m1"])))
+        let note = try await harness.engine.noteUserChange(.applied(LabelEdit(undoKey: "u3", labelID: "Label_1", added: true, messageIDs: ["m1"])))
         #expect(try await marks(harness).isEmpty)
+        #expect(note == LabelEditNote())
+    }
+
+    // MARK: - Teaching from "why these labels?"
+
+    @Test func shouldMatchTeachesWhenTheLabelWasAlreadyThere() async throws {
+        let (harness, _, label) = try await labeledReceipt()
+        let rule = try await harness.rule("Receipts")
+        // `a` with the label on every message: the edit changes no label, the rule still learns.
+        let edit = LabelEdit(undoKey: "u1", labelID: label, added: true, messageIDs: [])
+        #expect(try await harness.engine.noteUserChange(.applied(edit)) == LabelEditNote())
+        #expect(try await harness.engine.teach(ruleID: rule.id, messageID: "m1", matches: true, undoKey: "u1") == "Receipts")
+        let examples = try await harness.store.examples(ruleID: rule.id)
+        #expect(examples.map(\.messageID) == ["m1"] && examples.first?.matches == true && examples.first?.origin == .explain)
+        // u
+        try await harness.engine.noteUserChange(.undone(edit))
+        #expect(try await harness.store.examples(ruleID: rule.id).isEmpty)
+    }
+
+    @Test func wrongTeachesARuleWhoseEditsDoNot() async throws {
+        var workflow = receiptsRule
+        workflow.editsTeach = false
+        let (harness, _, label) = try await labeledReceipt(workflow)
+        let rule = try await harness.rule("Receipts")
+        try await harness.actions.perform(.removeLabel(label), threads: ["t1"])
+        var note = try await harness.engine.noteUserChange(.applied(LabelEdit(undoKey: "u1", labelID: label, added: false, messageIDs: ["m1"])))
+        #expect(note.taughtRules.isEmpty)
+        // `x` gives the ✖ anyway, so the toast says it learns.
+        let taught = try #require(try await harness.engine.teach(ruleID: rule.id, messageID: "m1", matches: false, undoKey: "u1"))
+        note.taughtRules.append(taught)
+        #expect(note.removalToast(labelName: "receipts") == "receipts removed · rule Receipts won't re-add it and will learn from this")
+        #expect(try await harness.store.examples(ruleID: rule.id).map(\.matches) == [false])
+    }
+
+    @Test func filterRulesDoNotLearnFromExamples() async throws {
+        let harness = try await Harness(rules: [deploysRule])
+        try await harness.deliver(mail("m1", thread: "t1", subject: "deploy"))
+        await harness.engine.drain()
+        #expect(try await harness.engine.teach(ruleID: harness.rule("Deploys").id, messageID: "m1", matches: false, undoKey: "u1") == nil)
+    }
+
+    @Test func explainLinesForALabeledReceipt() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        let harness = try await Harness(rules: [receiptsRule, travelRule], judge: judge)
+        try await harness.deliver(mail("m1", thread: "t1", from: stripe, subject: "Your receipt", minutesAgo: 30))
+        await harness.engine.drain()
+        let explanation = try await harness.engine.explain(threadID: "t1")
+        let lines = explanation.lines(rules: try await harness.store.rules(), labels: try await harness.store.labels(), modelName: { _ in "Haiku 5.5" }, date: { _ in "today" })
+        #expect(lines.map(\.labelName) == ["receipts", "travel"])
+        #expect(lines.map(\.detail) == [#"rule "Receipts" v1 · Claude (Haiku 5.5) · live, today"#, #"rule "Travel" did not match"#])
+        #expect(lines.map(\.reason) == ["fake: match", "fake: no_match"])
+        let label = try await harness.labelID("receipts")
+        #expect(explanation.provenance(ofLabel: label) == ["rule Receipts · Claude: fake: match"])
     }
 
     // MARK: - Breaker

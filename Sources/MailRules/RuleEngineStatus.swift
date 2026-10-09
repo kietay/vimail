@@ -44,12 +44,10 @@ public struct RuleEngineStatus: Sendable, Equatable {
         previewLeft = figures.previewLeft
     }
 
-    /// Nothing to show: no work, no problem to report. The status bar hides its rules segment.
-    public var isIdle: Bool {
-        if case .paused = ai { return false }
-        return !userPaused && liveQueued == 0 && waitingAI == 0 && held == 0 && failed == 0 && unsureToReview == 0
-            && runs.isEmpty && tripped.isEmpty && labelMissing.isEmpty
-    }
+    /// Nothing to show: no work, no problem to report, so the status bar hides its rules segment
+    /// (`statusLine()` is nil). Runs waiting on a budget or your confirmation, and Claude waiting
+    /// for a key or your consent while no mail waits, are no problem.
+    public var isIdle: Bool { statusLine() == nil }
 }
 
 /// Whether Claude rules can run.

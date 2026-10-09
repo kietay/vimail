@@ -453,7 +453,8 @@ struct DummyGenerator {
 
     // MARK: - Live simulation
 
-    /// New mail for the "incoming mail" simulation: a notification, a newsletter, or a reply in a recent thread.
+    /// New mail for the "incoming mail" simulation: a reply in a recent thread, or a notification, a new
+    /// conversation, personal mail, a receipt, a newsletter or a calendar invite, so rules see every kind.
     mutating func incomingMessages(account: EmailAddress, existing: [MailMessage], labels: [MailLabel], newID: () -> String) -> [MailMessage] {
         let fresh: MailMessage
         let peopleAddresses = Set(DummyContent.people.map(\.address.normalized))
@@ -465,14 +466,17 @@ struct DummyGenerator {
             fresh = reply(to: previous, from: previous.from, account: account, id: newID())
         } else {
             var generated: MailMessage
-            switch Int.random(in: 0...3, using: &rng) {
+            switch Int.random(in: 0...6, using: &rng) {
             case 0, 1: generated = notification(daysAgo: 0)
             case 2:
                 // A new conversation that someone else started.
                 let starters = conversation(daysAgo: 0, people: DummyContent.colleagues + DummyContent.clients, subjects: DummyContent.workSubjects + DummyContent.clientSubjects, label: DummyContent.work)
                 generated = starters.first { $0.from.normalized != account.normalized } ?? notification(daysAgo: 0)
                 if generated.inReplyTo != nil { generated = notification(daysAgo: 0) }
-            default: generated = personalConversation(daysAgo: 0)[0]
+            case 3: generated = personalConversation(daysAgo: 0)[0]
+            case 4: generated = receipt(daysAgo: 0)
+            case 5: generated = newsletter(daysAgo: 0)
+            default: generated = calendarInvite(daysAgo: 0)
             }
             let id = newID()
             generated.id = id
