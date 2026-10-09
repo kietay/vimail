@@ -128,6 +128,7 @@ public struct MessageFacts: Hashable, Sendable {
     public var messageID: String
     public var threadID: String
     public var from: EmailAddress
+    public var subject: String
     public var date: Date
     public var labelIDs: Set<String>
     /// Mailing-list mail (List-Unsubscribe present).
@@ -221,6 +222,23 @@ extension MailStore {
         return try await readBackground { db in
             let (sql, args) = try Self.messageQuerySQL(query, me: me, selecting: "COUNT(*)", ordered: false)
             return try db.scalar(sql, args)
+        }
+    }
+
+    /// Messages in `scope` that carry `labelID`, newest first: a rule's preview checks it finds them.
+    /// Reads on the background connection.
+    public func scopeMessages(carrying labelID: String, scope: RuleScope.Mailboxes, newestFirst limit: Int) async throws -> [String] {
+        let me = selfAddresses
+        return try await readBackground { db in
+            let (inScope, args) = Self.scopeCondition(scope, me: me)
+            return try db.query(
+                """
+                SELECT m.id FROM messages m
+                WHERE \(inScope) AND EXISTS (SELECT 1 FROM message_labels x WHERE x.message_id = m.id AND x.label_id = ?)
+                ORDER BY m.date DESC LIMIT ?
+                """,
+                args + [labelID as SQLBindable, limit]
+            ) { $0.string(0) }
         }
     }
 
@@ -564,6 +582,17 @@ extension MailStore {
         try await read { db in try Self.runRecord(id: id, db) }
     }
 
+    /// The messages a run still has to do (queued, held or waiting for Claude), newest first, so
+    /// what is left can be priced again. Reads on the background connection.
+    public func runMessageIDs(_ id: Int64) async throws -> [String] {
+        try await readBackground { db in
+            try db.query(
+                "SELECT q.message_id FROM rule_queue q JOIN messages m ON m.id = q.message_id WHERE q.run_id = ? AND q.state != 'failed' ORDER BY m.date DESC",
+                [id]
+            ) { $0.string(0) }
+        }
+    }
+
     /// Pauses a running run. Returns false when it was not running.
     @discardableResult
     public func pauseRun(_ id: Int64, reason: RunPauseReason) async throws -> Bool {
@@ -770,6 +799,35 @@ extension MailStore {
         }
     }
 
+    /// Messages Claude was unsure about for the rule and you have not marked ✔ or ✖ yet, newest
+    /// first: the rule editor reviews them. Reads on the background connection.
+    public func unsureMessageIDs(ruleID: String, limit: Int) async throws -> [String] {
+        try await readBackground { db in
+            try db.query(
+                """
+                SELECT d.message_id FROM rule_decisions d JOIN messages m ON m.id = d.message_id
+                WHERE d.rule_id = ? AND d.outcome = ? \(Self.notReviewed)
+                ORDER BY m.date DESC LIMIT ?
+                """,
+                [ruleID, Verdict.unsure.rawValue, limit]
+            ) { $0.string(0) }
+        }
+    }
+
+    /// How many `unsure` decisions of existing rules wait for review, for the rules status.
+    /// Reads on the background connection.
+    public func unsureToReviewCount() async throws -> Int {
+        try await readBackground { db in
+            try db.scalar(
+                "SELECT COUNT(*) FROM rule_decisions d JOIN rules r ON r.id = d.rule_id WHERE d.outcome = ? \(Self.notReviewed)",
+                [Verdict.unsure.rawValue]
+            )
+        }
+    }
+
+    /// The decision `d` has no ✔ or ✖ for its rule and message.
+    static let notReviewed = "AND NOT EXISTS (SELECT 1 FROM rule_examples e WHERE e.rule_id = d.rule_id AND e.message_id = d.message_id)"
+
     static let decisionColumns = "rule_id, revision, outcome, source, judge_hash, run_id, decided_at"
 
     /// A decision read from `decisionColumns`, starting at column `first`.
@@ -870,13 +928,13 @@ extension MailStore {
             for fact in try db.query(
                 """
                 SELECT m.id, m.thread_id, m.from_name, m.from_email, m.date, \(Self.isListMessage),
-                       (SELECT group_concat(label_id, ' ') FROM message_labels WHERE message_id = m.id)
+                       (SELECT group_concat(label_id, ' ') FROM message_labels WHERE message_id = m.id), m.subject
                 FROM messages m WHERE m.id IN (SELECT value FROM json_each(?))
                 """,
                 [ids], { row in
                     MessageFacts(
                         messageID: row.string(0), threadID: row.string(1), from: EmailAddress(name: row.optionalString(2), email: row.string(3)),
-                        date: row.date(4), labelIDs: Set(row.string(6).split(separator: " ").map(String.init)), isList: row.bool(5)
+                        subject: row.string(7), date: row.date(4), labelIDs: Set(row.string(6).split(separator: " ").map(String.init)), isList: row.bool(5)
                     )
                 }
             ) {

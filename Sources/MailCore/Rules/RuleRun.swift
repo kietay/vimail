@@ -23,6 +23,7 @@ public enum RunState: String, Codable, Sendable {
 
 /// Why a run stopped before finishing.
 public enum RunPauseReason: String, Codable, Sendable {
+    /// What runs may spend today, or the month's budget, is spent. It continues when the day turns.
     case budget
     /// It reached its cost cap (1.5× the estimate).
     case cap

@@ -157,7 +157,7 @@ Sources/
   MailStore      SQLite (WAL; a writer, a UI reader and a background reader, each on its own queue),
                  FTS5 search, outbox, local-only state, rules and their work queue
   MailSync       MailActions (optimistic, undoable), SyncEngine (push outbox, pull changes)
-  MailRules      Rules engine (so far its status types)
+  MailRules      Rules engine: queue passes, runs over stored mail, preview, breaker, offline judge
   MailAI         Claude model catalog and prices
   HTTPKit        HTTP transport, private files, priority slots, backoff (shared by Gmail and Claude)
   DummyProvider  Fake Gmail: labels, threads, history cursors, latency/failure simulation, incoming mail
@@ -177,6 +177,10 @@ Vendor/SwiftTerm Terminal emulator for the embedded editor (MIT, trimmed, see Ve
   (`Sources/MailCore/Rules/`). Rules are stored per account with their revisions. Mail that has just
   arrived is queued for rules in the transaction that stores it, never mail from the first sync or the
   background download of older mail, and never mail you sent (from your address or a send-as alias).
+  `RuleEngine` (`Sources/MailRules/`) works through the queue: it decides each message's rules in order,
+  cheapest first, asks Claude once per message for what is left (through MailCore's `RuleJudge`, so it
+  never imports MailAI), and commits labels with an undoable ledger. Older mail is covered only by
+  priced runs you approve.
 - **Chat.** `MailStore` already exposes what a chat agent needs as tools: full-text `threads(query)`,
   `thread(id)`, `message(id)`, `contacts`, annotations. Actions go through `MailActions` for undo and sync.
 

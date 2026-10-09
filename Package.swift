@@ -27,7 +27,7 @@ let package = Package(
         // Gmail over its REST API: OAuth (loopback + PKCE), sync, MIME sending, and a dry-run wrapper.
         .target(name: "GmailProvider", dependencies: ["MailCore", "HTTPKit", "VimailLog"]),
         // The rules engine. It reaches Claude only through MailCore's `RuleJudge`.
-        .target(name: "MailRules", dependencies: ["MailCore", "MailStore", "VimailLog"]),
+        .target(name: "MailRules", dependencies: ["MailCore", "MailStore", "HTTPKit", "VimailLog"]),
         // Claude for rules: the model catalog with prices, and the API client.
         .target(name: "MailAI", dependencies: ["MailCore", "HTTPKit", "VimailLog"]),
         // UI-free app logic: vim keymap parser, Markdown -> email HTML, fuzzy matching.

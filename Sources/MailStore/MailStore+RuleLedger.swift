@@ -476,6 +476,39 @@ extension MailStore {
         try db.run("UPDATE rule_runs SET total = MAX(total - ?, 0), failed = MAX(failed - ?, 0) WHERE id = ?", [rows, failed, run.id])
     }
 
+    /// Messages where the rule still owns a label, newest first: what a re-check of "the labels it
+    /// added" covers. Reads on the background connection.
+    public func messagesLabeled(byRule ruleID: String) async throws -> [String] {
+        try await readBackground { db in
+            try db.query(
+                """
+                SELECT l.message_id FROM rule_ledger l JOIN messages m ON m.id = l.message_id
+                WHERE l.rule_id = ? AND l.reverted_at IS NULL GROUP BY l.message_id ORDER BY MAX(m.date) DESC
+                """,
+                [ruleID]
+            ) { $0.string(0) }
+        }
+    }
+
+    /// Which rules own `labelID` on messages of these conversations: rule ID → its messages, newest
+    /// first. Your label edits teach the rules that own the label.
+    public func ruleOwners(ofLabel labelID: String, inThreads threadIDs: [String]) async throws -> [String: [String]] {
+        try await read { db in
+            var owners: [String: [String]] = [:]
+            for (ruleID, messageID) in try db.query(
+                """
+                SELECT l.rule_id, l.message_id FROM rule_ledger l JOIN messages m ON m.id = l.message_id
+                WHERE l.target = ? AND l.reverted_at IS NULL AND m.thread_id IN (SELECT value FROM json_each(?))
+                ORDER BY m.date DESC
+                """,
+                [labelID, try Self.json(threadIDs)], { ($0.string(0), $0.string(1)) }
+            ) {
+                owners[ruleID, default: []].append(messageID)
+            }
+            return owners
+        }
+    }
+
     /// How many labels deleting the rule could remove: those it added that are still on their
     /// message, that no other rule co-owns and that you did not add yourself. For "Remove the 212
     /// labels it added? Labels you or another rule added stay."

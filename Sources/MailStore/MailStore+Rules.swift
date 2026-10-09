@@ -228,6 +228,21 @@ extension MailStore {
         }
     }
 
+    /// The breaker turns a rule off: it matched most new mail. It stays off, `tripped`, until you turn
+    /// it on again. Returns false when it was off already.
+    @discardableResult
+    public func tripRule(id: String) async throws -> Bool {
+        try await write { db, change in
+            guard let record = try Self.ruleRecord(id: id, db), record.rule.enabled else { return false }
+            var rule = record.rule
+            rule.enabled = false
+            try Self.update(record, to: rule, db)
+            try db.run("UPDATE rules SET state = ? WHERE id = ? AND state = ?", [RuleRecord.State.tripped.rawValue, id, RuleRecord.State.ok.rawValue])
+            change.rules = true
+            return true
+        }
+    }
+
     /// Moves a rule to `position` (0 runs first), shifting the others.
     public func moveRule(id: String, to position: Int) async throws {
         try await write { db, change in
