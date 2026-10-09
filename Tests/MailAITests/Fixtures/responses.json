@@ -1,0 +1,98 @@
+{
+  "comment": "Messages API responses for the judge, by name. Usage numbers are chosen so costs are easy to check by hand.",
+  "plain": {
+    "id": "msg_plain", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+    "content": [
+      {"type": "text", "text": "{\"verdicts\":[{\"rule\":\"r1\",\"reason\":\"Stripe receipt for a Figma subscription\",\"verdict\":\"match\"},{\"rule\":\"r3\",\"reason\":\"automated receipt, nobody waiting\",\"verdict\":\"no_match\"}]}"}
+    ],
+    "stop_reason": "end_turn", "stop_details": null,
+    "usage": {"input_tokens": 900, "output_tokens": 120, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1200}
+  },
+  "thinking": {
+    "id": "msg_thinking", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+    "content": [
+      {"type": "thinking", "thinking": "", "signature": "c2lnbmF0dXJl"},
+      {"type": "redacted_thinking", "data": "cmVkYWN0ZWQ="},
+      {"type": "text", "text": "{\"verdicts\":[{\"rule\":\"r1\",\"reason\":\"payment receipt\",\"verdict\":\"match\"},{\"rule\":\"r3\",\"reason\":\"no question asked\",\"verdict\":\"unsure\"}]}"}
+    ],
+    "stop_reason": "end_turn", "stop_details": null,
+    "usage": {"input_tokens": 900, "output_tokens": 340, "cache_creation_input_tokens": 1200, "cache_read_input_tokens": 0,
+              "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 1200}}
+  },
+  "fallback": {
+    "id": "msg_fallback", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+    "content": [
+      {"type": "fallback", "from": {"model": "claude-sonnet-5-5"}, "to": {"model": "claude-opus-5-5"}},
+      {"type": "thinking", "thinking": "", "signature": "c2ln"},
+      {"type": "text", "text": "{\"verdicts\":[{\"rule\":\"r1\",\"reason\":\"invoice for a purchase\",\"verdict\":\"match\"},{\"rule\":\"r3\",\"reason\":\"automated sender\",\"verdict\":\"no_match\"}]}"}
+    ],
+    "stop_reason": "end_turn", "stop_details": null,
+    "usage": {"input_tokens": 1000, "output_tokens": 200, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+              "iterations": [
+                {"type": "message", "input_tokens": 1000, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+                {"type": "fallback_message", "input_tokens": 1000, "output_tokens": 200, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+              ]}
+  },
+  "fallback-outside-catalog": {
+    "id": "msg_fallback_2", "type": "message", "role": "assistant", "model": "claude-opus-4-8",
+    "content": [
+      {"type": "fallback", "from": {"model": "claude-haiku-5-5"}, "to": {"model": "claude-opus-4-8"}},
+      {"type": "text", "text": "{\"verdicts\":[{\"rule\":\"r1\",\"reason\":\"receipt\",\"verdict\":\"match\"},{\"rule\":\"r3\",\"reason\":\"automated\",\"verdict\":\"no_match\"}]}"}
+    ],
+    "stop_reason": "end_turn", "stop_details": null,
+    "usage": {"input_tokens": 1000, "output_tokens": 100,
+              "iterations": [
+                {"type": "message", "input_tokens": 1000, "output_tokens": 0},
+                {"type": "fallback_message", "input_tokens": 1000, "output_tokens": 100}
+              ]}
+  },
+  "refusal": {
+    "id": "msg_refusal", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+    "content": [],
+    "stop_reason": "refusal",
+    "stop_details": {"type": "refusal", "category": "cyber", "explanation": "This request was declined.", "recommended_model": null},
+    "usage": {"input_tokens": 900, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1200}
+  },
+  "max_tokens": {
+    "id": "msg_cut", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+    "content": [
+      {"type": "thinking", "thinking": "", "signature": "c2ln"},
+      {"type": "text", "text": "{\"verdicts\":[{\"rule\":\"r1\",\"reas"}
+    ],
+    "stop_reason": "max_tokens", "stop_details": null,
+    "usage": {"input_tokens": 900, "output_tokens": 2048, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1200}
+  },
+  "context": {
+    "id": "msg_context", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+    "content": [],
+    "stop_reason": "model_context_window_exceeded", "stop_details": null,
+    "usage": {"input_tokens": 900, "output_tokens": 0}
+  },
+  "empty": {
+    "id": "msg_empty", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+    "content": [{"type": "thinking", "thinking": "", "signature": "c2ln"}, {"type": "text", "text": "  "}],
+    "stop_reason": "end_turn", "stop_details": null,
+    "usage": {"input_tokens": 900, "output_tokens": 30, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1200}
+  },
+  "unreadable": {
+    "id": "msg_unreadable", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+    "content": [{"type": "text", "text": "Both rules match."}],
+    "stop_reason": "end_turn", "stop_details": null,
+    "usage": {"input_tokens": 900, "output_tokens": 30, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1200}
+  },
+  "missing": {
+    "id": "msg_missing", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+    "content": [{"type": "text", "text": "{\"verdicts\":[{\"rule\":\"r1\",\"reason\":\"receipt\",\"verdict\":\"match\"}]}"}],
+    "stop_reason": "end_turn", "stop_details": null,
+    "usage": {"input_tokens": 900, "output_tokens": 60, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1200}
+  },
+  "extra": {
+    "id": "msg_extra", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+    "content": [
+      {"type": "server_tool_use", "id": "x", "name": "y", "input": {}},
+      {"type": "text", "text": "{\"verdicts\":[{\"rule\":\"r1\",\"reason\":\"receipt\",\"verdict\":\"match\"},{\"rule\":\"r1\",\"reason\":\"second thoughts\",\"verdict\":\"no_match\"},{\"rule\":\"r2\",\"reason\":\"not asked\",\"verdict\":\"match\"},{\"rule\":\"r3\",\"reason\":\"maybe\",\"verdict\":\"declined\"},{\"rule\":\"r3\",\"reason\":\"automated\",\"verdict\":\"no_match\"},{\"rule\":7,\"verdict\":\"match\"}]}"}
+    ],
+    "stop_reason": "end_turn", "stop_details": null,
+    "usage": {"input_tokens": 900, "output_tokens": 90, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1200}
+  }
+}
