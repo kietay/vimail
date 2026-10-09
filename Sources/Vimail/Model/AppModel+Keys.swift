@@ -304,6 +304,7 @@ extension AppModel {
         case .label: openPicker(.label)
         case .move: openPicker(.move)
         case .snooze: openPicker(.snooze)
+        case .quickSnooze: quickSnooze()
         case .undo: undo()
         case .redo: redo()
         case .repeatLast: repeatLastAction()

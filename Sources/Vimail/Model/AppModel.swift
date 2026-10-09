@@ -782,6 +782,7 @@ final class AppModel {
             Item(title: thread.labelIDs.contains(SystemLabel.trash) ? "Delete forever" : "Move to trash", icon: "trash", key: "#", action: "trash"),
             Item(title: thread.isStarred ? "Unstar" : "Star", icon: "star", key: "s", action: "star"),
             Item(title: thread.snoozedUntil == nil ? "Snooze…" : "Change snooze…", icon: "clock", key: "z", action: "snooze"),
+            Item(title: "Quick snooze", icon: "clock", key: "b", action: "quickSnooze"),
             Item(title: thread.isUnread ? "Mark as read" : "Mark as unread", icon: "check", key: thread.isUnread ? "I" : "U", action: "toggleRead"),
             Item(title: "Label…", icon: "tag", key: "t", action: "label"),
             Item(title: "Move to…", icon: "folder", key: "m", action: "move"),

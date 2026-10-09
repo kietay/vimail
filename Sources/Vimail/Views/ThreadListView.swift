@@ -188,6 +188,7 @@ struct ThreadListView: View {
         Button("Label…") { model.cursorID = thread.id; model.openPicker(.label) }
         Button("Move to…") { model.cursorID = thread.id; model.openPicker(.move) }
         Button("Snooze…") { model.cursorID = thread.id; model.openPicker(.snooze) }
+        Button("Quick Snooze") { model.quickSnooze(on: targets) }
         Divider()
         Button("Report Spam") { model.perform(.spam, on: targets) }
     }

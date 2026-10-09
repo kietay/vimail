@@ -92,6 +92,7 @@ Vim-first. `?` shows everything in the app. The essentials:
 | `n` `p` · `J` `K` · `space` | Next/previous message in thread · next/previous conversation from the reader · page down |
 | `e` `#`/`dd` `!` `s` `U` `I` | Archive, trash, spam, star, unread, read |
 | `t` `m` `z` | Label, move, snooze (pickers; snooze takes `2h`, `3d`, `tomorrow 9am`, `mon`) |
+| `b` | Quick snooze: no picker, until the time in Settings (default `tomorrow`, 8:00) |
 | `v` `x` `*a` `*n` | Visual range, toggle one, select all/none |
 | `u` `^r` `.` | Undo, redo, repeat last action |
 | `c` `r` `a` `f` | Compose, reply, reply all, forward |

@@ -78,6 +78,11 @@ struct SettingsView: View {
                         .labelsHidden()
                         .frame(width: 200)
                     }
+                    row("Quick snooze", detail: quickSnoozeDetail) {
+                        TextField("tomorrow", text: $model.settings.quickSnooze)
+                            .fieldStyle()
+                            .frame(width: 200)
+                    }
                     toggle("Load remote images", detail: "Off blocks tracking pixels. Show per message from the reader.", isOn: $model.settings.loadRemoteImages)
                     toggle("Always show key hints", detail: "Otherwise hints appear on hover.", isOn: $model.settings.alwaysShowKeyHints)
 
@@ -136,6 +141,14 @@ struct SettingsView: View {
             #endif
         }
         return "Dummy data never touches your real mailbox."
+    }
+
+    /// Where b would snooze to right now, or how to fix the text.
+    private var quickSnoozeDetail: String {
+        guard let date = SnoozeTimes.parseFuture(model.settings.quickSnooze) else {
+            return "Not a future time. Try 3h, 2d, tomorrow 9am or mon."
+        }
+        return "b snoozes without asking. Pressed now: \(Formatting.snoozeDate(date))."
     }
 
     // MARK: Signatures
