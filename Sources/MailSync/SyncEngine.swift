@@ -450,6 +450,11 @@ public actor SyncEngine {
                 try await execute(item.operation, isRetry: item.attempts > 0)
                 try await store.completeOutboxItem(item.id)
                 Self.log.info("\(name): done in \(clock.text)")
+            } catch ProviderError.unauthorized {
+                // Signed out: the change waits for sign-in instead of being dropped as refused.
+                Self.log.notice("\(name): signed out after \(clock.text). Kept for after sign-in")
+                try await store.retryOutboxItem(item.id, error: ProviderError.unauthorized.localizedDescription, retryAt: Date())
+                throw ProviderError.unauthorized
             } catch let error as ProviderError where error.isTransient && Self.isListServerFailure(item.operation, error) {
                 // Not Gmail: mail keeps syncing while the list's server gets more tries, then the unsubscribe is given up.
                 if item.attempts + 1 >= Self.unsubscribeAttempts {

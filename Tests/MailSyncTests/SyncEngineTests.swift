@@ -300,4 +300,42 @@ struct SyncEngineTests {
         #expect(await harness.engine.cycle())
         #expect(try await harness.store.outboxCount() == 0)
     }
+
+    @Test func changesWaitForSignIn() async throws {
+        let harness = try await Harness()
+        #expect(await harness.engine.cycle())
+        let thread = try #require(try await harness.store.threads(.mailbox(.inbox)).first)
+        try await harness.actions.perform(.archive, threads: [thread.id])
+
+        // Signed out: the cycle fails, but the archive stays queued.
+        let signedOut = SyncEngine(provider: SignedOut(base: harness.provider), store: harness.store, initialSyncLimit: 300)
+        #expect(await signedOut.cycle() == false)
+        #expect(try await harness.store.outboxCount() == 1)
+
+        // Signed in again: it goes out.
+        #expect(await harness.engine.cycle())
+        #expect(try await harness.store.outboxCount() == 0)
+        let remote = try await harness.provider.threads(ids: [thread.id]).flatMap { $0 }
+        #expect(remote.allSatisfy { !$0.labelIDs.contains("INBOX") })
+    }
+}
+
+/// The dummy server, as Gmail answers when the sign-in has expired.
+struct SignedOut: MailProvider {
+    let base: DummyMailProvider
+    var kind: String { base.kind }
+
+    func profile() async throws -> AccountProfile { throw ProviderError.unauthorized }
+    func labels() async throws -> [MailLabel] { throw ProviderError.unauthorized }
+    func listThreadIDs(labelID: String?, pageToken: String?, pageSize: Int) async throws -> ThreadIDPage { throw ProviderError.unauthorized }
+    func threads(ids: [String]) async throws -> [[MailMessage]] { throw ProviderError.unauthorized }
+    func changes(since cursor: String) async throws -> ChangeSet { throw ProviderError.unauthorized }
+    func modifyLabels(messageIDs: [String], add: Set<String>, remove: Set<String>) async throws { throw ProviderError.unauthorized }
+    func deleteMessages(ids: [String]) async throws { throw ProviderError.unauthorized }
+    func send(_ message: OutgoingMessage, fileData: [String: Data], isRetry: Bool) async throws -> MailMessage { throw ProviderError.unauthorized }
+    func unsubscribe(oneClick url: URL) async throws { try await base.unsubscribe(oneClick: url) }
+    func attachmentData(messageID: String, attachmentID: String) async throws -> Data { throw ProviderError.unauthorized }
+    func createLabel(name: String) async throws -> MailLabel { throw ProviderError.unauthorized }
+    func renameLabel(id: String, to name: String) async throws -> MailLabel { throw ProviderError.unauthorized }
+    func deleteLabel(id: String) async throws { throw ProviderError.unauthorized }
 }
