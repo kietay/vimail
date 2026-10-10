@@ -11,6 +11,7 @@ final class FakeTransport: HTTPTransport, @unchecked Sendable {
         var url: URL
         var body: Data
         var contentType: String?
+        var headers: [String: String] = [:]
 
         var path: String { url.path }
         var query: [String: String] {
@@ -31,7 +32,8 @@ final class FakeTransport: HTTPTransport, @unchecked Sendable {
     var apiCalls: [Call] { calls.filter { $0.url.host == "gmail.googleapis.com" } }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let call = Call(method: request.httpMethod ?? "GET", url: request.url!, body: request.httpBody ?? Data(), contentType: request.value(forHTTPHeaderField: "Content-Type"))
+        let call = Call(method: request.httpMethod ?? "GET", url: request.url!, body: request.httpBody ?? Data(),
+                        contentType: request.value(forHTTPHeaderField: "Content-Type"), headers: request.allHTTPHeaderFields ?? [:])
         lock.withLock { recorded.append(call) }
         let (status, body) = call.url.host == "oauth2.googleapis.com" && call.path == "/token"
             ? (200, #"{"access_token":"token-1","expires_in":3600}"#)
@@ -43,8 +45,8 @@ final class FakeTransport: HTTPTransport, @unchecked Sendable {
 }
 
 /// A provider whose pacing never slows tests down.
-func makeProvider(_ transport: any HTTPTransport) -> GmailProvider {
-    GmailProvider(credential: testCredential, transport: transport, concurrency: 8,
+func makeProvider(_ transport: any HTTPTransport, web: (any HTTPTransport)? = nil) -> GmailProvider {
+    GmailProvider(credential: testCredential, transport: transport, web: web ?? transport, concurrency: 8,
                   pacer: QuotaPacer(unitsPerSecond: 1_000_000, maxRate: 1_000_000, burst: 1_000_000, maxConcurrent: 8))
 }
 
@@ -240,6 +242,63 @@ struct MappingTests {
         let attachment = GmailMapping.message(try JSONDecoder().decode(GmailMessage.self, from: Data(json(zip).utf8))).attachments.first
         #expect(attachment?.id == "part:")
         #expect(attachment?.filename == "attachment.zip")
+    }
+
+    /// Headers of a list message as Gmail delivers them: its verdict on top, folded values.
+    func listHeaders(verdict: String = "dkim=pass header.i=@news.co header.s=s1 header.b=AbC+/d12",
+                     signed: String = "From:To:Subject:List-Unsubscribe:\r\n\tList-Unsubscribe-Post:Message-ID",
+                     post: String? = "List-Unsubscribe=One-Click") -> [GmailHeader] {
+        var headers = [
+            GmailHeader(name: "Authentication-Results", value: "mx.google.com;\r\n       \(verdict);\r\n       spf=pass (google.com: domain of b@news.co designates 1.2.3.4; really) smtp.mailfrom=b@news.co"),
+            GmailHeader(name: "DKIM-Signature", value: "v=1; a=rsa-sha256; c=relaxed/relaxed; d=news.co; s=s1;\r\n\th=\(signed);\r\n\tbh=xyz=; b=AbC+/d12EfGh\r\n\tIjKl=="),
+            GmailHeader(name: "From", value: "News <hello@news.co>"),
+            GmailHeader(name: "List-Unsubscribe", value: "<https://news.co/u/123>, <mailto:u-123@news.co>"),
+        ]
+        if let post { headers.append(GmailHeader(name: "List-Unsubscribe-Post", value: post)) }
+        return headers
+    }
+
+    @Test func oneClickNeedsADKIMSignatureGmailVerified() throws {
+        #expect(GmailMapping.isOneClickUnsubscribe(listHeaders()))
+        // Gmail names the signature by its domain only.
+        #expect(GmailMapping.isOneClickUnsubscribe(listHeaders(verdict: "dkim=pass header.d=news.co")))
+        // The signature does not cover List-Unsubscribe-Post: anyone on the way could have added it.
+        #expect(!GmailMapping.isOneClickUnsubscribe(listHeaders(signed: "From:To:Subject:List-Unsubscribe")))
+        #expect(!GmailMapping.isOneClickUnsubscribe(listHeaders(verdict: "dkim=fail (bad signature) header.i=@news.co header.b=AbC+/d12")))
+        // Another signature passed.
+        #expect(!GmailMapping.isOneClickUnsubscribe(listHeaders(verdict: "dkim=pass header.i=@esp.example header.b=Zz99Zz99")))
+        #expect(!GmailMapping.isOneClickUnsubscribe(listHeaders(post: nil)))
+        #expect(!GmailMapping.isOneClickUnsubscribe(listHeaders(post: "List-Unsubscribe=Later")))
+
+        // A verdict the sender wrote further down does not count; only Gmail's, on top.
+        var forged = listHeaders(verdict: "dkim=fail header.i=@news.co header.b=AbC+/d12")
+        forged.append(GmailHeader(name: "Authentication-Results", value: "mx.google.com; dkim=pass header.i=@news.co header.b=AbC+/d12"))
+        #expect(!GmailMapping.isOneClickUnsubscribe(forged))
+        var notGmail = listHeaders()
+        notGmail[0].value = "mx.example.net; dkim=pass header.i=@news.co header.b=AbC+/d12"
+        #expect(!GmailMapping.isOneClickUnsubscribe(notGmail))
+        notGmail[0].value = "mx.google.com.example.net; dkim=pass header.i=@news.co header.b=AbC+/d12"
+        #expect(!GmailMapping.isOneClickUnsubscribe(notGmail))
+
+        // Someone on the way adds the headers with a forged signature that starts like the real one,
+        // which signs neither list header. Two signatures then match Gmail's verdict: refused.
+        var relayed = listHeaders(signed: "From:To:Subject")
+        relayed.insert(GmailHeader(name: "DKIM-Signature", value: "v=1; d=news.co; s=s1; h=List-Unsubscribe:List-Unsubscribe-Post; b=AbC+/d12Fake"), at: 1)
+        #expect(!GmailMapping.isOneClickUnsubscribe(relayed))
+        // The verified domain must be the signature's.
+        #expect(!GmailMapping.isOneClickUnsubscribe(listHeaders(verdict: "dkim=pass header.i=@other.co header.b=AbC+/d12")))
+        // A second List-Unsubscribe above the signed one would not break the signature.
+        var doubled = listHeaders()
+        doubled.insert(GmailHeader(name: "List-Unsubscribe", value: "<https://evil.example/u>"), at: 0)
+        #expect(!GmailMapping.isOneClickUnsubscribe(doubled))
+
+        // Mapped messages carry the answer; mail without the header is known not to have it.
+        var verified = sampleMessage()
+        var payload = verified["payload"] as! [String: Any]
+        payload["headers"] = listHeaders().map { ["name": $0.name, "value": $0.value] }
+        verified["payload"] = payload
+        #expect(GmailMapping.message(try JSONDecoder().decode(GmailMessage.self, from: Data(json(verified).utf8))).oneClickUnsubscribe == true)
+        #expect(GmailMapping.message(try JSONDecoder().decode(GmailMessage.self, from: Data(json(sampleMessage()).utf8))).oneClickUnsubscribe == false)
     }
 }
 
@@ -448,12 +507,79 @@ struct ProviderTests {
             OutgoingMessage(from: EmailAddress(email: "me@example.com"), to: [EmailAddress(email: "a@b.co")], subject: "Test", textBody: "Body", threadID: "t1"),
             fileData: [:], isRetry: false
         )
+        try await provider.unsubscribe(oneClick: URL(string: "https://news.co/u/123")!)
         #expect(sent.id.hasPrefix("dryrun-") && sent.threadID == "t1")
         #expect(transport.apiCalls.isEmpty)
+        #expect(!transport.calls.contains { $0.url.host == "news.co" })
         let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         #expect(files.contains("changes.log"))
         #expect(files.contains { $0.hasSuffix(".eml") })
+        let log = try String(contentsOf: directory.appendingPathComponent("changes.log"), encoding: .utf8)
+        #expect(log.contains("unsubscribe one-click host=news.co"))
+        #expect(!log.contains("/u/123"))
         try? FileManager.default.removeItem(at: directory)
+    }
+
+    @Test func oneClickUnsubscribeIsOnePlainPost() async throws {
+        let transport = FakeTransport { call in call.url.host == "news.co" ? (204, "") : (404, "{}") }
+        let provider = makeProvider(transport)
+        try await provider.unsubscribe(oneClick: URL(string: "https://news.co/u/123?t=abc")!)
+        let call = try #require(transport.calls.first)
+        #expect(transport.calls.count == 1)
+        #expect(call.method == "POST" && call.url.absoluteString == "https://news.co/u/123?t=abc")
+        #expect(String(decoding: call.body, as: UTF8.self) == "List-Unsubscribe=One-Click")
+        #expect(call.contentType == "application/x-www-form-urlencoded")
+        // RFC 8058: no cookies, no credentials. Not even a Google token is fetched.
+        #expect(call.headers["Authorization"] == nil && call.headers["Cookie"] == nil)
+        await #expect(throws: ProviderError.rejected("One-click unsubscribe needs an https address")) {
+            try await provider.unsubscribe(oneClick: URL(string: "http://news.co/u/123")!)
+        }
+    }
+
+    @Test func oneClickUnsubscribeAnswers() async throws {
+        let transport = FakeTransport { call in
+            switch call.path {
+            case "/moved": (302, "")
+            case "/busy": (503, "")
+            case "/slow-down": (429, "")
+            default: (404, "")
+            }
+        }
+        let provider = makeProvider(transport)
+        // RFC 8058 forbids redirects, but the server received the request.
+        try await provider.unsubscribe(oneClick: URL(string: "https://news.co/moved")!)
+        // Server trouble is worth another try later: the outbox retries it, not the provider.
+        await #expect(throws: ProviderError.server("news.co answered 503")) {
+            try await provider.unsubscribe(oneClick: URL(string: "https://news.co/busy")!)
+        }
+        #expect(transport.calls.filter { $0.path == "/busy" }.count == 1)
+        await #expect(throws: ProviderError.server("news.co answered 429")) {
+            try await provider.unsubscribe(oneClick: URL(string: "https://news.co/slow-down")!)
+        }
+        await #expect(throws: ProviderError.rejected("news.co answered 404")) {
+            try await provider.unsubscribe(oneClick: URL(string: "https://news.co/gone")!)
+        }
+    }
+
+    @Test func oneClickUnsubscribeBlamesTheMacOnlyWhenItIsOffline() async throws {
+        let offline = makeProvider(FakeTransport { _ in (200, "{}") }, web: FailingTransport(error: URLError(.notConnectedToInternet)))
+        await #expect(throws: ProviderError.offline(URLError(.notConnectedToInternet).localizedDescription)) {
+            try await offline.unsubscribe(oneClick: URL(string: "https://news.co/u")!)
+        }
+        for code: URLError.Code in [.cannotFindHost, .networkConnectionLost, .timedOut] {
+            let failing = makeProvider(FakeTransport { _ in (200, "{}") }, web: FailingTransport(error: URLError(code)))
+            await #expect(throws: ProviderError.server("news.co could not be reached")) {
+                try await failing.unsubscribe(oneClick: URL(string: "https://news.co/u")!)
+            }
+        }
+    }
+}
+
+struct FailingTransport: HTTPTransport {
+    let error: URLError
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        throw error
     }
 }
 

@@ -338,6 +338,19 @@ public actor DummyMailProvider: MailProvider {
         return message
     }
 
+    /// What the lists' servers received, for tests. Not saved: the lists are not part of the server.
+    public private(set) var oneClickUnsubscribes: [URL] = []
+
+    /// A list at a `gone.…` host refuses one-click unsubscribes, and one at `down.…` never answers,
+    /// to try the failure paths.
+    public func unsubscribe(oneClick url: URL) async throws {
+        try await network()
+        let host = url.host ?? ""
+        if host.hasPrefix("gone.") { throw ProviderError.rejected("\(host) answered 404") }
+        if host.hasPrefix("down.") { throw ProviderError.server("\(host) answered 503") }
+        oneClickUnsubscribes.append(url)
+    }
+
     public func attachmentData(messageID: String, attachmentID: String) async throws -> Data {
         try await network()
         return try attachmentBytes(messageID: messageID, attachmentID: attachmentID)

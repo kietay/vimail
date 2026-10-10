@@ -121,6 +121,8 @@ struct AppSettings: Codable, Equatable {
     var markReadDelay: Double = 1.0
     /// Seconds before a sent message actually leaves (undo window).
     var undoSendSeconds: Double = 5
+    /// Archive the conversation when you send a reply in it.
+    var archiveOnSend = false
     /// What `b` snoozes until, typed like in the snooze picker: "3h", "tomorrow 9am", "mon".
     var quickSnooze = "tomorrow"
     var loadRemoteImages = false
@@ -161,6 +163,7 @@ struct AppSettings: Codable, Equatable {
         }
         markReadDelay = (try? container.decode(Double.self, forKey: .markReadDelay)) ?? defaults.markReadDelay
         undoSendSeconds = (try? container.decode(Double.self, forKey: .undoSendSeconds)) ?? defaults.undoSendSeconds
+        archiveOnSend = (try? container.decode(Bool.self, forKey: .archiveOnSend)) ?? defaults.archiveOnSend
         quickSnooze = (try? container.decode(String.self, forKey: .quickSnooze)) ?? defaults.quickSnooze
         loadRemoteImages = (try? container.decode(Bool.self, forKey: .loadRemoteImages)) ?? defaults.loadRemoteImages
         editorCommand = (try? container.decode(String.self, forKey: .editorCommand)) ?? defaults.editorCommand
@@ -193,7 +196,7 @@ struct AppSettings: Codable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case appearance, lightTheme, darkTheme, markReadDelay, undoSendSeconds, quickSnooze, loadRemoteImages, editorCommand
+        case appearance, lightTheme, darkTheme, markReadDelay, undoSendSeconds, archiveOnSend, quickSnooze, loadRemoteImages, editorCommand
         case composeStartsInVim, showComposePreview, signatures, defaultSignature, alwaysShowKeyHints, dataSource, gmailAccount, pollSeconds
         case dummySimulateIncomingMail, dummyLatencyMilliseconds, dummyFailureRate, ai
         case legacyTheme = "theme"
@@ -208,6 +211,7 @@ struct AppSettings: Codable, Equatable {
         try container.encode(darkTheme, forKey: .darkTheme)
         try container.encode(markReadDelay, forKey: .markReadDelay)
         try container.encode(undoSendSeconds, forKey: .undoSendSeconds)
+        try container.encode(archiveOnSend, forKey: .archiveOnSend)
         try container.encode(quickSnooze, forKey: .quickSnooze)
         try container.encode(loadRemoteImages, forKey: .loadRemoteImages)
         try container.encode(editorCommand, forKey: .editorCommand)

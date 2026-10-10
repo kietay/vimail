@@ -122,6 +122,8 @@ struct AppCommands: Commands {
             Button("Why These Labels?") { model.openExplain() }
             Button("Run Rules") { model.runRulesOnSelection() }
             Button("Create Rule from This…") { model.newRuleFromThread() }
+            // In normal mode the keymap takes ⌘U first; this also covers the search field.
+            Button("Unsubscribe") { model.unsubscribe() }.keyboardShortcut("u", modifiers: .command)
         }
         CommandGroup(after: .sidebar) {
             Button("Toggle Sidebar") { model.session.sidebarCollapsed.toggle() }.keyboardShortcut("s", modifiers: [.command, .control])

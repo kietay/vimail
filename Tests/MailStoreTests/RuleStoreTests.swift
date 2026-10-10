@@ -37,7 +37,8 @@ func rowCounts(_ store: MailStore, messageID: String? = nil) throws -> [String: 
 struct RuleStoreTests {
     // MARK: - Migration
 
-    @Test func migratesAVersionOneDatabase() async throws {
+    /// A database from before rules: version 2, which the installed app may already have.
+    @Test func migratesADatabaseFromBeforeRules() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("vimail-tests-\(UUID().uuidString)").appendingPathComponent("mail.sqlite")
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         do {
@@ -45,7 +46,8 @@ struct RuleStoreTests {
             try db.execute("PRAGMA journal_mode = WAL")
             try db.transaction {
                 try db.execute(Schema.migrations[0])
-                try db.execute("PRAGMA user_version = 1")
+                try db.execute(Schema.migrations[1])
+                try db.execute("PRAGMA user_version = 2")
             }
             try db.transaction {
                 try MailStore.upsertLabel(MailLabel(id: "Label_1", name: "work", kind: .user, colorIndex: 3), db)
@@ -58,7 +60,7 @@ struct RuleStoreTests {
         }
 
         let store = try MailStore(url: url)
-        #expect(try store.readNow { try $0.scalar("PRAGMA user_version") } == 3)
+        #expect(try store.readNow { try $0.scalar("PRAGMA user_version") } == Schema.migrations.count)
         #expect(try await store.threads(.mailbox(.label("Label_1"))).map(\.id) == ["t1"])
         #expect(try await store.threads(ThreadQuery(scope: .anywhere).narrowed(by: .parse("budget"))).map(\.id) == ["t1"])
         #expect(Set(try await store.labels().map(\.id)) == ["Label_1", "local-1"])

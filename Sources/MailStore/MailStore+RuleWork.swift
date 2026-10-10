@@ -1058,7 +1058,7 @@ extension MailStore {
     public func judgeInputs(messageID: String) async throws -> JudgeInputs? {
         try await readBackground { db in
             func decode(_ row: SQLRow) throws -> MailMessage {
-                try Self.decodeMessage(row, labels: Set(row.string(19).split(separator: " ").map(String.init)))
+                try Self.decodeMessage(row, labels: Set(row.string(Self.labelsColumn).split(separator: " ").map(String.init)))
             }
             guard let message = try db.first("SELECT \(Self.messageColumns) FROM messages m WHERE m.id = ?", [messageID], decode) else { return nil }
             let thread = try db.query(

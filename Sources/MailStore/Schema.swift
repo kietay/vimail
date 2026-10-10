@@ -140,7 +140,9 @@ enum Schema {
             last_seen INTEGER NOT NULL DEFAULT 0
         );
         """,
-        // 2: rules, their work queue, runs, decisions and ledger.
+        // 2: RFC 8058 one-click unsubscribe. NULL: cached before vimail checked.
+        "ALTER TABLE messages ADD COLUMN one_click_unsubscribe INTEGER;",
+        // 3: rules, their work queue, runs, decisions and ledger.
         """
         CREATE INDEX messages_date ON messages(date DESC);
         CREATE TABLE rules (id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, position INTEGER NOT NULL,
@@ -200,7 +202,7 @@ enum Schema {
         CREATE INDEX rule_ledger_outbox ON rule_ledger(outbox_id) WHERE outbox_id IS NOT NULL;
         CREATE UNIQUE INDEX rule_ledger_active ON rule_ledger(message_id, rule_id, target) WHERE reverted_at IS NULL;
         """,
-        // 3: when a run was confirmed (a re-check applies only after it), recent Claude call costs for
+        // 4: when a run was confirmed (a re-check applies only after it), recent Claude call costs for
         // estimates, and a new live run for the day after you undo one.
         """
         ALTER TABLE rule_runs ADD COLUMN confirmed_at INTEGER;

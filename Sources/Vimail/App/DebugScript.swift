@@ -10,7 +10,9 @@ import WebKit
 /// Tokens: single characters, vim notation (`<Esc> <CR> <Tab> <Space> <BS> <Up> <Down> <C-d> <D-k> <S-Space>`),
 /// `type:text` (types characters), `wait:ms`, `activate` (bring the window to the front), `hide` (hide the app),
 /// `snapshot:name` (saves the reader as `snapshots/name.png` in the data folder, and as `name.json`: which
-/// messages are collapsed, focused and on screen).
+/// messages are collapsed, focused and on screen),
+/// `click:menu` / `click:<action>` (clicks the reader's ⋯ button, or a reader button such as `click:unsubscribe`).
+/// Scripted runs log unsubscribe pages instead of opening the browser.
 @MainActor
 enum DebugScript {
     static func runIfRequested() {
@@ -33,6 +35,11 @@ enum DebugScript {
                 }
                 if token.hasPrefix("snapshot:") {
                     await snapshot(named: String(token.dropFirst(9)))
+                    continue
+                }
+                if token.hasPrefix("click:") {
+                    if case .success(let model) = AppContainer.shared { model.reader.debugClick(String(token.dropFirst(6))) }
+                    try? await Task.sleep(for: .milliseconds(120))
                     continue
                 }
                 if token.hasPrefix("type:") {

@@ -47,6 +47,7 @@ enum GmailMapping {
         if snippet.isEmpty { snippet = HTMLText.decodeEntities(message.snippet ?? "") }
         let references = (header("References") ?? "")
             .split(whereSeparator: \.isWhitespace).map(String.init).filter { $0.hasPrefix("<") }
+        let listUnsubscribe = header("List-Unsubscribe")
 
         return MailMessage(
             id: message.id,
@@ -66,9 +67,70 @@ enum GmailMapping {
             messageIDHeader: header("Message-ID").flatMap(firstMessageID),
             inReplyTo: header("In-Reply-To").flatMap(firstMessageID),
             references: references,
-            listUnsubscribe: header("List-Unsubscribe"),
+            listUnsubscribe: listUnsubscribe,
+            oneClickUnsubscribe: listUnsubscribe != nil && isOneClickUnsubscribe(payload.headers ?? []),
             sizeEstimate: message.sizeEstimate ?? 0
         )
+    }
+
+    // MARK: - One-click unsubscribe
+
+    /// RFC 8058 one-click: the sender asks for it (`List-Unsubscribe-Post: List-Unsubscribe=One-Click`)
+    /// and a DKIM signature Gmail verified covers both headers. Without that signature anyone on the
+    /// way could have added them, so one-click is not offered (RFC 8058, section 4).
+    static func isOneClickUnsubscribe(_ headers: [GmailHeader]) -> Bool {
+        func values(_ name: String) -> [String] {
+            headers.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame }.map(\.value)
+        }
+        // One of each: a copy added above a signed header would leave the signature valid.
+        let post = values("List-Unsubscribe-Post")
+        guard values("List-Unsubscribe").count == 1, post.count == 1,
+              post[0].trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("List-Unsubscribe=One-Click") == .orderedSame else { return false }
+        // Gmail puts its verdict above every other header. Copies further down can come from anyone.
+        guard let verdict = values("Authentication-Results").first,
+              verdict.split(separator: ";").first?.split(whereSeparator: \.isWhitespace).first?.lowercased() == "mx.google.com" else { return false }
+        let signatures = values("DKIM-Signature").map(dkimTags)
+        return passedDKIM(verdict).contains { result in
+            // The signature Gmail verified: its domain, and its b= value starts the way Gmail quotes it.
+            let verified = signatures.filter { tags in
+                let domain = tags["d"]?.lowercased() ?? ""
+                guard !domain.isEmpty, result.domain == domain || result.domain.hasSuffix(".\(domain)") else { return false }
+                guard let prefix = result.signature else { return true }
+                return !prefix.isEmpty && (tags["b"] ?? "").hasPrefix(prefix)
+            }
+            // A second one that looks the same may be a forged copy: then which one passed is unknown.
+            guard verified.count == 1 else { return false }
+            let signed = Set((verified[0]["h"] ?? "").lowercased().split(separator: ":"))
+            return signed.contains("list-unsubscribe") && signed.contains("list-unsubscribe-post")
+        }
+    }
+
+    /// The tags of a DKIM-Signature header (`d=example.com; h=from:to; b=…`), whitespace removed.
+    static func dkimTags(_ value: String) -> [String: String] {
+        var tags: [String: String] = [:]
+        for pair in value.split(separator: ";") {
+            guard let equals = pair.firstIndex(of: "=") else { continue }
+            tags[pair[..<equals].trimmingCharacters(in: .whitespacesAndNewlines)] = String(pair[pair.index(after: equals)...].filter { !$0.isWhitespace })
+        }
+        return tags
+    }
+
+    /// The DKIM signatures an Authentication-Results header says passed, for example
+    /// `dkim=pass header.i=@example.com header.s=s1 header.b=AbCd1234`.
+    static func passedDKIM(_ results: String) -> [(domain: String, signature: String?)] {
+        // Comments in parentheses can hold anything, ";" included.
+        let clean = results.replacingOccurrences(of: #"\([^()]*\)"#, with: " ", options: .regularExpression)
+        return clean.split(separator: ";").compactMap { result in
+            let words = result.split(whereSeparator: \.isWhitespace)
+            guard words.first?.lowercased() == "dkim=pass" else { return nil }
+            var properties: [String: String] = [:]
+            for word in words.dropFirst() {
+                guard let equals = word.firstIndex(of: "=") else { continue }
+                properties[word[..<equals].lowercased()] = word[word.index(after: equals)...].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            }
+            let domain = properties["header.d"] ?? properties["header.i"].flatMap { $0.split(separator: "@").last.map(String.init) } ?? ""
+            return (domain.lowercased(), properties["header.b"])
+        }
     }
 
     struct Content {

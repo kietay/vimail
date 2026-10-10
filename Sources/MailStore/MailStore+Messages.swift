@@ -120,15 +120,16 @@ extension MailStore {
 
     /// Inserts or updates messages (content and provider labels). Local labels on existing messages
     /// are kept. Returns the IDs of messages that were not stored before.
+    /// `recordsContacts: false` keeps their addresses out of compose suggestions (unsubscribe emails).
     @discardableResult
-    public func upsertMessages(_ messages: [MailMessage]) async throws -> [String] {
+    public func upsertMessages(_ messages: [MailMessage], recordsContacts: Bool = true) async throws -> [String] {
         guard !messages.isEmpty else { return [] }
         return try await write { db, change in
             let localLabels = try Self.localLabelIDs(db)
             let me = self.selfAddresses
             var inserted: [String] = []
             for message in messages {
-                if try Self.upsertMessage(message, localLabels: localLabels, me: me, db) { inserted.append(message.id) }
+                if try Self.upsertMessage(message, localLabels: localLabels, me: me, recordsContacts: recordsContacts, db) { inserted.append(message.id) }
                 change.threadIDs.insert(message.threadID)
             }
             try Self.refreshThreads(change.threadIDs, db, selfAddresses: me)
@@ -186,8 +187,8 @@ extension MailStore {
             """
             INSERT INTO messages(id, thread_id, date, from_name, from_email, to_json, cc_json, bcc_json, reply_to_json,
                 subject, snippet, text_body, html_body, attachments_json, message_id_header, in_reply_to,
-                references_json, list_unsubscribe, size, is_local)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                references_json, list_unsubscribe, one_click_unsubscribe, size, is_local)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
             ON CONFLICT(id) DO UPDATE SET
                 thread_id = excluded.thread_id, date = excluded.date, from_name = excluded.from_name,
                 from_email = excluded.from_email, to_json = excluded.to_json, cc_json = excluded.cc_json,
@@ -195,14 +196,15 @@ extension MailStore {
                 snippet = excluded.snippet, text_body = excluded.text_body, html_body = excluded.html_body,
                 attachments_json = excluded.attachments_json, message_id_header = excluded.message_id_header,
                 in_reply_to = excluded.in_reply_to, references_json = excluded.references_json,
-                list_unsubscribe = excluded.list_unsubscribe, size = excluded.size, is_local = 0
+                list_unsubscribe = excluded.list_unsubscribe, one_click_unsubscribe = excluded.one_click_unsubscribe,
+                size = excluded.size, is_local = 0
             """,
             [
                 message.id, message.threadID, message.date, message.from.name, message.from.email,
                 try json(message.to), try json(message.cc), try json(message.bcc), try json(message.replyTo),
                 message.subject, message.snippet, message.textBody, message.htmlBody, try json(message.attachments),
                 message.messageIDHeader, message.inReplyTo, try json(message.references), message.listUnsubscribe,
-                message.sizeEstimate,
+                message.oneClickUnsubscribe, message.sizeEstimate,
             ]
         )
         try setProviderLabels(message.id, message.labelIDs, localLabels: localLabels, db)

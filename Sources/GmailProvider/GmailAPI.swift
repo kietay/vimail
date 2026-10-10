@@ -3,6 +3,36 @@ import HTTPKit
 import MailCore
 import VimailLog
 
+/// Requests to servers other than Google's (one-click unsubscribe): no cookies, no stored
+/// credentials, no cache, and a redirect comes back as the response instead of being followed.
+public struct WebTransport: HTTPTransport {
+    private let session: URLSession
+
+    public init() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.urlCredentialStorage = nil
+        configuration.urlCache = nil
+        configuration.timeoutIntervalForRequest = 20
+        configuration.waitsForConnectivity = false
+        session = URLSession(configuration: configuration)
+    }
+
+    public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await session.data(for: request, delegate: RefuseRedirects())
+        guard let http = response as? HTTPURLResponse else { throw ProviderError.server("No HTTP response") }
+        return (data, http)
+    }
+}
+
+private final class RefuseRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest) async -> URLRequest? {
+        nil
+    }
+}
+
 /// A small Gmail REST client: bearer token, gzip, quota pacing, retries and error mapping.
 struct GmailAPI: Sendable {
     /// Every request: method, path, status, size, duration, attempt. Never bodies or tokens.

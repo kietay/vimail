@@ -139,3 +139,92 @@ struct DraftTests {
         #expect(draft.signature == nil)
     }
 }
+
+@Suite("Unsubscribe")
+struct UnsubscribeTests {
+    let news = EmailAddress(name: "The Browser", email: "hello@thebrowser.com")
+    let sam = EmailAddress(name: "Sam", email: "sam@hey.com")
+
+    func mail(_ id: String = "1", from: EmailAddress? = nil, header: String?, oneClick: Bool? = false, html: String? = nil, text: String? = nil) -> MailMessage {
+        MailMessage(id: id, threadID: "t", labelIDs: ["INBOX"], from: from ?? news, to: [sam], subject: "Issue 12", snippet: "",
+                    date: Date(timeIntervalSince1970: Double(id) ?? 0), textBody: text, htmlBody: html, listUnsubscribe: header, oneClickUnsubscribe: oneClick)
+    }
+
+    @Test func readsTheHeaderInTheSendersOrder() {
+        let uris = Unsubscribe.uris(in: "<mailto:unsub@list.co?subject=unsubscribe>,\r\n <https://list.co/u?id=1&t=a b>, <javascript:alert(1)>, (comment)")
+        #expect(uris.map(\.absoluteString) == ["mailto:unsub@list.co?subject=unsubscribe", "https://list.co/u?id=1&t=ab"])
+        // Without angle brackets, as some senders write it.
+        #expect(Unsubscribe.uris(in: "https://list.co/u, mailto:x@list.co").map(\.absoluteString) == ["https://list.co/u", "mailto:x@list.co"])
+        #expect(Unsubscribe.uris(in: "<https://>, <ftp://list.co/u>").isEmpty)
+    }
+
+    @Test func prefersOneClickThenEmailThenThePage() {
+        let both = "<https://list.co/u>, <mailto:unsub@list.co>"
+        #expect(mail(header: both, oneClick: true).listUnsubscribeMethod == .oneClick(URL(string: "https://list.co/u")!))
+        #expect(mail(header: both, oneClick: false).listUnsubscribeMethod == .email(to: EmailAddress(email: "unsub@list.co"), subject: "Unsubscribe", body: "Unsubscribe"))
+        #expect(mail(header: "<http://list.co/u>, <https://list.co/v>").listUnsubscribeMethod == .website(URL(string: "https://list.co/v")!))
+        // One-click needs HTTPS.
+        #expect(mail(header: "<http://list.co/u>", oneClick: true).listUnsubscribeMethod == .website(URL(string: "http://list.co/u")!))
+        #expect(mail(header: nil).listUnsubscribeMethod == nil)
+    }
+
+    @Test func emailKeepsTheListsCommandButNotExtraRecipients() throws {
+        let url = try #require(URL(string: "mailto:list-request@lists.org?subject=unsubscribe%0D%0ABcc:%20x@evil.co&body=SIGNOFF%20LIST&cc=boss@work.co"))
+        #expect(Unsubscribe.email(url) == .email(to: EmailAddress(email: "list-request@lists.org"), subject: "unsubscribe Bcc: x@evil.co", body: "SIGNOFF LIST"))
+        #expect(Unsubscribe.email(URL(string: "mailto:?to=leave@lists.org")!) == .email(to: EmailAddress(email: "leave@lists.org"), subject: "Unsubscribe", body: "Unsubscribe"))
+        #expect(Unsubscribe.email(URL(string: "mailto:not-an-address")!) == nil)
+        #expect(Unsubscribe.email(URL(string: "https://list.co/u")!) == nil)
+    }
+
+    @Test func findsTheFootersUnsubscribeLink() {
+        let html = """
+        <p>Read <a href="https://news.co/post/unsubscribe-from-noise">this essay</a>.</p>
+        <a href='https://news.co/prefs'>Manage preferences</a>
+        <A class="x" HREF="https://news.co/u?a=1&amp;b=2"><span>Unsubscribe</span></A> · <a href="mailto:x@news.co">unsubscribe by email</a>
+        """
+        #expect(Unsubscribe.link(inHTML: html) == URL(string: "https://news.co/u?a=1&b=2"))
+        // Only the address mentions it.
+        #expect(Unsubscribe.link(inHTML: #"<a href="https://news.co/optout?id=4">Click here</a>"#) == URL(string: "https://news.co/optout?id=4"))
+        #expect(Unsubscribe.link(inHTML: #"<a href="https://news.co">Home</a> <abbr>unsubscribe</abbr>"#) == nil)
+
+        #expect(Unsubscribe.link(inText: "Thanks!\n\nTo unsubscribe, visit:\nhttps://list.co/leave?u=9.\nSite: https://list.co") == URL(string: "https://list.co/leave?u=9"))
+        #expect(Unsubscribe.link(inText: "Unsubscribe: https://list.co/u\nOur site: https://list.co") == URL(string: "https://list.co/u"))
+        #expect(Unsubscribe.link(inText: "See https://list.co/docs for details.") == nil)
+    }
+
+    @Test func aConversationUsesItsNewestListMessage() {
+        let older = mail("1", header: "<https://list.co/old>", oneClick: true)
+        let newer = mail("2", header: "<https://list.co/new>", oneClick: true)
+        let reply = mail("3", from: sam, header: nil, text: "Unsubscribe me: https://list.co/me")
+        let thread = MailThread(id: "t", subject: "Issue 12", messages: [older, newer, reply], labelIDs: ["INBOX"])
+        let target = thread.unsubscribeTarget(excluding: ["sam@hey.com"])
+        #expect(target?.message.id == "2")
+        #expect(target?.method == .oneClick(URL(string: "https://list.co/new")!))
+
+        // No header anywhere: the newest received message's link.
+        let plain = MailThread(id: "t", subject: "Hi", messages: [mail("1", header: nil, html: #"<a href="https://a.co/unsubscribe">Unsubscribe</a>"#), reply], labelIDs: [])
+        #expect(plain.unsubscribeTarget(excluding: ["sam@hey.com"])?.method == .website(URL(string: "https://a.co/unsubscribe")!))
+        #expect(MailThread(id: "t", subject: "", messages: [reply], labelIDs: []).unsubscribeTarget(excluding: ["sam@hey.com"]) == nil)
+    }
+
+    @Test func onlyMailCachedBeforeTheCheckNeedsOne() {
+        #expect(mail(header: "<https://list.co/u>", oneClick: nil).needsOneClickCheck)
+        #expect(!mail(header: "<https://list.co/u>", oneClick: false).needsOneClickCheck)
+        #expect(!mail(header: "<mailto:u@list.co>", oneClick: nil).needsOneClickCheck)
+        #expect(!mail(header: nil, oneClick: nil).needsOneClickCheck)
+    }
+
+    @Test func queuedEmailComesFromTheAccount() throws {
+        let method = UnsubscribeMethod.email(to: EmailAddress(email: "unsub@list.co"), subject: "unsubscribe", body: "Unsubscribe")
+        let request = try #require(UnsubscribeRequest(method, list: "The Browser", from: sam))
+        guard case .email(let message) = request.method else {
+            Issue.record("Expected an email")
+            return
+        }
+        #expect(message.from == sam && message.to == [EmailAddress(email: "unsub@list.co")] && message.subject == "unsubscribe")
+        #expect(message.messageID?.hasSuffix("@hey.com>") == true)
+        #expect(UnsubscribeRequest(.website(URL(string: "https://list.co")!), list: "x", from: sam) == nil)
+        // Survives the outbox's JSON.
+        #expect(try JSONDecoder().decode(UnsubscribeRequest.self, from: JSONEncoder().encode(request)) == request)
+    }
+}

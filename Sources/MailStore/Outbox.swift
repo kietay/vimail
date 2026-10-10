@@ -27,6 +27,8 @@ public enum OutboxOperation: Hashable, Codable, Sendable {
     case createLabel(localID: String, name: String)
     case renameLabel(id: String, name: String)
     case deleteLabel(id: String)
+    /// Leaves a mailing list. Queued with a delay that gives time to undo, like a send.
+    case unsubscribe(UnsubscribeRequest)
 
     /// For logs: the kind and size, never subjects or addresses.
     public var logDescription: String {
@@ -37,6 +39,11 @@ public enum OutboxOperation: Hashable, Codable, Sendable {
         case .createLabel(let localID, _): "create label \(localID)"
         case .renameLabel(let id, _): "rename label \(id)"
         case .deleteLabel(let id): "delete label \(id)"
+        case .unsubscribe(let request):
+            switch request.method {
+            case .oneClick: "unsubscribe (one-click)"
+            case .email(let message): "unsubscribe (email \(message.messageID ?? "message"))"
+            }
         }
     }
 
@@ -48,6 +55,7 @@ public enum OutboxOperation: Hashable, Codable, Sendable {
         case .createLabel(_, let name): "create label \(name)"
         case .renameLabel(_, let name): "rename label to \(name)"
         case .deleteLabel: "delete label"
+        case .unsubscribe(let request): "unsubscribe from \(request.list)"
         }
     }
 }
@@ -89,6 +97,15 @@ extension MailStore {
         try await write { db, change in
             change.outbox = true
             return try Self.enqueue(operation, notBefore: notBefore, db)
+        }
+    }
+
+    /// Queues several operations in one transaction: all of them, or none.
+    public func enqueue(_ operations: [OutboxOperation], notBefore: Date = .distantPast) async throws -> [Int64] {
+        guard !operations.isEmpty else { return [] }
+        return try await write { db, change in
+            change.outbox = true
+            return try operations.map { try Self.enqueue($0, notBefore: notBefore, db) }
         }
     }
 

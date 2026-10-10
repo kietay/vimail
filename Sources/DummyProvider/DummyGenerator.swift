@@ -81,7 +81,7 @@ struct DummyGenerator {
     private mutating func message(
         thread: String?, from: EmailAddress, to: [EmailAddress], cc: [EmailAddress] = [], subject: String,
         text: String?, html: String? = nil, date: Date, labels: Set<String>, attachments: [MailAttachment] = [],
-        inReplyTo: MailMessage? = nil, listUnsubscribe: String? = nil
+        inReplyTo: MailMessage? = nil, list: DummyContent.Service? = nil
     ) -> MailMessage {
         let id = newID()
         let plain = text ?? html.map(HTMLText.plainText(fromHTML:)) ?? ""
@@ -91,7 +91,8 @@ struct DummyGenerator {
             id: id, threadID: thread ?? id, labelIDs: labels, from: from, to: to, cc: cc, subject: subject,
             snippet: HTMLText.snippet(from: plain), date: date, textBody: text, htmlBody: html, attachments: attachments,
             messageIDHeader: "<\(id)@vimail.dummy>", inReplyTo: inReplyTo?.messageIDHeader, references: references,
-            listUnsubscribe: listUnsubscribe, sizeEstimate: (text?.utf8.count ?? 0) + (html?.utf8.count ?? 0) + attachments.reduce(0) { $0 + $1.size }
+            listUnsubscribe: list?.listUnsubscribe, oneClickUnsubscribe: list?.oneClickUnsubscribe ?? false,
+            sizeEstimate: (text?.utf8.count ?? 0) + (html?.utf8.count ?? 0) + attachments.reduce(0) { $0 + $1.size }
         )
     }
 
@@ -226,7 +227,7 @@ struct DummyGenerator {
             let verb = pick(["requested your review on", "approved", "commented on", "merged"])
             return message(thread: nil, from: DummyContent.github.address, to: [me], subject: "[\(repo)] \(title) (#\(number))", text: nil,
                            html: DummyContent.notificationHTML(brand: "GitHub", accent: "#1f883d", title: "\(person.shortName) \(verb) #\(number)", body: "\(title)<br><span style=\"color:#8a8f98;\">\(repo)</span>", button: "View pull request", footer: "You are receiving this because you were mentioned."),
-                           date: time, labels: DummyContent.github.labels)
+                           date: time, labels: DummyContent.github.labels, list: DummyContent.github)
         case 2:
             let ok = chance(0.85)
             let project = pick(["studio-site", "design-system-docs", "lumen-web"])
@@ -288,7 +289,7 @@ struct DummyGenerator {
             thread: nil, from: service.address, to: [me], subject: subject, text: nil,
             html: DummyContent.newsletterHTML(name: service.address.name ?? "", issue: issue, intro: "A few good reads for a slower morning.", items: items),
             date: date(daysAgo: daysAgo, hour: 7, minute: Int.random(in: 0...50, using: &rng)), labels: service.labels,
-            listUnsubscribe: "<https://example.com/unsubscribe>"
+            list: service
         )
     }
 
@@ -419,7 +420,7 @@ struct DummyGenerator {
                 ("Small tools, sharp edges", "On building things that do one thing well."),
             ]),
             date: minutesBefore(122), labels: [SystemLabel.inbox, DummyContent.reading, SystemLabel.categoryPromotions],
-            listUnsubscribe: "<https://example.com/unsubscribe>"
+            list: DummyContent.theBrowser
         ))
 
         result.append(message(
@@ -445,7 +446,7 @@ struct DummyGenerator {
                 ("“Type in use” was connected to 2 channels", "Your channel is being referenced elsewhere."),
             ]),
             date: yesterday(11, 30), labels: [SystemLabel.inbox, DummyContent.reading, SystemLabel.categoryUpdates],
-            listUnsubscribe: "<https://example.com/unsubscribe>"
+            list: DummyContent.arena
         ))
 
         return result
