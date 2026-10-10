@@ -224,6 +224,11 @@ extension AppModel {
                 editor.cycleScope()
                 return true
             }
+            // p outside a field: what guests see, or find a time again, as p shows compose's preview.
+            if !context.textFocused, stroke.isChar("p") {
+                editor.showsPreview.toggle()
+                return true
+            }
             if context.textFocused, focusTarget == .eventNotes, let textView = context.textView {
                 return handleNotesKey(stroke, editor: editor, textView: textView)
             }

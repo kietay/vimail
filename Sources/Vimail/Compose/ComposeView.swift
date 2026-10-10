@@ -331,10 +331,32 @@ struct ComposeView: View {
 /// Shows the outgoing HTML on a white page, like a recipient's mail client.
 struct PreviewWebView: NSViewRepresentable {
     let html: String
+    var policy = Policy.mail
+
+    /// What the page may load and do.
+    enum Policy {
+        /// Compose: images from the web too, as recipients' mail clients show them (a signature's logo).
+        case mail
+        /// The event editor: no scripts, no images from the web, and no page but this one. A description stored with
+        /// the event can hold HTML written elsewhere; links still open in the browser.
+        case strict
+
+        var contentSecurity: String {
+            switch self {
+            case .mail: "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: https: http:;"
+            case .strict: "default-src 'none'; style-src 'unsafe-inline'; img-src data:;"
+            }
+        }
+    }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         var loaded = false
         var pending: String?
+        let policy: Policy
+
+        init(policy: Policy) {
+            self.policy = policy
+        }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             loaded = true
@@ -343,7 +365,10 @@ struct PreviewWebView: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
             if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
-                NSWorkspace.shared.open(url)
+                if policy == .mail || ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") { NSWorkspace.shared.open(url) }
+                decisionHandler(.cancel)
+            } else if policy == .strict, loaded {
+                // HTML put in the page can still navigate it (<meta http-equiv="refresh">): only the page itself loads.
                 decisionHandler(.cancel)
             } else {
                 decisionHandler(.allow)
@@ -351,7 +376,7 @@ struct PreviewWebView: NSViewRepresentable {
         }
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(policy: policy) }
 
     func makeNSView(context: Context) -> WKWebView {
         let view = WKWebView()
@@ -359,7 +384,7 @@ struct PreviewWebView: NSViewRepresentable {
         view.setValue(false, forKey: "drawsBackground")
         let page = """
         <!doctype html><html><head><meta charset="utf-8">
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: https: http:;">
+        <meta http-equiv="Content-Security-Policy" content="\(policy.contentSecurity)">
         <style>html,body{margin:0;background:#ffffff;color-scheme:light;}#mail{padding:20px 22px;}</style></head>
         <body><div id="mail"></div></body></html>
         """

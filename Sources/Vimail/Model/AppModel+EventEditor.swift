@@ -65,6 +65,8 @@ final class EventEditorModel {
     var vimRunning: Bool { vim != nil }
     /// Set when your editor quits: Notes takes the cursor once its text view is back.
     @ObservationIgnored var focusNotesOnAppear = false
+    /// The right pane shows what guests see instead of find a time (p outside a field, or its switch).
+    var showsPreview = false
     /// This event, this and following, or all events, for an occurrence of a series. When shows this occurrence's times
     /// in every case: for all events, a new time moves every event by the same change.
     var scope: Scope
@@ -606,11 +608,7 @@ extension AppModel {
         let guests = !seriesFromOneDay || editor.guestsChanged
             ? typedGuests.guests
             : (series?.attendees ?? []).filter { !$0.isSelf && !$0.isResource }.map(\.address)
-        // Notes left alone keep the description exactly as it was: Google's formatting and links stay. Changed notes are
-        // Markdown, sent as HTML.
-        let details = EventNotes.description(
-            notes: editor.details, opened: editor.openedNotes, stored: seriesFromOneDay ? series?.details : editor.originalDetails
-        )
+        let details = savedDescription(editor)
         // The series' rules from this day on (its count less the events before, for this and following).
         let rules = cut?.after ?? editor.originalRecurrence
         let recurrence: [String]
@@ -679,6 +677,36 @@ extension AppModel {
                 showToast("Could not save the event: \(error.localizedDescription)", isError: true)
             }
         }
+    }
+
+    /// The description a save sends. Notes left alone keep it exactly as it was (Google's formatting and links), the
+    /// series' own when the change reaches past one day of it; changed notes are Markdown, sent as HTML.
+    func savedDescription(_ editor: EventEditorModel) -> String? {
+        let seriesFromOneDay = editor.occurrence != nil && editor.appliedScope != .thisEvent
+        return EventNotes.description(
+            notes: editor.details, opened: editor.openedNotes, stored: seriesFromOneDay ? editor.original?.details : editor.originalDetails
+        )
+    }
+
+    /// What guests see, for the editor's preview: the event as a save would send it.
+    func eventPreview(_ editor: EventEditorModel) -> String {
+        let calendar = Calendar.current
+        var times = editor.keptTimes
+        if times == nil {
+            let parsed = QuickAdd.parse(editor.when, now: Date(), calendar: calendar, defaultLength: 1800) { _ in [] }
+            if let start = parsed.start, let end = parsed.end { times = (start, end) }
+        }
+        var repeats: String?
+        if let start = times?.start, !editor.changesOneOccurrence {
+            let rules = editor.repeats == editor.originalRepeats ? editor.originalRecurrence : Self.repeatRule(editor.repeats, start: start).map { [$0] } ?? []
+            repeats = Recurrence.summary(rules, start: start, calendar: calendar)
+        }
+        let link = (editor.occurrence ?? editor.original)?.conferenceURL
+        return EventNotes.preview(
+            title: editor.title, when: times.map { Formatting.eventRange($0.start, $0.end) }, repeats: repeats, place: editor.location,
+            joinLink: link, joinNote: editor.isNew && editor.addConference ? "A Google Meet link is added when you save." : nil,
+            description: savedDescription(editor)
+        )
     }
 
     /// Saves "this and following": `series` ends the day before `occurrence`, and `event` takes over from that day as a

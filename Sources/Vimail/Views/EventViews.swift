@@ -129,8 +129,9 @@ struct QuickAddView: View {
     }
 }
 
-/// The event editor: every field of an event, with the When and Repeat fields typed like quick add.
-/// On the right, your day and each guest's busy times; ⌘[ and ⌘] find the previous or next time everyone is free.
+/// The event editor: every field of an event, with the When and Repeat fields typed like quick add, Guests as compose's
+/// pills and Notes in Markdown. On the right, your day and each guest's busy times (⌘[ and ⌘] find the previous or next
+/// time everyone is free), or what guests see (p).
 struct EventEditorView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.theme) private var theme
@@ -147,7 +148,7 @@ struct EventEditorView: View {
                     .padding(22)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     Rectangle().fill(theme.border).frame(width: 1)
-                    AvailabilityView(editor: editor)
+                    sidePane(editor)
                         .padding(18)
                         .frame(width: 300, alignment: .topLeading)
                 }
@@ -173,14 +174,46 @@ struct EventEditorView: View {
 
     /// The keys for where the cursor is, as compose's footer.
     private func footer(_ editor: EventEditorModel) -> String {
-        if editor.vimRunning { return ":w updates the notes · :wq returns to the event" }
-        if model.focusTarget == .eventNotes {
+        if editor.vimRunning { return ":w updates the notes and the preview · :wq returns to the event" }
+        switch model.focusTarget {
+        case .eventNotes:
             return editor.notesMode == .normal
                 ? "vim keys · i insert · esc close, keeping a draft · ^g your editor · ⌘↵ save and email guests"
                 : "esc vim keys · ^g your editor · ⌘↵ save and email guests · ⌘⇧↵ save without email"
+        case nil:
+            return "p \(editor.showsPreview ? "find a time" : "preview") · ⌘↵ save and email guests · ⌘⇧↵ save without email · "
+                + "^g notes in your editor · ⌘⇧⌫ \(editor.isNew ? "discard" : "remove") · esc keep as draft"
+        default:
+            return "⌘↵ save and email guests · ⌘⇧↵ save without email · ⌘[ ⌘] find a time · ^g notes in your editor · "
+                + "⌘⇧⌫ \(editor.isNew ? "discard" : "remove") · esc keep as draft"
         }
-        return "⌘↵ save and email guests · ⌘⇧↵ save without email · ⌘[ ⌘] find a time · ^g notes in your editor · "
-            + "⌘⇧⌫ \(editor.isNew ? "discard" : "remove") · esc keep as draft"
+    }
+
+    /// The right pane: who is free when (find a time), or what guests see. p outside a field switches, as in compose.
+    private func sidePane(_ editor: EventEditorModel) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Text(editor.showsPreview ? "WHAT GUESTS SEE" : "FIND A TIME").font(AppFonts.mono(9)).tracking(1).foregroundStyle(theme.mutedForeground)
+                Spacer()
+                if !editor.showsPreview {
+                    KeyChip("⌘[", alwaysVisible: true)
+                    KeyChip("⌘]", alwaysVisible: true)
+                }
+                Button { editor.showsPreview.toggle() } label: {
+                    Text(editor.showsPreview ? "find a time" : "preview").font(AppFonts.mono(9)).foregroundStyle(theme.mutedForeground)
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 6)
+                .help(editor.showsPreview ? "Show who is free (p outside a field)" : "Show what guests see (p outside a field)")
+            }
+            if editor.showsPreview {
+                PreviewWebView(html: model.eventPreview(editor), policy: .strict)
+                    .frame(height: 400)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            } else {
+                AvailabilityView(editor: editor)
+            }
+        }
     }
 
     @ViewBuilder
@@ -402,12 +435,6 @@ private struct AvailabilityView: View {
         let strips = self.strips()
         let range = hours(day: day, event: event)
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Text("FIND A TIME").font(AppFonts.mono(9)).tracking(1).foregroundStyle(theme.mutedForeground)
-                Spacer()
-                KeyChip("⌘[", alwaysVisible: true)
-                KeyChip("⌘]", alwaysVisible: true)
-            }
             Text(Formatting.dayTitle(day)).font(AppFonts.sans(13, .semibold)).foregroundStyle(theme.foreground)
             HStack(alignment: .top, spacing: 4) {
                 axis(range)

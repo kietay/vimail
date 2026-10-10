@@ -5,7 +5,7 @@ public enum HTMLText {
     /// Text to edit for a description that may be HTML (Google Calendar writes HTML): tags go, link addresses stay
     /// ("the doc (https://…)"). Text that merely contains "<" ("budget < 5k", "Alex <alex@example.com>") stays as it is.
     public static func editableText(_ text: String) -> String {
-        guard text.range(of: commonTag, options: .regularExpression) != nil else { return text }
+        guard looksLikeHTML(text) else { return text }
         var html = text.replacingOccurrences(
             of: #"(?is)<a\s[^>]*href\s*=\s*(["'])(.*?)\1[^>]*>(.*?)</a>"#, with: "$3 ($2)", options: .regularExpression
         )
@@ -13,6 +13,11 @@ public enum HTMLText {
         html = html.replacingOccurrences(of: #"<((?:[^<>\s]+@[^<>\s]+)|(?:https?://[^<>\s]+))>"#, with: "&lt;$1&gt;", options: .regularExpression)
         html = html.replacingOccurrences(of: #"<(?![a-zA-Z/!])"#, with: "&lt;", options: .regularExpression)
         return plainText(fromHTML: html)
+    }
+
+    /// The text has common HTML tags, as the descriptions Google Calendar writes do. Text that merely contains "<" does not.
+    public static func looksLikeHTML(_ text: String) -> Bool {
+        text.range(of: commonTag, options: .regularExpression) != nil
     }
 
     private static let commonTag =

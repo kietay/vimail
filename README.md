@@ -137,7 +137,9 @@ them with one key, and you create events from one typed line. Everything works o
   *Notes* are Markdown with the compose body's vim keys: `esc` goes to normal mode, and `esc` again closes the editor
   and keeps a draft. `^g` opens them in your own editor in place of the fields (`:w` updates them, `:wq` comes back).
   Changed notes reach guests as HTML, rendered as compose renders a message; notes left unchanged keep the description
-  exactly as Google has it.
+  exactly as Google has it. The pane on the right shows find a time; its *preview* switch, or `p` when no field has the
+  cursor (as in compose), shows what guests see instead: the title, time, place, join link and notes as a save sends
+  them. The preview loads nothing from the web.
 - **Find a time.** The editor shows the event's day with a strip for you and one per guest: busy times in grey,
   the event green where that person is free and red where they are busy. `⌘]` and `⌘[` move the event to the
   next or previous time where everyone who shares busy times is free, inside working hours. Busy times come from

@@ -34,4 +34,38 @@ struct EventNotesTests {
     @Test func notesNeverCarryRawHTML() {
         #expect(EventNotes.html("<img src=x onerror=alert(1)>")?.contains("<img") == false)
     }
+
+    @Test func aDescriptionShowsAsHTMLOrAsTextWithItsLines() {
+        #expect(EventNotes.displayHTML(stored) == stored)
+        #expect(EventNotes.displayHTML("Budget < 5k\nAlex <alex@example.com>") == "Budget &lt; 5k<br>Alex &lt;alex@example.com&gt;")
+        #expect(EventNotes.displayHTML(nil) == "")
+        #expect(EventNotes.displayHTML(" \n") == "")
+    }
+
+    @Test func thePreviewShowsWhatGuestsSee() {
+        let html = EventNotes.preview(
+            title: "Q3 <plan>", when: "Mon Oct 12 · 14:00–14:45", repeats: "Weekly on Monday", place: "Room 4 & 5",
+            joinLink: "https://meet.google.com/abc-defg-hij?authuser=0", joinNote: nil, description: Markdown.html("Bring the **numbers**.")
+        )
+        #expect(html.contains("Q3 &lt;plan&gt;</h2>"))
+        #expect(html.contains("Mon Oct 12 · 14:00–14:45"))
+        #expect(html.contains("Weekly on Monday"))
+        #expect(html.contains("Room 4 &amp; 5"))
+        #expect(html.contains(#"<a href="https://meet.google.com/abc-defg-hij?authuser=0""#))
+        #expect(html.contains(">meet.google.com/abc-defg-hij</a>"))
+        #expect(html.contains("<strong>numbers</strong>"))
+    }
+
+    @Test func thePreviewSaysWhatIsMissing() {
+        let html = EventNotes.preview(
+            title: " ", when: nil, repeats: nil, place: "", joinLink: "javascript:alert(1)", joinNote: "A Google Meet link is added when you save.",
+            description: nil
+        )
+        #expect(html.contains("(no title)"))
+        #expect(html.contains("No time yet"))
+        #expect(!html.contains("Where"))
+        #expect(!html.contains("javascript"))
+        #expect(html.contains("A Google Meet link is added when you save."))
+        #expect(!html.contains("border-top"))
+    }
 }
