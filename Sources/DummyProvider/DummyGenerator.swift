@@ -65,10 +65,14 @@ struct DummyGenerator {
         return calendar.date(bySettingHour: hour, minute: minute, second: 0, of: day)!
     }
 
+    /// The newest a random message may be: half an hour ago, so the design inbox (from 12 minutes ago) stays on top
+    /// at any time of day, also just after midnight when "today" has barely begun.
+    private var latest: Date { now.addingTimeInterval(-30 * 60) }
+
     private mutating func workTime(daysAgo: Int) -> Date {
         let hour = [8, 9, 9, 10, 10, 11, 11, 13, 14, 14, 15, 16, 17, 19].randomElement(using: &rng)!
         var result = date(daysAgo: daysAgo, hour: hour, minute: Int.random(in: 0...59, using: &rng))
-        if result > now { result = now.addingTimeInterval(-Double.random(in: 600...7200, using: &rng)) }
+        if result > latest { result = latest.addingTimeInterval(-Double.random(in: 0...6600, using: &rng)) }
         return result
     }
 
@@ -184,7 +188,7 @@ struct DummyGenerator {
                 date: time, labels: category, attachments: attachments, inReplyTo: messages.last
             )
             messages.append(next)
-            time = min(time.addingTimeInterval(Double.random(in: 600...14_400, using: &rng)), now.addingTimeInterval(-60))
+            time = min(time.addingTimeInterval(Double.random(in: 600...14_400, using: &rng)), latest)
             sender = sender == me ? other.address : me
         }
         return messages
@@ -194,7 +198,7 @@ struct DummyGenerator {
         let friend = pick(DummyContent.friends)
         let subject = pick(DummyContent.personalSubjects)
         var time = date(daysAgo: daysAgo, hour: Int.random(in: 7...22, using: &rng), minute: Int.random(in: 0...59, using: &rng))
-        if time > now { time = now.addingTimeInterval(-3600) }
+        if time > latest { time = latest.addingTimeInterval(-3600) }
         let labels: Set<String> = [DummyContent.personal, SystemLabel.categoryPersonal]
         let first = message(
             thread: nil, from: friend.address, to: [me], subject: subject,
@@ -206,7 +210,7 @@ struct DummyGenerator {
         let reply = message(
             thread: first.threadID, from: me, to: [friend.address], subject: ReplyComposer.prefixed(subject, with: "Re"),
             text: "\(pick(DummyContent.personalReplies))\n\n\(me.shortName)\(quoted(first))",
-            date: min(time.addingTimeInterval(Double.random(in: 900...20_000, using: &rng)), now.addingTimeInterval(-60)),
+            date: min(time.addingTimeInterval(Double.random(in: 900...20_000, using: &rng)), latest),
             labels: labels, inReplyTo: first
         )
         return [first, reply]
@@ -309,7 +313,7 @@ struct DummyGenerator {
         return message(
             thread: nil, from: service.address, to: [me], subject: subject, text: nil,
             html: DummyContent.newsletterHTML(name: service.address.name ?? "", issue: issue, intro: "A few good reads for a slower morning.", items: items),
-            date: date(daysAgo: daysAgo, hour: 7, minute: Int.random(in: 0...50, using: &rng)), labels: service.labels,
+            date: min(date(daysAgo: daysAgo, hour: 7, minute: Int.random(in: 0...50, using: &rng)), latest), labels: service.labels,
             list: service
         )
     }
