@@ -56,6 +56,8 @@ public actor SyncEngine {
     private var status = Status()
     private var loop: Task<Void, Never>?
     private var signalTask: Task<Void, Never>?
+    /// The first `stop()`: later calls wait for it.
+    private var stopping: Task<Void, Never>?
     private var waiter: CheckedContinuation<Void, Never>?
     private var wakeRequested = false
     private var sleepGeneration = 0
@@ -92,7 +94,7 @@ public actor SyncEngine {
     }
 
     public func start() {
-        guard loop == nil else { return }
+        guard loop == nil, stopping == nil else { return }
         Self.log.info("Sync started (provider \(provider.kind), poll every \(pollInterval), cache limit \(initialSyncLimit) conversations)")
         loop = Task { [weak self] in await self?.run() }
         let signals = provider.changeSignals()
@@ -104,6 +106,8 @@ public actor SyncEngine {
     /// Stops syncing for good (the account is closing). Returns once the running cycle has finished,
     /// so nothing writes to the store afterwards. Ends the status and event streams.
     public func stop() async {
+        // A second stop returns once the first is done.
+        if let stopping { return await stopping.value }
         let running = loop
         running?.cancel()
         signalTask?.cancel()
@@ -111,7 +115,15 @@ public actor SyncEngine {
         signalTask = nil
         waiter?.resume()
         waiter = nil
-        await running?.value
+        let task = Task {
+            await running?.value
+            await self.stopped()
+        }
+        stopping = task
+        await task.value
+    }
+
+    private func stopped() {
         // Only now: the cycle it waited for may have kept the app awake again.
         keepAwake(nil)
         statusContinuation.finish()

@@ -107,15 +107,17 @@ struct RuleStatusTextTests {
     @Test func removalToasts() {
         #expect(LabelEditNote().removalToast(labelName: "receipts") == nil)
         #expect(LabelEditNote(stoppedRules: ["Receipts"], taughtRules: ["Receipts"]).removalToast(labelName: "receipts")
-            == "receipts removed · rule Receipts won't re-add it and will learn from this")
+            == "receipts removed · rule Receipts won't re-add it · test it to teach Claude (gr ↵)")
         #expect(LabelEditNote(stoppedRules: ["Needs reply"]).removalToast(labelName: "Reply") == "Reply removed · rule Needs reply won't re-add it")
         #expect(LabelEditNote(stoppedRules: ["Receipts", "Invoices", "Bills"], taughtRules: ["Invoices"]).removalToast(labelName: "money")
-            == "money removed · rules Receipts, Invoices and Bills won't re-add it · Invoices will learn from this")
+            == "money removed · rules Receipts, Invoices and Bills won't re-add it · test Invoices to teach Claude (gr ↵)")
+        #expect(LabelEditNote(stoppedRules: ["Receipts", "Bills"], taughtRules: ["Bills", "Receipts"]).removalToast(labelName: "money")
+            == "money removed · rules Receipts and Bills won't re-add it · test them to teach Claude (gr ↵)")
     }
 
     @Test func teachingWithoutAChangeToasts() {
         #expect(LabelEditNote().unchangedToast(labelName: "receipts", added: true) == nil)
-        #expect(LabelEditNote(taughtRules: ["Receipts"]).unchangedToast(labelName: "receipts", added: true) == "receipts was already there · rule Receipts will learn from this")
-        #expect(LabelEditNote(taughtRules: ["Receipts"]).unchangedToast(labelName: "receipts", added: false) == "receipts was already off · rule Receipts will learn from this")
+        #expect(LabelEditNote(taughtRules: ["Receipts"]).unchangedToast(labelName: "receipts", added: true) == "receipts was already there · example saved: test rule Receipts to teach Claude (gr ↵)")
+        #expect(LabelEditNote(taughtRules: ["Receipts"]).unchangedToast(labelName: "receipts", added: false) == "receipts was already off · example saved: test rule Receipts to teach Claude (gr ↵)")
     }
 }

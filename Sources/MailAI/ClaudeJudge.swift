@@ -20,6 +20,9 @@ import VimailLog
 /// - The same 400 on three different emails pauses Claude as `apiIncompatible`. A 400 about the credit
 ///   balance is billing, not this.
 /// - A 429 or 529 also cools the limiter down for everyone.
+///
+/// A call that fails after Claude billed an attempt (a refusal, an answer cut off twice) throws its
+/// error wrapped in `JudgeError.billed` with what it cost.
 public struct ClaudeJudge: RuleJudge {
     public let model: ClaudeModel
     let client: AnthropicClient
@@ -58,67 +61,72 @@ public struct ClaudeJudge: RuleJudge {
         var retriedOutput = false
         var retriedMissing = false
 
-        while true {
-            let body = prompt.body(model: model, maxTokens: maxTokens, evaluate: pending, fallbacks: fallbacks)
-            let attempt: Attempt
-            switch try await call(body, lane: request.lane, priority: priority, prefix: prefix, cacheTTL: request.cacheTTL) {
-            case .success(let value):
-                attempt = value
-            case .failure(.badRequest) where fallbacks:
-                AnthropicClient.log.notice("Claude rejected a request with fallbacks: retrying without them")
-                fallbacks = false
-                droppedFallbacks = true
-                continue
-            case .failure(.badRequest(let fingerprint)):
-                if await history.badRequest(fingerprint, messageID: request.email.messageID) {
-                    AnthropicClient.log.error("The same 400 came back for 3 emails: pausing Claude rules")
-                    throw .paused(.apiIncompatible)
-                }
-                if !answer.decisions.isEmpty { return answer }
-                throw .invalid(code: "http_400")
-            case .failure(let error):
-                if case .invalid = error.judgeError, !answer.decisions.isEmpty { return answer }
-                throw error.judgeError
-            }
-
-            await history.succeeded()
-            if droppedFallbacks, await !spend.fallbacksUnavailable {
-                AnthropicClient.log.notice("Claude answered without fallbacks: no longer sending them (refusals stay unlabeled)")
-                await spend.setFallbacksUnavailable()
-            }
-            answer.costMicros += attempt.costMicros
-            answer.usage.input += attempt.usage.input
-            answer.usage.cacheWrite += attempt.usage.cacheWrite
-            answer.usage.cacheRead += attempt.usage.cacheRead
-            answer.usage.output += attempt.usage.output
-
-            let verdicts: ResponseParser.Verdicts
-            do {
-                verdicts = try ResponseParser.verdicts(in: attempt.message, requested: pending)
-            } catch {
-                switch error {
-                case .maxTokens where !retriedOutput:
-                    maxTokens *= 2
-                case .empty where !retriedOutput, .unreadable where !retriedOutput:
-                    break
-                default:
-                    AnthropicClient.log.notice("Claude gave no usable answer for message \(request.email.messageID): \(error)")
+        do throws(JudgeError) {
+            while true {
+                let body = prompt.body(model: model, maxTokens: maxTokens, evaluate: pending, fallbacks: fallbacks)
+                let attempt: Attempt
+                switch try await call(body, lane: request.lane, priority: priority, prefix: prefix, cacheTTL: request.cacheTTL) {
+                case .success(let value):
+                    attempt = value
+                case .failure(.badRequest) where fallbacks:
+                    AnthropicClient.log.notice("Claude rejected a request with fallbacks: retrying without them")
+                    fallbacks = false
+                    droppedFallbacks = true
+                    continue
+                case .failure(.badRequest(let fingerprint)):
+                    if await history.badRequest(fingerprint, messageID: request.email.messageID) {
+                        AnthropicClient.log.error("The same 400 came back for 3 emails: pausing Claude rules")
+                        throw .paused(.apiIncompatible)
+                    }
                     if !answer.decisions.isEmpty { return answer }
+                    throw .invalid(code: "http_400")
+                case .failure(let error):
+                    if case .invalid = error.judgeError, !answer.decisions.isEmpty { return answer }
                     throw error.judgeError
                 }
-                retriedOutput = true
-                continue
+
+                await history.succeeded()
+                if droppedFallbacks, await !spend.fallbacksUnavailable {
+                    AnthropicClient.log.notice("Claude answered without fallbacks: no longer sending them (refusals stay unlabeled)")
+                    await spend.setFallbacksUnavailable()
+                }
+                answer.costMicros += attempt.costMicros
+                answer.usage.input += attempt.usage.input
+                answer.usage.cacheWrite += attempt.usage.cacheWrite
+                answer.usage.cacheRead += attempt.usage.cacheRead
+                answer.usage.output += attempt.usage.output
+
+                let verdicts: ResponseParser.Verdicts
+                do {
+                    verdicts = try ResponseParser.verdicts(in: attempt.message, requested: pending)
+                } catch {
+                    switch error {
+                    case .maxTokens where !retriedOutput:
+                        maxTokens *= 2
+                    case .empty where !retriedOutput, .unreadable where !retriedOutput:
+                        break
+                    default:
+                        AnthropicClient.log.notice("Claude gave no usable answer for message \(request.email.messageID): \(error)")
+                        if !answer.decisions.isEmpty { return answer }
+                        throw error.judgeError
+                    }
+                    retriedOutput = true
+                    continue
+                }
+                answer.decisions.merge(verdicts.decisions) { earlier, _ in earlier }
+                answer.servedBy = verdicts.servedBy
+                pending = verdicts.missing
+                if pending.isEmpty { return answer }
+                if retriedMissing {
+                    AnthropicClient.log.notice("Claude left \(pending.count) of \(request.evaluate.count) rules undecided for message \(request.email.messageID)")
+                    if answer.decisions.isEmpty { throw .truncated }
+                    return answer
+                }
+                retriedMissing = true
             }
-            answer.decisions.merge(verdicts.decisions) { earlier, _ in earlier }
-            answer.servedBy = verdicts.servedBy
-            pending = verdicts.missing
-            if pending.isEmpty { return answer }
-            if retriedMissing {
-                AnthropicClient.log.notice("Claude left \(pending.count) of \(request.evaluate.count) rules undecided for message \(request.email.messageID)")
-                if answer.decisions.isEmpty { throw .truncated }
-                return answer
-            }
-            retriedMissing = true
+        } catch {
+            // Attempts Claude answered were billed: the engine counts them toward the run.
+            throw answer.costMicros > 0 ? .billed(error, costMicros: answer.costMicros) : error
         }
     }
 

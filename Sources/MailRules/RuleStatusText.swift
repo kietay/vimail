@@ -119,24 +119,26 @@ public enum Dollars {
 
 extension LabelEditNote {
     /// The toast after you removed a label that rules had added:
-    /// "receipts removed · rule Receipts won't re-add it and will learn from this". nil when no rule
-    /// had added it.
+    /// "receipts removed · rule Receipts won't re-add it · test it to teach Claude (gr ↵)". nil when
+    /// no rule had added it. The example decides this message at once, but joins Claude's prompt
+    /// only at the rule's next test in the editor (design §5.3), so the toast says so.
     public func removalToast(labelName: String) -> String? {
         guard !stoppedRules.isEmpty else { return nil }
         var text = "\(labelName) removed · \(Self.rules(stoppedRules)) won't re-add it"
         if Set(taughtRules) == Set(stoppedRules) {
-            text += " and will learn from this"
+            text += " · test \(stoppedRules.count == 1 ? "it" : "them") to teach Claude (gr ↵)"
         } else if !taughtRules.isEmpty {
-            text += " · \(Self.names(taughtRules)) will learn from this"
+            text += " · test \(Self.names(taughtRules)) to teach Claude (gr ↵)"
         }
         return text
     }
 
     /// The toast after `x` or `a` in "why these labels?" when the label was already like that:
-    /// "receipts was already there · rule Receipts will learn from this". nil when no rule learned.
+    /// "receipts was already there · example saved: test rule Receipts to teach Claude (gr ↵)". nil
+    /// when no rule learned.
     public func unchangedToast(labelName: String, added: Bool) -> String? {
         guard !taughtRules.isEmpty else { return nil }
-        return "\(labelName) was already \(added ? "there" : "off") · \(Self.rules(taughtRules)) will learn from this"
+        return "\(labelName) was already \(added ? "there" : "off") · example saved: test \(Self.rules(taughtRules)) to teach Claude (gr ↵)"
     }
 
     /// "rule Receipts", "rules Receipts and Travel".

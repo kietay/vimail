@@ -51,6 +51,27 @@ struct AILimiterTests {
         await limiter.release(preview, succeeded: true)
     }
 
+    @Test func aCallCancelledWhileWaitingForASlotGivesItBack() async throws {
+        let limiter = AILimiter(clock: TestClock())
+        var permits: [AILimiter.Permit] = []
+        for priority in [AILimiter.Priority.bulk, .bulk, .bulk, .interactive] {
+            permits.append(try await limiter.acquire(priority, prefix: nil, inputTokens: 100))
+        }
+        let started = Started()
+        let waiting = start(limiter, .interactive, started: started)
+        await settle()
+        // The editor closes while its call waits: it never starts, so it is never charged.
+        waiting.cancel()
+        await limiter.release(permits.removeLast(), succeeded: true)
+        let permit = await waiting.value
+        #expect(permit == nil)
+        #expect(started.count == 0)
+        if let permit { await limiter.release(permit, succeeded: false) }
+        // Its slot is free for the next call at once.
+        permits.append(try await limiter.acquire(.interactive, prefix: nil, inputTokens: 100))
+        for permit in permits { await limiter.release(permit, succeeded: true) }
+    }
+
     @Test func waitingPreviewsGoBeforeWaitingBulkCalls() async throws {
         let limiter = AILimiter(clock: TestClock())
         var permits: [AILimiter.Permit] = []

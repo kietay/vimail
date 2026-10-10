@@ -151,6 +151,23 @@ struct RulePreviewTests {
         judge.release()
     }
 
+    @Test func modelSwitchStopsTheTest() async throws {
+        let judge = FakeJudge()
+        judge.hold()
+        let harness = try await Harness(judge: judge)
+        try await harness.store.upsertMessages((0..<8).map { mail("m\($0)", from: person($0), subject: "Message \($0)", minutesAgo: Double($0)) })
+        let draft = try await draft(harness)
+        let reader = Task { await collect(await harness.engine.preview(draft, test: .all)) }
+        try await eventually("calls in flight") { judge.waiting == RuleEngine.judgeConcurrency }
+        let sonnet = RuleEngine.JudgeConfig(model: "claude-sonnet-5-5", effort: "low", promptVersion: 1, prices: testConfig.prices)
+        await harness.engine.configure(judge: judge, aiPause: nil, config: sonnet)
+        judge.release()
+        let rows = latest(await reader.value.rows)
+        // No row went to the new model under the old model's hash.
+        #expect(judge.calls.count == RuleEngine.judgeConcurrency)
+        #expect(rows.filter { $0.source == .claude }.count == RuleEngine.judgeConcurrency)
+    }
+
     @Test func previewAllowanceStops() async throws {
         let judge = FakeJudge()
         judge.fail(after: 1, with: .budget(.previewRoom))

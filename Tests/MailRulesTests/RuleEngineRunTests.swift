@@ -446,4 +446,142 @@ struct RuleEngineRunTests {
         let stored = try #require(try await harness.store.meta("rules_judge_hashes"))
         #expect(stored.contains(hash))
     }
+
+    // MARK: - Progress, examples, caps and coverage
+
+    @Test func statusFollowsARunBatchByBatch() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        try await storeMail(harness, count: 30)
+        try await setCallCost(harness, 1_000)
+        judge.hold(after: RuleEngine.batchSize)
+        let latest = Latest<RuleEngineStatus>()
+        let listener = Task { for await status in harness.engine.status { latest.set(status) } }
+        // Upkeep done and published first: what is published next comes from the run.
+        await harness.engine.drain()
+        try await Task.sleep(for: .milliseconds(300))
+        let id = try await harness.engine.startRun(RunPlan(ruleID: harness.rule("Receipts").id, window: .allCached))
+        try await eventually("the run in the status") { latest.value?.runs.first { $0.id == id }?.done == 0 }
+        let draining = Task { await harness.engine.drain() }
+        try await eventually("the second batch at work") { judge.waiting > 0 }
+        // The first batch committed: the status bar and Activity show it while the run goes on.
+        try await eventually("progress in the status") {
+            latest.value?.runs.first { $0.id == id }.map { $0.done == RuleEngine.batchSize && $0.costMicros == 20_000 } ?? false
+        }
+        judge.release()
+        await draining.value
+        await harness.engine.stop()
+        await listener.value
+    }
+
+    @Test func runsJudgeWithTheExamplesYouTested() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        let ids = try await storeMail(harness, count: 4)
+        // ⌃r with two marks, then ⌘↵: only the tested example set changed, so the revision stays.
+        var rule = try await harness.rule("Receipts")
+        try await harness.store.setExample(ruleID: rule.id, messageID: ids[0], matches: true, origin: .preview)
+        try await harness.store.setExample(ruleID: rule.id, messageID: ids[1], matches: false, origin: .preview)
+        rule.promptExampleIDs = [ids[0], ids[1]]
+        #expect(try await harness.store.saveRule(rule).revision == 1)
+        try await harness.engine.rulesChanged(.updated(ruleID: rule.id))
+
+        let id = try await harness.engine.startRun(RunPlan(ruleID: rule.id, window: .allCached))
+        await harness.engine.drain()
+        // The marked two decide themselves; the others go to Claude with the examples you tested.
+        #expect(judge.calls.count == 2)
+        #expect(judge.calls.allSatisfy { $0.lane == .run(id) && $0.examples.count == 2 })
+    }
+
+    @Test func cancellingARunStopsItsBatch() async throws {
+        let judge = FakeJudge()
+        judge.hold()
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        try await storeMail(harness, count: 20)
+        try await setCallCost(harness, 1_000)
+        let id = try await harness.engine.startRun(RunPlan(ruleID: harness.rule("Receipts").id, window: .allCached))
+        let draining = Task { await harness.engine.drain() }
+        try await eventually("calls in flight") { judge.waiting == RuleEngine.judgeConcurrency }
+        #expect(try await harness.engine.cancelRun(id))
+        judge.release()
+        await draining.value
+        // Only the calls already on their way were made.
+        #expect(judge.calls.count == RuleEngine.judgeConcurrency)
+        #expect(try await harness.store.run(id: id)?.state == .cancelled)
+    }
+
+    @Test func debugCapIsShownAndRunsGoOnWhereTheLastStopped() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        let harness = try await Harness(rules: [receiptsRule], judge: judge, runMessageLimit: 3)
+        try await storeMail(harness, count: 7)
+        let plan = RunPlan(ruleID: try await harness.rule("Receipts").id, window: .allCached)
+        let first = try await harness.engine.estimate(plan)
+        #expect(first.cappedAt == 3 && first.messages == 3 && first.needClaude == 3 && first.counts?.passing == 7)
+        _ = try await harness.engine.startRun(plan)
+        await harness.engine.drain()
+        #expect(judge.calls.count == 3)
+
+        // The next run takes three it has not decided, at the price it shows.
+        let second = try await harness.engine.estimate(plan)
+        #expect(second.cappedAt == 3 && second.needClaude == 3)
+        _ = try await harness.engine.startRun(plan)
+        await harness.engine.drain()
+        #expect(judge.calls.count == 6 && Set(judge.calls.map(\.messageID)).count == 6)
+
+        // The last one fits: nothing held back.
+        let third = try await harness.engine.estimate(plan)
+        #expect(third.cappedAt == nil && third.needClaude == 1)
+        _ = try await harness.engine.startRun(plan)
+        await harness.engine.drain()
+        #expect(Set(judge.calls.map(\.messageID)).count == 7)
+    }
+
+    @Test func estimatesCountOnlyClaudesDecisionsAsEarlier() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        let ids = try await storeMail(harness, count: 2)
+        let rule = try await harness.rule("Receipts")
+        try await harness.store.setOverride(ruleID: rule.id, subject: "@stripe.com", matches: true, origin: .user)
+        _ = try await harness.engine.runRules(on: ids, confirmed: true)
+        await harness.engine.drain()
+        #expect(judge.calls.isEmpty)
+        // The sender rule goes: those messages need Claude again, as the run will find.
+        try await harness.store.removeOverride(ruleID: rule.id, subject: "@stripe.com")
+        let estimate = try await harness.engine.estimate(RunPlan(ruleID: rule.id, window: .allCached))
+        #expect(estimate.needClaude == 2 && estimate.counts?.decidedEarlier == 0)
+        #expect(try await harness.engine.claudeCalls(rules: [rule], messageIDs: ids) == 2)
+    }
+
+    @Test func runsOverStoredMailMoveCoveredSinceBack() async throws {
+        let harness = try await Harness(rules: [deploysRule])
+        try await storeMail(harness, count: 3, subject: "deploy", daysAgo: 10)
+        let rule = try await harness.rule("Deploys")
+        func coveredSince() async throws -> Date? { try await harness.store.rules().first { $0.id == rule.id }?.coveredSince }
+        let created = try #require(try await coveredSince())
+
+        // `=` covers chosen messages, not a stretch of mail.
+        _ = try await harness.engine.runRules(on: ["s0"], confirmed: true)
+        await harness.engine.drain()
+        #expect(try await coveredSince() == created)
+
+        _ = try await harness.engine.startRun(RunPlan(ruleID: rule.id, window: .lastDays(30)))
+        await harness.engine.drain()
+        let covered = try #require(try await coveredSince())
+        #expect(abs(covered.timeIntervalSince(harness.clock.now.addingTimeInterval(-30 * 86_400))) < 5)
+    }
+
+    @Test func billedFailuresCountTowardTheRunsCap() async throws {
+        let judge = FakeJudge()
+        // Claude billed each call, then the answer was cut off twice.
+        judge.failLane("run", with: .billed(.truncated, costMicros: 1_000))
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        try await storeMail(harness, count: 12)
+        try await setCallCost(harness, 1_000)
+        let id = try await harness.engine.startRun(RunPlan(ruleID: harness.rule("Receipts").id, window: .allCached), capMicros: 2_500)
+        await harness.engine.drain()
+        let run = try #require(try await harness.store.run(id: id))
+        #expect(run.state == .paused && run.pauseReason == .cap)
+        #expect(run.costMicros == 2_000 && judge.calls.count == 2)
+        #expect(try await harness.store.meanCallCostMicros(model: testConfig.model) == 1_000)
+    }
 }

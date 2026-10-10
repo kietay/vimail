@@ -9,6 +9,8 @@ public struct ExplainLine: Sendable, Hashable, Identifiable {
         case rule(LabelOwner)
         /// The label is on messages no rule owns there: you or Gmail added it.
         case other
+        /// A rule matched a message that already had the label you or Gmail added: it agrees.
+        case agrees(RuleAgreement)
         /// A rule decided no: for the newest message it judged.
         case miss(RuleMiss)
     }
@@ -19,7 +21,7 @@ public struct ExplainLine: Sendable, Hashable, Identifiable {
     public var labelID: String?
     public var labelName: String
     /// `rule "Receipts" v3 · Claude (Haiku 5.5) · live, 9 Oct 14:02`, `added by you or Gmail`,
-    /// `rule "Travel" did not match`.
+    /// `rule "Receipts" v3 agrees · Claude (Haiku 5.5)`, `rule "Travel" did not match`.
     public var detail: String
     /// Claude's reason, as plain text.
     public var reason: String?
@@ -33,8 +35,8 @@ public struct ExplainLine: Sendable, Hashable, Identifiable {
 
 extension ThreadExplanation {
     /// "Why these labels?" line by line: each label with the rules that added it (one line per rule)
-    /// and, where no rule owns it, "added by you or Gmail"; then the rules that decided no, except
-    /// rules that added a label here.
+    /// and, where no rule owns it, "added by you or Gmail" with the rules that matched it there
+    /// ("agrees"); then the rules that decided no, except rules that added or agreed with a label here.
     /// - Parameters:
     ///   - rules: the account's rules, for the label a rule that decided no would add.
     ///   - labels: the account's labels, for their current names.
@@ -54,6 +56,22 @@ extension ThreadExplanation {
             }
             if !explanation.unownedMessageIDs.isEmpty {
                 lines.append(ExplainLine(id: "label:\(label.id):other", kind: .other, labelID: label.id, labelName: label.name, detail: "added by you or Gmail"))
+            }
+            let adding = Set(explanation.owners.map(\.ruleID))
+            var agreeing: [String: RuleAgreement] = [:]
+            var order: [String] = []
+            // Oldest message first: the last one is the newest.
+            for agreement in agreements where agreement.labelID == label.id && !adding.contains(agreement.ruleID) && explanation.messageIDs.contains(agreement.messageID) {
+                if agreeing[agreement.ruleID] == nil { order.append(agreement.ruleID) }
+                agreeing[agreement.ruleID] = agreement
+            }
+            for agreement in order.compactMap({ agreeing[$0] }) {
+                owning.insert(agreement.ruleID)
+                let claude = agreement.source == .claude || agreement.source == .cache
+                lines.append(ExplainLine(
+                    id: "agree:\(label.id):\(agreement.ruleID)", kind: .agrees(agreement), labelID: label.id, labelName: label.name,
+                    detail: agreement.detail(modelName: modelName), reason: claude ? agreement.reason : nil
+                ))
             }
         }
         var newest: [String: RuleMiss] = [:]
@@ -143,6 +161,22 @@ extension LabelOwner {
         case .gap: "gap run"
         case .backlog: "backlog run"
         }
+    }
+}
+
+extension RuleAgreement {
+    /// `rule "Receipts" v3 agrees · Claude (Haiku 5.5)`, `rule "Deploys" v1 agrees · filter`.
+    func detail(modelName: (String) -> String) -> String {
+        let rule = ruleName.map { "rule \"\($0)\" v\(revision)" } ?? "a deleted rule"
+        let how: String
+        switch source {
+        case .claude, .cache: how = model.map { "Claude (\(modelName($0)))" } ?? "Claude"
+        case .gate, .mark: how = "filter"
+        case .example: how = "your ✔ example"
+        case .override: how = "sender rule"
+        case .thread: how = "matched earlier in the conversation"
+        }
+        return "\(rule) agrees · \(how)"
     }
 }
 

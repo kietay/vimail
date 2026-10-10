@@ -27,6 +27,15 @@ struct RuleSuggestionTests {
         }
     }
 
+    @Test func whenHintFitsTheAccount() {
+        // A consumer address has no colleagues to keep out: a sender's domain is the example.
+        #expect(RuleSuggestion.whenPlaceholder(account: "sam@hey.com", asksClaude: false) == "from:@stripe.com · empty: all received mail")
+        #expect(RuleSuggestion.whenPlaceholder(account: "", asksClaude: false) == "from:@stripe.com · empty: all received mail")
+        #expect(RuleSuggestion.whenPlaceholder(account: "sam@studio.co", asksClaude: false) == "-from:@studio.co · empty: all received mail")
+        // With an ASK, empty sends every received message to Claude.
+        #expect(RuleSuggestion.whenPlaceholder(account: "sam@hey.com", asksClaude: true) == "from:@stripe.com · empty: Claude judges all received mail")
+    }
+
     @Test func whenKeepsColleaguesOutOrLimitsToTheSender() throws {
         // Your own domain: mail from colleagues stays out.
         #expect(RuleSuggestion.when(account: "sam@studio.co", sender: stripe, onlySender: false) == "-from:@studio.co")
@@ -217,6 +226,11 @@ struct BackfillTextTests {
         #expect(BackfillText.counts(estimate(), asksClaude: true) == "402 msgs · 64 filtered · 309 Claude")
         #expect(BackfillText.counts(estimate(), asksClaude: false) == "338 of 402 msgs")
         #expect(BackfillText.counts(estimate(messages: 212, counts: false), asksClaude: true) == "212 msgs · 309 Claude")
+        // Debug builds cap runs: the line says how many of the passing messages the run takes.
+        var capped = estimate(inScope: 2_310, passing: 1_940, needClaude: 37, messages: 200)
+        capped.cappedAt = 200
+        #expect(BackfillText.counts(capped, asksClaude: true) == "200 of 1,940 msgs (debug cap) · 37 Claude")
+        #expect(BackfillText.counts(capped, asksClaude: false) == "200 of 1,940 msgs (debug cap)")
         #expect(BackfillText.cost(estimate(), asksClaude: true, room: room) == "≈ $3.91 · over today's room")
         #expect(BackfillText.cost(estimate(needClaude: 1_911, micros: 24_170_000), asksClaude: true, room: room) == "≈ $24.17 · over month room")
         #expect(BackfillText.cost(estimate(needClaude: 100, micros: 1_270_000), asksClaude: true, room: room) == "≈ $1.27 · ≈ 2 min")

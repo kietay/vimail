@@ -94,6 +94,18 @@ struct ErrorTests {
         #expect(transport.calls.count == 4)
     }
 
+    @Test func usageLimitYouSetIsBillingAndNeverPausesAsIncompatible() async {
+        let limit = FakeTransport.Answer.error(
+            400, type: "invalid_request_error", message: "You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC."
+        )
+        let transport = FakeTransport([limit])
+        let judge = makeJudge(transport, model: .haiku)
+        for message in [Sample.receipt, Sample.newsletter, Sample.reply.message, Sample.receipt] {
+            await #expect(throws: JudgeError.paused(.billing)) { try await judge.judge(Sample.request(message)) }
+        }
+        #expect(await failure([.error(400, type: "invalid_request_error", message: "You have reached your specified workspace API usage limits")]).0 == .paused(.billing))
+    }
+
     @Test func badRequestWithFallbacksRetriesWithoutThemAndRemembers() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("vimail-\(UUID().uuidString)/ai-usage.json")
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }

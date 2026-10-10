@@ -98,6 +98,7 @@ extension RuleEngine {
         while !Task.isCancelled && !stopped && !userPaused {
             let claims: [QueueClaim]
             do {
+                try await refreshRules()
                 claims = try await store.claimDueRules(limit: Self.batchSize, now: clock.now, excluding: claimed)
             } catch {
                 storeFailed(error)
@@ -114,6 +115,8 @@ extension RuleEngine {
             do {
                 try await process(batch)
                 claimed.subtract(keys)
+                // A run is one drain: the status bar and Activity follow it batch by batch.
+                refreshStatus()
             } catch {
                 claimed.subtract(keys)
                 if !stopped && !Task.isCancelled {
@@ -154,7 +157,7 @@ extension RuleEngine {
         var candidates = found.map(\.2)
         try await cascade(&candidates, labels: labels)
         let items = zip(found, candidates).map { PassItem(claim: $0.0, run: $0.1, candidate: $1) }
-        let answers = try await askClaude(items, labels: labels)
+        let answers = try await askClaude(items, labels: labels, epoch: epoch)
         let calls = answers.filter { if case .answered = $0 { true } else { false } }.count
         let summary = try await settle(items, answers: answers, epoch: epoch)
         Self.log.info(
@@ -273,7 +276,8 @@ extension RuleEngine {
     // MARK: - Claude
 
     /// One call per message that needs Claude, a few at a time.
-    func askClaude(_ items: [PassItem], labels: [MailLabel]) async throws -> [ClaudeAnswer] {
+    /// - Parameter epoch: the rules and model the pass started with: no call starts once they changed.
+    func askClaude(_ items: [PassItem], labels: [MailLabel], epoch: Int) async throws -> [ClaudeAnswer] {
         var answers = Array(repeating: ClaudeAnswer.none, count: items.count)
         let asking = items.indices.filter { !items[$0].candidate.plan.needsVerdict.isEmpty }
         guard !asking.isEmpty else { return answers }
@@ -287,7 +291,7 @@ extension RuleEngine {
             while running < Self.judgeConcurrency, let index = queue.popFirst() {
                 let item = items[index]
                 let catalog = catalogs[item.run.id] ?? Catalog()
-                group.addTask { (index, await self.ask(item, catalog: catalog)) }
+                group.addTask { (index, await self.ask(item, catalog: catalog, epoch: epoch)) }
                 running += 1
             }
             for await (index, answer) in group {
@@ -295,17 +299,20 @@ extension RuleEngine {
                 if let next = queue.popFirst() {
                     let item = items[next]
                     let catalog = catalogs[item.run.id] ?? Catalog()
-                    group.addTask { (next, await self.ask(item, catalog: catalog)) }
+                    group.addTask { (next, await self.ask(item, catalog: catalog, epoch: epoch)) }
                 }
             }
         }
         return answers
     }
 
-    /// Asks Claude about one message, unless its lane, the hourly cap or its run's cap says wait.
-    func ask(_ item: PassItem, catalog: Catalog) async -> ClaudeAnswer {
+    /// Asks Claude about one message, unless its lane, the hourly cap or its run's cap says wait, or
+    /// what the pass started with no longer holds: you cancelled its run or paused all rules, or the
+    /// rules or the model changed (the pass would not commit, and another model would answer).
+    func ask(_ item: PassItem, catalog: Catalog, epoch: Int) async -> ClaudeAnswer {
         let now = clock.now
-        guard !stopped, !Task.isCancelled else { return .retry(until: now, attempt: false, code: nil) }
+        guard !stopped, !Task.isCancelled, epoch == self.epoch, !userPaused else { return .retry(until: now, attempt: false, code: nil) }
+        guard !haltedRuns.contains(item.run.id) else { return .runPaused }
         let lane: SpendLane = item.run.kind == .live ? .live : .run(item.run.id)
         switch laneCheck() {
         case .go:
@@ -344,20 +351,33 @@ extension RuleEngine {
             lane: lane, catalog: catalog.rules, evaluate: item.candidate.plan.needsVerdict.compactMap { catalog.entries[$0]?.key },
             examples: catalog.examples, email: EmailDigest(message: inputs.message, thread: inputs.thread, selfAddresses: store.selfAddresses)
         )
-        let result = await callJudge(judge, request)
-        if case .success(let response) = result { cost = response.costMicros }
-        guard !stopped, !Task.isCancelled else { return .retry(until: now, attempt: false, code: nil) }
+        let (result, billed) = await callJudge(judge, request)
+        switch result {
+        case .success(let response): cost = response.costMicros
+        case .failure: cost = billed
+        }
+        guard !stopped, !Task.isCancelled else {
+            // Stopping: an answer already paid for is kept, so the next start does not buy it again.
+            if case .success(let response) = result {
+                _ = await record(response.decisions, for: item, catalog: catalog, model: response.model, servedBy: response.servedBy, cost: cost, stopping: true)
+            }
+            return .retry(until: now, attempt: false, code: nil)
+        }
         switch result {
         case .success(let response):
             return await record(response.decisions, for: item, catalog: catalog, model: response.model, servedBy: response.servedBy, cost: response.costMicros)
         case .failure(let error):
-            return await failed(error, item: item, lane: lane, catalog: catalog)
+            return await failed(error, cost: cost, item: item, lane: lane, catalog: catalog)
         }
     }
 
     /// Stores Claude's verdicts at once, in their own transaction, so a crash before the commit
     /// never pays for them twice.
-    func record(_ decisions: [String: JudgeResponse.Decision], for item: PassItem, catalog: Catalog, model: String, servedBy: String, cost: Int64) async -> ClaudeAnswer {
+    /// - Parameter stopping: the engine is stopping; the verdicts were paid for, so they are stored anyway.
+    func record(
+        _ decisions: [String: JudgeResponse.Decision], for item: PassItem, catalog: Catalog, model: String, servedBy: String, cost: Int64, stopping: Bool = false
+    ) async -> ClaudeAnswer {
+        claudeAnswered = true
         var verdicts: [StoredVerdict] = []
         var answered: [String: RuleDecision] = [:]
         for ruleID in item.candidate.plan.needsVerdict {
@@ -369,29 +389,49 @@ extension RuleEngine {
             answered[ruleID] = RuleDecision(ruleID: ruleID, revision: entry.revision, verdict: decision.verdict, source: .claude, judgeHash: hash)
         }
         do {
-            try await writing { try await store.putVerdicts(verdicts, model: model, costMicros: cost, runID: item.run.id) }
+            try await writing(evenWhenStopping: stopping) { try await store.putVerdicts(verdicts, model: model, costMicros: cost, runID: item.run.id) }
         } catch {
             return .retry(until: clock.now, attempt: false, code: nil)
         }
+        // The run's cost and the day's spend moved.
+        refreshStatus()
         return .answered(answered)
     }
 
     /// What a failed call means for the row and for Claude (design §3.6).
-    func failed(_ error: JudgeError, item: PassItem, lane: SpendLane, catalog: Catalog) async -> ClaudeAnswer {
+    /// - Parameter cost: what Claude billed before the call failed (`JudgeError.billed`): it counts
+    ///   toward the run, its cap and the model's recent costs like an answer's.
+    func failed(_ error: JudgeError, cost: Int64 = 0, item: PassItem, lane: SpendLane, catalog: Catalog) async -> ClaudeAnswer {
+        if case .billed(let error, let billed) = error { return await failed(error, cost: cost + billed, item: item, lane: lane, catalog: catalog) }
         let now = clock.now
+        switch error {
+        case .refused:
+            // Stored with its declined verdicts below.
+            break
+        default:
+            guard cost > 0 else { break }
+            claudeAnswered = true
+            try? await writing { try await store.putVerdicts([], model: config.model, costMicros: cost, runID: item.run.id) }
+            refreshStatus()
+        }
         switch error {
         case .transient(let retryAfter):
             let attempts = item.claim.attempts + 1
             let delay = Self.backoff.delay(afterAttempt: attempts, retryAfter: retryAfter)
             coolDown(until: now.addingTimeInterval(Self.seconds(retryAfter ?? Self.backoff.first)))
-            guard attempts < Self.maxAttempts else { return .failed(code: "attempts_exhausted") }
+            // Past `maxAttempts` a row fails only when Claude answered the call before this one: then
+            // the trouble is this email. While every call fails (an outage) it keeps waiting at the
+            // backoff's pace, up to 30 minutes, until `maxAttemptsWhileDown`.
+            let outage = !claudeAnswered
+            claudeAnswered = false
+            if attempts >= Self.maxAttemptsWhileDown || attempts >= Self.maxAttempts && !outage { return .failed(code: "attempts_exhausted") }
             return .retry(until: now.addingTimeInterval(Self.seconds(delay)), attempt: true, code: "transient")
         case .offline:
             let until = now.addingTimeInterval(Self.offlineCooldown)
             coolDown(until: until)
             return .retry(until: until, attempt: false, code: "offline")
         case .paused(let reason):
-            pauseLane(reason)
+            pauseLane(reason, fromClaude: true)
             if case .run(let id) = lane {
                 await pause(run: id, .ai)
                 return .runPaused
@@ -411,11 +451,14 @@ extension RuleEngine {
             for ruleID in item.candidate.plan.needsVerdict {
                 if let key = catalog.entries[ruleID]?.key { declined[key] = JudgeResponse.Decision(verdict: .declined, reason: reason) }
             }
-            return await record(declined, for: item, catalog: catalog, model: config.model, servedBy: config.model, cost: 0)
+            return await record(declined, for: item, catalog: catalog, model: config.model, servedBy: config.model, cost: cost)
         case .truncated:
             return .failed(code: "truncated")
         case .invalid(let code):
             return .failed(code: code)
+        case .billed:
+            // Unwrapped above.
+            return .failed(code: "billed")
         }
     }
 

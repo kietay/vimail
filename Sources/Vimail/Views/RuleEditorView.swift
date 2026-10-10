@@ -43,7 +43,7 @@ struct RuleEditorView: View {
                 row("WHEN", .when) {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
-                            TextField("-from:@studio.co · empty: all mail", text: $editor.draft.when)
+                            TextField(editor.whenPlaceholder, text: $editor.draft.when)
                                 .fieldStyle()
                                 .font(AppFonts.mono(12))
                                 .focused($focus, equals: .ruleWhen)

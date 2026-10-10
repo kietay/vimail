@@ -51,14 +51,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         AppModel.log.info("Quitting")
         MainActor.assumeIsolated {
-            guard case .success(let model) = AppContainer.shared, let compose = model.compose else { return }
-            // Keep whatever is being written.
-            let semaphore = DispatchSemaphore(value: 0)
-            Task.detached {
-                await compose.finish()
-                semaphore.signal()
+            guard case .success(let model) = AppContainer.shared else { return }
+            let compose = model.compose
+            let rules = model.services.rules
+            let done = DispatchGroup()
+            if let compose {
+                // Keep whatever is being written.
+                done.enter()
+                Task.detached {
+                    await compose.finish()
+                    done.leave()
+                }
             }
-            _ = semaphore.wait(timeout: .now() + 1)
+            // Cancels Claude calls in flight and settles what they spent, so today's spend counts them.
+            done.enter()
+            Task.detached {
+                await rules.stop()
+                done.leave()
+            }
+            _ = done.wait(timeout: .now() + 1)
         }
     }
 }

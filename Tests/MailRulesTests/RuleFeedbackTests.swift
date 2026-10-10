@@ -131,10 +131,10 @@ struct RuleFeedbackTests {
         try await harness.actions.perform(.removeLabel(label), threads: ["t1"])
         var note = try await harness.engine.noteUserChange(.applied(LabelEdit(undoKey: "u1", labelID: label, added: false, messageIDs: ["m1"])))
         #expect(note.taughtRules.isEmpty)
-        // `x` gives the ✖ anyway, so the toast says it learns.
+        // `x` gives the ✖ anyway, so the toast offers to teach Claude with it.
         let taught = try #require(try await harness.engine.teach(ruleID: rule.id, messageID: "m1", matches: false, undoKey: "u1"))
         note.taughtRules.append(taught)
-        #expect(note.removalToast(labelName: "receipts") == "receipts removed · rule Receipts won't re-add it and will learn from this")
+        #expect(note.removalToast(labelName: "receipts") == "receipts removed · rule Receipts won't re-add it · test it to teach Claude (gr ↵)")
         #expect(try await harness.store.examples(ruleID: rule.id).map(\.matches) == [false])
     }
 
@@ -292,5 +292,22 @@ struct RuleFeedbackTests {
         }
         #expect(paused)
         await harness.engine.stop()
+    }
+
+    @Test func explainShowsARuleThatAgreesWithALabelAlreadyThere() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        let label = try await harness.labelID("receipts")
+        try await harness.store.upsertMessages([mail("p1", from: stripe, subject: "Your receipt", labels: ["INBOX", label])])
+        _ = try await harness.engine.runRules(on: ["p1"], confirmed: true)
+        await harness.engine.drain()
+        let explanation = try await harness.engine.explain(threadID: "p1")
+        // The label stays yours: no rule owns it, but the rule's match shows.
+        #expect(explanation.labels.first?.owners.isEmpty == true)
+        let agreement = try #require(explanation.agreements.first)
+        #expect(agreement.ruleName == "Receipts" && agreement.labelID == label && agreement.source == .claude && agreement.reason == "fake: match")
+        let lines = explanation.lines(rules: try await harness.store.rules(), labels: try await harness.store.labels(), modelName: { _ in "Haiku 5.5" }, date: { _ in "" })
+        #expect(lines.map(\.detail) == ["added by you or Gmail", #"rule "Receipts" v1 agrees · Claude (Haiku 5.5)"#])
+        #expect(lines.last?.reason == "fake: match" && lines.last?.isOnConversation == true)
     }
 }

@@ -232,8 +232,9 @@ extension MailStore {
     /// Saves an edited rule. A change to what it decides (`Rule.changesSemantics(from:)`) makes a new
     /// revision and pauses the runs that apply the old one, or marks them out of date when they are
     /// paused or waiting for confirmation already (`rule_changed`); renaming it or changing its
-    /// switches keeps the revision. Returns the rule as stored. Throws `RuleFilter.Problem` for a WHEN
-    /// rules can't use.
+    /// switches keeps the revision. Either way the revision's stored copy becomes the rule as saved,
+    /// so runs over stored mail judge with the example set you tested (`promptExampleIDs`), as live
+    /// mail does. Returns the rule as stored. Throws `RuleFilter.Problem` for a WHEN rules can't use.
     @discardableResult
     public func saveRule(_ rule: Rule) async throws -> Rule {
         _ = try RuleFilter.parse(rule.when)
@@ -242,8 +243,8 @@ extension MailStore {
             var saved = rule.key == record.rule.key ? rule : try Self.rule(rule, key: record.rule.key)
             saved.revision = record.rule.revision + (saved.changesSemantics(from: record.rule) ? 1 : 0)
             try Self.update(record, to: saved, db)
+            try Self.saveRevision(saved, db)
             if saved.revision != record.rule.revision {
-                try Self.saveRevision(saved, db)
                 _ = try Self.pauseRuns(containing: saved.id, reason: .ruleChanged, db)
             }
             change.rules = true

@@ -193,12 +193,14 @@ extension RuleEngine {
 
         var stop: PreviewError?
         var answered = Set<Int>()
+        // Verdicts are stored at this model's hash: after a switch to another, no call starts.
+        let config = config
         await withTaskGroup(of: (Int, PreviewResult).self) { group in
             var queue = picked[...]
             var running = 0
             while running < Self.judgeConcurrency, let index = queue.popFirst() {
                 let entry = entries[index]
-                group.addTask { (index, await self.judgePreview(entry, prompt: prompt)) }
+                group.addTask { (index, await self.judgePreview(entry, prompt: prompt, config: config)) }
                 running += 1
             }
             for await (index, result) in group {
@@ -213,7 +215,7 @@ extension RuleEngine {
                 }
                 if let next = queue.popFirst() {
                     let entry = entries[next]
-                    group.addTask { (next, await self.judgePreview(entry, prompt: prompt)) }
+                    group.addTask { (next, await self.judgePreview(entry, prompt: prompt, config: config)) }
                 }
             }
         }
@@ -327,20 +329,32 @@ extension RuleEngine {
     }
 
     /// One preview call. Its verdict is stored at the draft's judge hash; a run of the saved rule reuses it.
-    func judgePreview(_ entry: PreviewEntry, prompt: PreviewPrompt) async -> PreviewResult {
+    /// - Parameter config: the model the test started with. Another one now: the row stays untested.
+    func judgePreview(_ entry: PreviewEntry, prompt: PreviewPrompt, config: JudgeConfig) async -> PreviewResult {
         var row = entry.row
         row.testing = false
-        guard let judge, !Task.isCancelled else { return .row(row) }
+        guard let judge, !Task.isCancelled, !config.judgesDifferently(from: self.config) else { return .row(row) }
         guard let inputs = try? await store.judgeInputs(messageID: row.messageID) else { return .row(row) }
         let request = JudgeRequest(
             lane: .preview, catalog: [prompt.rule], evaluate: [prompt.key], examples: prompt.examples,
             email: EmailDigest(message: inputs.message, thread: inputs.thread, selfAddresses: store.selfAddresses)
         )
         let decision: JudgeResponse.Decision
-        var cost: Int64 = 0
+        let (result, billed) = await callJudge(judge, request)
+        var cost = billed
         var model = config.model
         var servedBy = config.model
-        switch await callJudge(judge, request) {
+        switch result {
+        case .success, .failure(.refused):
+            // A refusal is stored below, as a verdict.
+            break
+        case .failure:
+            // Billed, yet no verdict: the cost still counts toward the model's recent costs.
+            guard billed > 0 else { break }
+            try? await writing { try await store.putVerdicts([], model: model, costMicros: billed) }
+            refreshStatus()
+        }
+        switch result {
         case .success(let response):
             guard let answer = response.decisions[prompt.key] else { return .row(row) }
             decision = answer
@@ -350,7 +364,7 @@ extension RuleEngine {
         case .failure(.budget(let stop)):
             return .stopped(.budget(stop))
         case .failure(.paused(let reason)):
-            pauseLane(reason)
+            pauseLane(reason, fromClaude: true)
             return .stopped(.paused(reason))
         case .failure(.refused(let category)):
             decision = JudgeResponse.Decision(verdict: .declined, reason: "Claude declined to classify this email" + (category.map { " (\($0))" } ?? ""))
@@ -362,6 +376,8 @@ extension RuleEngine {
             examplesDigest: prompt.examplesDigest, model: model, servedBy: servedBy
         )
         try? await writing { try await store.putVerdicts([verdict], model: model, costMicros: cost) }
+        // The day's spend moved.
+        refreshStatus()
         row.outcome = Self.outcome(decision.verdict)
         row.source = .claude
         row.reason = decision.reason

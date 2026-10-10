@@ -135,11 +135,13 @@ public struct AnthropicClient: Sendable {
     }
 
     /// Billing is checked before the generic 400: an account without credit answers every request
-    /// with a 400 `invalid_request_error` about its "credit balance".
+    /// with a 400 `invalid_request_error` about its "credit balance", and a workspace or organization
+    /// past the usage limit you set with one saying "You have reached your specified API usage limits".
     static func aiError(status: Int, failure: ErrorResponse.Detail?, retryAfter: Duration?) -> AIError {
         let message = failure?.message ?? ""
         let spendLimit = failure?.details?.errorCode == "enforced_spend_limit_reached" || message.localizedCaseInsensitiveContains("spend limit")
-        if failure?.type == "billing_error" || (status == 400 && message.localizedCaseInsensitiveContains("credit balance")) {
+        let billing400 = ["credit balance", "usage limit"].contains { message.localizedCaseInsensitiveContains($0) }
+        if failure?.type == "billing_error" || (status == 400 && billing400) {
             return .billing
         }
         switch status {

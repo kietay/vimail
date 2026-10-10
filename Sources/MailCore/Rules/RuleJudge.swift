@@ -158,6 +158,22 @@ public enum JudgeError: Error, Sendable, Hashable {
     case truncated
     /// A request Claude rejects for this email only, or an answer that doesn't parse ("http_413").
     case invalid(code: String)
+    /// Claude answered and billed one or more attempts, then the call still ended in `error` (a
+    /// refusal, an answer cut off or unreadable, a retry that failed). The cost counts toward the
+    /// run and its cap like an answer's.
+    indirect case billed(JudgeError, costMicros: Int64)
+}
+
+extension JudgeError {
+    /// The error itself, without what Claude billed for it.
+    public var unbilled: JudgeError {
+        if case .billed(let error, _) = self { error.unbilled } else { self }
+    }
+
+    /// What Claude billed before the call failed.
+    public var billedMicros: Int64 {
+        if case .billed(let error, let cost) = self { cost + error.billedMicros } else { 0 }
+    }
 }
 
 /// Which budget a call would cross.

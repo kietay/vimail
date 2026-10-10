@@ -60,6 +60,11 @@ final class RuleEditorModel {
         var account: String
     }
 
+    /// WHEN's hint while it is empty, for this account.
+    var whenPlaceholder: String {
+        RuleSuggestion.whenPlaceholder(account: seed?.account ?? app?.account.email ?? "", asksClaude: draft.asksClaude)
+    }
+
     /// Free counts over the last 90 days: how much of the mail in scope passes WHEN.
     struct FreeCount: Equatable {
         var passing: Int
@@ -113,6 +118,8 @@ final class RuleEditorModel {
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored let services: AppServices
     @ObservationIgnored private var previewTask: Task<Void, Never>?
+    /// Pricing a test before it runs.
+    @ObservationIgnored private var priceTask: Task<Void, Never>?
     @ObservationIgnored private var figuresTask: Task<Void, Never>?
     @ObservationIgnored private var draftTask: Task<Void, Never>?
 
@@ -239,6 +246,7 @@ final class RuleEditorModel {
 
     /// Stops what the editor has running and, for a rule never saved, deletes its marks and sender rules.
     func abandon() {
+        priceTask?.cancel()
         previewTask?.cancel()
         figuresTask?.cancel()
         draftTask?.cancel()
@@ -596,6 +604,9 @@ final class RuleEditorModel {
     /// `⌃r` (rows at issue) and `⌃R` (every row you have not decided): asks for consent first, then
     /// shows the price and runs by itself only below 5¢.
     func test(_ test: PreviewTest, confirmed: Bool = false) {
+        // One test at a time: another press (or the key repeating) would cancel the calls in flight,
+        // which may be billed, and send the same rows again.
+        guard !testing, priceTask == nil else { return }
         prompt = nil
         guard draft.asksClaude else {
             notice = "Filter rules need no test: the preview already shows exactly what they match."
@@ -610,7 +621,8 @@ final class RuleEditorModel {
         let sample = PreviewSample(extra: sampleExtra)
         let rules = services.rules
         let store = services.store
-        Task {
+        priceTask = Task {
+            defer { priceTask = nil }
             do {
                 // Your marks as they are now, also one made a moment ago.
                 let marks = try await store.examples(ruleID: tested.id).map(\.messageID)
@@ -624,6 +636,7 @@ final class RuleEditorModel {
                     prompt = .test(test, cost)
                     return
                 }
+                guard !Task.isCancelled else { return }
                 runTest(test, marks: marks, sample: sample)
             } catch {
                 notice = "Could not price the test: \(error.localizedDescription)"

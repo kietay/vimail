@@ -66,9 +66,12 @@ struct ResponseTests {
         body = body.replacingOccurrences(of: #""category":"cyber""#, with: category.map { #""category":"\#($0)""# } ?? #""category":null"#)
         for model in ClaudeModel.allCases {
             let transport = FakeTransport([.ok(body)])
-            await #expect(throws: JudgeError.refused(category: category)) {
+            let error = await #expect(throws: JudgeError.self) {
                 try await makeJudge(transport, model: model).judge(Sample.request())
             }
+            // A refusal is billed: the engine counts its cost toward the run.
+            #expect(error?.unbilled == .refused(category: category))
+            #expect((error?.billedMicros ?? 0) > 0)
             // Never retried: the same email would be declined again.
             #expect(transport.calls.count == 1)
         }
@@ -80,13 +83,13 @@ struct ResponseTests {
         #expect(transport.calls.map { $0.json["max_tokens"] as? Int } == [2048, 4096])
 
         let (again, twice) = try await judge(["max_tokens", "max_tokens", "plain"], model: .opus)
-        #expect(again.failure == .truncated)
+        #expect(again.failure?.unbilled == .truncated && (again.failure?.billedMicros ?? 0) > 0)
         #expect(twice.calls.map { $0.json["max_tokens"] as? Int } == [4096, 8192])
     }
 
     @Test func contextWindowIsNotRetried() async throws {
         let (result, transport) = try await judge(["context", "plain"])
-        #expect(result.failure == .truncated)
+        #expect(result.failure?.unbilled == .truncated)
         #expect(transport.calls.count == 1)
     }
 
@@ -96,11 +99,11 @@ struct ResponseTests {
         #expect(first.calls.count == 2)
 
         let (empty, second) = try await judge(["empty", "empty", "plain"])
-        #expect(empty.failure == .truncated)
+        #expect(empty.failure?.unbilled == .truncated)
         #expect(second.calls.count == 2)
 
         let (unreadable, _) = try await judge(["unreadable", "unreadable"])
-        #expect(unreadable.failure == .invalid(code: "bad_output"))
+        #expect(unreadable.failure?.unbilled == .invalid(code: "bad_output"))
     }
 
     @Test func missingRulesAreAskedForOnceThenLeftOut() async throws {
@@ -113,7 +116,7 @@ struct ResponseTests {
 
         // Nothing answered at all: an incomplete answer.
         let (none, _) = try await judge(["missing", "missing"], request: Sample.request(evaluate: ["r3"]))
-        #expect(none.failure == .truncated)
+        #expect(none.failure == .billed(.truncated, costMicros: 2 * (90 + 30 + 12)))
     }
 
     @Test func extraDuplicateAndUnrequestedVerdictsAreDropped() async throws {
@@ -145,7 +148,8 @@ struct ResponseTests {
         ]
         for (stop, expected) in stops {
             let transport = FakeTransport([.ok(try Self.body("missing")), stop])
-            await #expect(throws: expected) { try await makeJudge(transport).judge(Sample.request()) }
+            // The first attempt was billed: its cost comes with the error.
+            await #expect(throws: JudgeError.billed(expected, costMicros: 90 + 30 + 12)) { try await makeJudge(transport).judge(Sample.request()) }
             #expect(transport.calls.count == 2)
         }
     }
@@ -159,7 +163,7 @@ struct ResponseTests {
         let worstCase = Int64(((Double(body.characterCount) / 4).rounded(.up) * prices.cacheWrite5m + Double(body.maxTokens) * prices.output).rounded(.up))
         let spend = SpendGuard(file: nil, budget: SpendGuard.Budget(day: worstCase, month: 1_000_000, previewDay: 0))
         let transport = FakeTransport([.ok(try Self.body("missing")), .ok(Sample.bothMatch)])
-        await #expect(throws: JudgeError.budget(.day)) { try await makeJudge(transport, spend: spend).judge(request) }
+        await #expect(throws: JudgeError.billed(.budget(.day), costMicros: 90 + 30 + 12)) { try await makeJudge(transport, spend: spend).judge(request) }
         #expect(transport.calls.count == 1)
         // What the first call cost still counts.
         #expect(await spend.snapshot().spendToday == 90 + 30 + 12)

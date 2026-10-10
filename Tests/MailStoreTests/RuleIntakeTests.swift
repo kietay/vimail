@@ -188,4 +188,16 @@ struct RuleIntakeTests {
         _ = try await store.applyRemoteChanges(ChangeSet(cursor: "", upserted: [message("n9", thread: "n9", from: nina, minutesAgo: 1)]), intake: .resync)
         #expect(try queueRows(store).isEmpty)
     }
+
+    @Test func resyncBeforeAnyLiveCommitQueuesWhatArrivedSinceRulesWentLive() async throws {
+        let store = try await aliasStore()
+        let rule = try await addRule(store)
+        // The rule went live two hours ago; everything since waited for Claude, so no watermark.
+        try store.writeNow { db, _ in try db.run("UPDATE rules SET live_from = ? WHERE id = ?", [Date().addingTimeInterval(-7_200), rule.id]) }
+        let since = message("a1", thread: "a1", from: nina, minutesAgo: 30)
+        let before = message("a2", thread: "a2", from: nina, minutesAgo: 600)
+        _ = try await store.applyRemoteChanges(ChangeSet(cursor: "", upserted: [since, before]), intake: .resync)
+        #expect(try queueRows(store).map(\.messageID) == ["a1"])
+        #expect(try runRows(store).map(\.kind) == ["live"])
+    }
 }

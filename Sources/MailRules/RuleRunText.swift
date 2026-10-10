@@ -91,8 +91,14 @@ public enum BackfillText {
         return days == 1 ? "≈ 1 day" : "≈ \(days) days"
     }
 
-    /// "402 msgs · 64 filtered · 309 Claude"; a filter rule: "338 of 402 msgs".
+    /// "402 msgs · 64 filtered · 309 Claude"; a filter rule: "338 of 402 msgs". Capped in a debug
+    /// build: "200 of 1,940 msgs (debug cap) · 37 Claude".
     public static func counts(_ estimate: RunEstimate, asksClaude: Bool) -> String {
+        if estimate.cappedAt != nil {
+            let of = estimate.counts.map { " of \(RuleText.count($0.passing))" } ?? ""
+            let taken = "\(RuleText.count(estimate.messages))\(of) msgs (debug cap)"
+            return asksClaude ? "\(taken) · \(RuleText.count(estimate.needClaude)) Claude" : taken
+        }
         guard let counts = estimate.counts else {
             return asksClaude ? "\(RuleText.count(estimate.messages)) msgs · \(RuleText.count(estimate.needClaude)) Claude" : "\(RuleText.count(estimate.messages)) msgs"
         }

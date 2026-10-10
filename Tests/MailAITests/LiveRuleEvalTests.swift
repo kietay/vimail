@@ -158,7 +158,9 @@ struct LiveRuleEvalTests {
         mutating func add(_ result: Result<JudgeResponse, JudgeError>, truth: [Bool?]?) {
             switch result {
             case .failure(let error):
-                errors["\(error)", default: 0] += 1
+                // A refusal or an answer cut off is billed too.
+                cost += error.billedMicros
+                errors["\(error.unbilled)", default: 0] += 1
             case .success(let response):
                 cost += response.costMicros
                 cacheRead += response.usage.cacheRead

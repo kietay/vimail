@@ -71,7 +71,10 @@ public actor AILimiter {
         let writesPrefix = try await waitForPrefix(prefix)
         await slots.enter(priority: priority)
         // Last, with the slot held: a 429 can come back while this call waits for its prefix or slot.
-        do {
+        do throws(CancellationError) {
+            // Cancelled while it waited for a slot: it gives the slot back unsent, so nothing is
+            // reserved or charged for it.
+            if Task.isCancelled { throw CancellationError() }
             try await waitForTurn(tokens)
         } catch {
             if writesPrefix, let prefix { finishWriting(prefix) }

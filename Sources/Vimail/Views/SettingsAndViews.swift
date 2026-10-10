@@ -241,7 +241,7 @@ struct SettingsView: View {
         .task(id: model.settings.ai.model) {
             if model.mailVolume == nil { await model.refreshMailVolume() }
             spend = await ai.spend.snapshot()
-            if ai.hasKey, !ai.usesSimulator, ai.keyState == .unknown { await ai.verifyKey() }
+            if ai.hasKey, !ai.usesSimulator, ai.keyState == .unknown { await model.verifyAnthropicKey() }
         }
     }
 

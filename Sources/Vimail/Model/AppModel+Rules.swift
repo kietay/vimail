@@ -213,6 +213,13 @@ extension AppModel {
         showToast(paused ? "Rules paused on every account. Arriving mail waits." : "Rules resumed.")
     }
 
+    /// Checks the key in use. A key that works lets the rules try Claude again after a pause Anthropic
+    /// reported, such as a rejected key or missing credit.
+    func verifyAnthropicKey() async {
+        await ai.verifyKey()
+        if case .valid = ai.keyState { await services.configureRules(ai) }
+    }
+
     /// Checks a new API key and saves it when Anthropic accepts it. Returns true when it was saved.
     func saveAnthropicKey(_ key: String) async -> Bool {
         let check: AnthropicClient.KeyCheck
@@ -468,14 +475,18 @@ extension AppModel {
     }
 
     /// x: the rule was wrong. Removes its label like `t` does (`u` undoes it) and gives the rule a ✖
-    /// for the message.
+    /// for the message; also for a rule that agreed with a label you or Gmail added.
     func explainWrong() {
-        guard case .explain(let threadID) = overlay, let line = highlightedExplainLine else { return }
-        guard case .rule(let owner) = line.kind, let labelID = line.labelID else {
-            showToast("x is for a label a rule added.")
+        guard case .explain(let threadID) = overlay, let line = highlightedExplainLine, let labelID = line.labelID else { return }
+        let rule: (ruleID: String, messageID: String)
+        switch line.kind {
+        case .rule(let owner): rule = (owner.ruleID, owner.messageID)
+        case .agrees(let agreement): rule = (agreement.ruleID, agreement.messageID)
+        case .other, .miss:
+            showToast("x is for a label a rule added or agreed with.")
             return
         }
-        perform(.removeLabel(labelID), on: [threadID], labelName: line.labelName, teaching: RuleTeaching(ruleID: owner.ruleID, messageID: owner.messageID, matches: false))
+        perform(.removeLabel(labelID), on: [threadID], labelName: line.labelName, teaching: RuleTeaching(ruleID: rule.ruleID, messageID: rule.messageID, matches: false))
     }
 
     /// a: the rule should have matched. Adds its label (`u` undoes it) and gives the rule a ✔ for the message.
@@ -492,6 +503,7 @@ extension AppModel {
     private var explainedRule: (ruleID: String, name: String, messageID: String)? {
         switch highlightedExplainLine?.kind {
         case .rule(let owner): (owner.ruleID, owner.ruleName ?? "the deleted rule", owner.messageID)
+        case .agrees(let agreement): (agreement.ruleID, agreement.ruleName ?? "the deleted rule", agreement.messageID)
         case .miss(let miss): (miss.ruleID, miss.ruleName ?? "the deleted rule", miss.messageID)
         case .other, nil: nil
         }

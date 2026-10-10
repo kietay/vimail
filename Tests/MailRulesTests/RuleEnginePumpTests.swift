@@ -342,12 +342,18 @@ struct RuleEnginePumpTests {
         judge.fail("m1", with: .transient(retryAfter: nil), .transient(retryAfter: nil), .transient(retryAfter: nil), .transient(retryAfter: nil),
                    .transient(retryAfter: nil), .transient(retryAfter: nil), .transient(retryAfter: nil), .transient(retryAfter: nil))
         try await harness.deliver(mail("m1", subject: "deploy receipt"))
-        for _ in 0..<8 {
+        for _ in 0..<7 {
             await harness.engine.drain()
             harness.clock.advance(by: 1_900)
         }
-        #expect(judge.calls.count == 8)
-        let row = try #require(try harness.queue().first)
+        // Claude answers another email meanwhile: the trouble is this one.
+        try await harness.deliver(mail("m2", subject: "hello", minutesAgo: 0))
+        try harness.store.writeNow { db, _ in try db.run("UPDATE rule_queue SET not_before = ? WHERE message_id = 'm1'", [harness.clock.now.addingTimeInterval(60)]) }
+        await harness.engine.drain()
+        harness.clock.advance(by: 1_900)
+        await harness.engine.drain()
+        #expect(judge.calls.filter { $0.messageID == "m1" }.count == 8)
+        let row = try #require(try harness.queue().first { $0.messageID == "m1" })
         #expect(row.state == "failed")
         // The filter rule committed before the row failed.
         #expect(try await harness.hasLabel("m1", "deploys"))
@@ -620,5 +626,196 @@ struct RuleEnginePumpTests {
         #expect(try harness.queue().isEmpty)
         #expect(try await harness.hasLabel("m1", "deploys"))
         #expect(await next.storeFailures == 0)
+    }
+
+    @Test func anOutageKeepsRowsWaitingPastEightAttempts() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        judge.failLane("live", with: .transient(retryAfter: nil))
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        try await harness.deliver(mail("m1", from: stripe, subject: "Your receipt"))
+        // Every call fails for 20 minutes and more: Claude is down, not this email.
+        for _ in 0..<10 {
+            await harness.engine.drain()
+            harness.clock.advance(by: 1_900)
+        }
+        #expect(judge.calls.count == 10)
+        #expect(try harness.queue().map(\.state) == ["queued"])
+        // Claude is back: the mail is labeled without `r`.
+        judge.failLane("live", with: nil)
+        harness.clock.advance(by: 400)
+        await harness.engine.drain()
+        #expect(try await harness.hasLabel("m1", "receipts"))
+        #expect(try harness.queue().isEmpty)
+    }
+
+    @Test func pauseClaudeReportedIsTriedAgain() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        judge.failLane("live", with: .paused(.billing))
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        try await harness.deliver(mail("m1", from: stripe, subject: "Your receipt"))
+        await harness.engine.drain()
+        #expect(await harness.engine.ai == .paused(.billing))
+        #expect(judge.calls.count == 1)
+
+        // Still no credit at the next try: one call, paused again.
+        harness.clock.advance(by: RuleEngine.pauseProbeInterval + 1)
+        await harness.engine.drain()
+        #expect(judge.calls.count == 2)
+        #expect(await harness.engine.ai == .paused(.billing))
+
+        // Credit added at Anthropic, nothing changed here: the next try goes through.
+        judge.failLane("live", with: nil)
+        await harness.engine.drain()
+        #expect(judge.calls.count == 2)
+        harness.clock.advance(by: RuleEngine.pauseProbeInterval + 1)
+        await harness.engine.drain()
+        #expect(try await harness.hasLabel("m1", "receipts"))
+        #expect(await harness.engine.ai == .ready)
+
+        // A pause the app set (no consent) waits for the app.
+        await harness.engine.configure(judge: judge, aiPause: .noConsent, config: testConfig)
+        try await harness.deliver(mail("m2", from: stripe, subject: "Your receipt"))
+        harness.clock.advance(by: RuleEngine.pauseProbeInterval + 1)
+        await harness.engine.drain()
+        #expect(judge.calls.count == 3)
+        #expect(try harness.queue().map(\.state) == ["waiting_ai"])
+    }
+
+    @Test func relaunchHoldsMailThatWaitedTooLong() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        judge.failLane("live", with: .paused(.billing))
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        try await harness.deliver(mail("old", from: stripe, subject: "Your receipt"))
+        await harness.engine.drain()
+        #expect(try harness.queue().map(\.state) == ["waiting_ai"])
+        await harness.engine.stop()
+
+        // Credit is added while the app is closed; it opens 5 days later.
+        judge.failLane("live", with: nil)
+        harness.clock.advance(by: 5 * 86_400)
+        try await harness.deliver(mail("new", from: stripe, subject: "Your receipt", date: harness.clock.now.addingTimeInterval(-60)))
+        let next = harness.restart(judge: judge)
+        await next.drain()
+        // The new mail is labeled; the old waits in a backlog run for your confirmation.
+        #expect(judge.calls.map(\.messageID) == ["old", "new"])
+        #expect(try await harness.hasLabel("new", "receipts"))
+        #expect(try await !harness.hasLabel("old", "receipts"))
+        let rows = try harness.queue()
+        #expect(rows.map(\.messageID) == ["old"] && rows.map(\.state) == ["held"] && rows.map(\.kind) == ["backlog"])
+        await next.stop()
+    }
+
+    @Test func deletedLabelStopsItsRulesAtOnce() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        let receipts = RuleSpec(name: "Receipts", label: "receipts", ask: "Receipts and invoices for things I bought", stopAfterMatch: true)
+        let harness = try await Harness(rules: [receipts, deploysRule], judge: judge)
+        try await harness.deliver(mail("m1", from: stripe, subject: "Deploy receipt"))
+        await harness.engine.drain()
+        #expect(judge.calls.count == 1)
+        #expect(try await !harness.hasLabel("m1", "deploys"))
+
+        // Deleted here or in Gmail: the store turns its rule off; nothing tells the engine.
+        try await harness.store.deleteLabel(id: harness.labelID("receipts"))
+        try await harness.deliver(mail("m2", from: stripe, subject: "Deploy receipt"), mail("m3", from: stripe, subject: "Your receipt", minutesAgo: 2))
+        await harness.engine.drain()
+        // Off: no call for it, and it no longer stops the rules after it.
+        #expect(judge.calls.count == 1)
+        #expect(try await harness.hasLabel("m2", "deploys"))
+        #expect(try harness.queue().isEmpty)
+    }
+
+    @Test func modelSwitchStopsTheBatch() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        judge.hold()
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        try await harness.deliver((0..<8).map { mail("m\($0)", from: stripe, subject: "Your receipt \($0)", minutesAgo: Double($0)) })
+        let draining = Task { await harness.engine.drain() }
+        try await eventually("calls in flight") { judge.waiting == RuleEngine.judgeConcurrency }
+        let sonnet = RuleEngine.JudgeConfig(model: "claude-sonnet-5-5", effort: "low", promptVersion: 1, prices: testConfig.prices)
+        await harness.engine.configure(judge: judge, aiPause: nil, config: sonnet)
+        let haiku = try #require(try await harness.judgeHash("Receipts"))
+        judge.release()
+        await draining.value
+        // No call of the old pass started after the switch: all 8 went again under the new model.
+        #expect(judge.calls.count == RuleEngine.judgeConcurrency + 8)
+        let ids = (0..<8).map { "m\($0)" }
+        #expect(try await harness.store.verdicts(messageIDs: ids, judgeHashes: [haiku]).count == RuleEngine.judgeConcurrency)
+        #expect(try harness.queue().isEmpty)
+    }
+
+    @Test func pausingAllRulesStopsTheBatch() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        judge.hold()
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        try await harness.deliver((0..<8).map { mail("m\($0)", from: stripe, subject: "Your receipt \($0)", minutesAgo: Double($0)) })
+        let draining = Task { await harness.engine.drain() }
+        try await eventually("calls in flight") { judge.waiting == RuleEngine.judgeConcurrency }
+        try await harness.engine.setPaused(true)
+        judge.release()
+        await draining.value
+        #expect(judge.calls.count == RuleEngine.judgeConcurrency)
+        #expect(try harness.queue().count == 8 - RuleEngine.judgeConcurrency)
+    }
+
+    @Test func appNapIsNotHeldOffWhileRulesArePaused() async throws {
+        let harness = try await Harness(rules: [deploysRule])
+        try await storeMail(harness, count: 3, subject: "deploy")
+        let latest = Latest<RuleEngineStatus>()
+        let listener = Task { for await status in harness.engine.status { latest.set(status) } }
+        try await harness.engine.setPaused(true)
+        _ = try await harness.engine.startRun(RunPlan(ruleID: harness.rule("Deploys").id, window: .allCached))
+        try await eventually("the run in the status") { latest.value?.runs.contains { $0.state == .running } == true }
+        #expect(await !harness.engine.keepsAwake)
+        await harness.engine.stop()
+        await listener.value
+    }
+
+    @Test func aPaidAnswerIsKeptWhenStopping() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        judge.holdIgnoringCancellation()
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        try await harness.deliver(mail("m1", from: stripe, subject: "Your receipt"))
+        await harness.engine.start()
+        harness.engine.wake()
+        try await eventually("a call in flight") { judge.waiting == 1 }
+        let stopping = Task { await harness.engine.stop() }
+        try await eventually("stopping") { await harness.engine.stopped }
+        // The answer comes back, paid for, after the account began to close.
+        judge.release()
+        await stopping.value
+        let hash = try #require(try await harness.judgeHash("Receipts"))
+        #expect(try await harness.store.verdicts(messageIDs: ["m1"], judgeHashes: [hash]).count == 1)
+        #expect(try harness.queue().map(\.state) == ["queued"])
+
+        // The next launch uses it: no second call.
+        let next = harness.restart(judge: judge)
+        await next.drain()
+        #expect(judge.calls.count == 1)
+        #expect(try await harness.hasLabel("m1", "receipts"))
+    }
+
+    @Test func aSecondStopWaitsForTheFirst() async throws {
+        let judge = FakeJudge(matching: ["r1": ["receipt"]])
+        judge.holdIgnoringCancellation()
+        let harness = try await Harness(rules: [receiptsRule], judge: judge)
+        try await harness.deliver(mail("m1", from: stripe, subject: "Your receipt"))
+        await harness.engine.start()
+        harness.engine.wake()
+        try await eventually("a call in flight") { judge.waiting == 1 }
+        let first = Task { await harness.engine.stop() }
+        try await eventually("stopping") { await harness.engine.stopped }
+        let returned = Counter()
+        let second = Task {
+            await harness.engine.stop()
+            returned.increment()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        // Still writing: the second stop has not returned.
+        #expect(returned.count == 0)
+        judge.release()
+        await first.value
+        await second.value
+        #expect(returned.count == 1)
+        #expect(await harness.engine.activeWrites == 0)
     }
 }

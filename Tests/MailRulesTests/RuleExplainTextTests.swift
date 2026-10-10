@@ -81,6 +81,23 @@ struct RuleExplainTextTests {
         #expect(lines(explanation).count == 1)
     }
 
+    @Test func rulesThatAgreeWithALabelYouAdded() {
+        let receipts = MailLabel(id: "Label_5", name: "receipts", kind: .user)
+        func agreement(_ message: String, _ source: DecisionSource, _ reason: String?) -> RuleAgreement {
+            RuleAgreement(messageID: message, ruleID: "r_1", ruleName: "Receipts", revision: 3, labelID: "Label_5", source: source, reason: reason, model: "claude-haiku-5-5")
+        }
+        let explanation = ThreadExplanation(
+            labels: [LabelExplanation(label: receipts, messageIDs: ["m1", "m2"], owners: [])],
+            misses: [RuleMiss(messageID: "m3", ruleID: "r_1", ruleName: "Receipts", revision: 3, verdict: .noMatch, source: .claude, reason: "a reply", model: nil)],
+            agreements: [agreement("m1", .claude, "an older receipt"), agreement("m2", .cache, "receipt for Figma")]
+        )
+        let result = lines(explanation)
+        // One line for the rule, its newest agreement; and no "did not match" for it.
+        #expect(result.map(\.detail) == ["added by you or Gmail", #"rule "Receipts" v3 agrees · Claude (Haiku 5.5)"#])
+        #expect(result.last?.reason == "receipt for Figma")
+        #expect(result.allSatisfy { $0.isOnConversation })
+    }
+
     @Test func deletedRules() {
         let receipts = MailLabel(id: "Label_5", name: "receipts", kind: .user)
         let explanation = ThreadExplanation(labels: [LabelExplanation(label: receipts, messageIDs: ["m1"], owners: [owner("r_9", name: nil, source: .gate, runKind: nil)])], misses: [])

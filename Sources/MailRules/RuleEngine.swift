@@ -51,10 +51,16 @@ public actor RuleEngine: RuleWaking {
     static let judgeConcurrency = 4
     /// Claude calls for live mail per hour; more mail waits.
     static let liveCallsPerHour = 300
-    /// A row fails after this many transient failures (`r` queues it again).
+    /// A row fails after this many transient failures (`r` queues it again), when Claude answers
+    /// other calls meanwhile: the trouble is that email.
     static let maxAttempts = 8
+    /// While every call fails (an outage), rows go on at the backoff's 30-minute pace: about 8 hours.
+    static let maxAttemptsWhileDown = 24
     /// Offline: calls pause this long without counting an attempt.
     static let offlineCooldown: TimeInterval = 60
+    /// A pause Anthropic reported (no credit, a bad key, the model unavailable) is tried again this
+    /// often: one call finds out whether it ended.
+    static let pauseProbeInterval: TimeInterval = 30 * 60
     /// Live mail waiting this long for Claude (by its date) moves to a backlog run.
     static let staleWaitingAge: TimeInterval = 3 * 86_400
     static let staleCheckInterval: TimeInterval = 3_600
@@ -87,7 +93,8 @@ public actor RuleEngine: RuleWaking {
     var epoch = 0
     var userPaused = false
     var ai: AIState
-    /// A budget pause ends by itself: at midnight, or when the month turns.
+    /// A budget pause ends by itself: at midnight, or when the month turns. A pause Anthropic
+    /// reported is tried again then (`pauseProbeInterval`).
     var aiPausedUntil: Date?
     /// Mail an earlier launch left waiting for Claude, and runs it paused for Claude, are released
     /// once Claude is ready; again when a release failed.
@@ -106,6 +113,11 @@ public actor RuleEngine: RuleWaking {
     var breaker = CircuitBreaker()
     /// Rows being worked on, so a second claim skips them.
     var claimed: Set<QueueKey> = []
+    /// Runs you cancelled or undid: calls for them stop at once, also in the batch under way.
+    var haltedRuns: Set<Int64> = []
+    /// The last call Claude answered (or billed), rather than failed transiently: a row that keeps
+    /// failing then fails for its own email, not an outage.
+    var claudeAnswered = false
     var lastStaleCheck: Date?
     var lastPrune: Date?
     /// Passes that failed in a row on a store error: the loop backs off.
@@ -113,6 +125,9 @@ public actor RuleEngine: RuleWaking {
 
     var started = false
     var stopped = false
+    /// `stop()` returned for the first caller; a second waits for it.
+    var stopFinished = false
+    var stopWaiters: [CheckedContinuation<Void, Never>] = []
     var loop: Task<Void, Never>?
     var draining: Task<Void, Never>?
     var waiter: CheckedContinuation<Void, Never>?
@@ -164,7 +179,11 @@ public actor RuleEngine: RuleWaking {
     /// progress, and returns once no write is under way. Nothing writes to the store afterwards.
     /// Ends the status stream. Queued work stays for the next start.
     public func stop() async {
-        guard !stopped else { return }
+        guard !stopped else {
+            // Another stop is under way: return when it does.
+            if !stopFinished { await withCheckedContinuation { stopWaiters.append($0) } }
+            return
+        }
         stopped = true
         let running = [loop, draining].compactMap { $0 } + Array(previews.values)
         for task in running { task.cancel() }
@@ -179,6 +198,9 @@ public actor RuleEngine: RuleWaking {
         keepAwake(false)
         statusContinuation.finish()
         Self.log.info("Rules stopped")
+        stopFinished = true
+        for waiter in stopWaiters { waiter.resume() }
+        stopWaiters = []
     }
 
     /// Asks for a pass soon. Sync calls it after storing arrived mail.
@@ -273,12 +295,31 @@ public actor RuleEngine: RuleWaking {
         epoch += 1
     }
 
+    /// Picks up rules the store changed without `rulesChanged`: a label deleted here or in Gmail turns
+    /// its rules off, and a label's new ID rewrites them. Before each batch, so a rule that is off
+    /// never reaches Claude. Mail that waited for Claude may not need it any more.
+    func refreshRules() async throws {
+        let stored = try await store.rules()
+        guard loaded, stored != records else { return }
+        // Dates only (a run moved `covered_since` back): nothing a pass decides with.
+        func meaning(_ records: [RuleRecord]) -> [[AnyHashable]] { records.map { [$0.rule, $0.position, $0.state] } }
+        let changed = meaning(stored) != meaning(records)
+        let asked = Set(enabledRules.filter(\.asksClaude).map(\.id))
+        records = stored
+        guard changed else { return }
+        epoch += 1
+        let asking = Set(enabledRules.filter(\.asksClaude).map(\.id))
+        Self.log.info("Rules changed in the store: reloaded")
+        if !asked.isSubset(of: asking) { _ = try await releaseWaiting() }
+    }
+
     // MARK: - Writes and calls
 
     /// Runs a store write unless the engine is stopping. `stop()` waits for the writes under way.
+    /// - Parameter evenWhenStopping: for verdicts Claude already billed, from a pass `stop()` waits for.
     @discardableResult
-    func writing<T: Sendable>(_ body: () async throws -> T) async throws -> T {
-        guard !stopped else { throw RuleEngineError.stopped }
+    func writing<T: Sendable>(evenWhenStopping: Bool = false, _ body: () async throws -> T) async throws -> T {
+        guard !stopped || evenWhenStopping else { throw RuleEngineError.stopped }
         activeWrites += 1
         defer { writeEnded() }
         return try await body()
@@ -291,8 +332,9 @@ public actor RuleEngine: RuleWaking {
         writesDone = []
     }
 
-    /// One judge call that `stop()` and the caller's cancellation can cancel.
-    func callJudge(_ judge: any RuleJudge, _ request: JudgeRequest) async -> Result<JudgeResponse, JudgeError> {
+    /// One judge call that `stop()` and the caller's cancellation can cancel. A failure comes without
+    /// its `JudgeError.billed` wrapper: `billed` is what Claude charged before it failed.
+    func callJudge(_ judge: any RuleJudge, _ request: JudgeRequest) async -> (result: Result<JudgeResponse, JudgeError>, billed: Int64) {
         let id = UUID()
         let task = Task { () async -> Result<JudgeResponse, JudgeError> in
             do throws(JudgeError) {
@@ -304,7 +346,8 @@ public actor RuleEngine: RuleWaking {
         calls[id] = task
         let result = await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
         calls[id] = nil
-        return result
+        guard case .failure(let error) = result else { return (result, 0) }
+        return (.failure(error.unbilled), error.billedMicros)
     }
 
     // MARK: - Settings
@@ -358,7 +401,7 @@ public actor RuleEngine: RuleWaking {
         case .revised(let id, _), .disabled(let id), .deleted(let id):
             breaker.forget(id)
             // Mail that waited for Claude may not need it any more.
-            try await writing { _ = try await store.releaseWaitingAI() }
+            _ = try await releaseWaiting()
         case .enabled(let id):
             breaker.forget(id)
             if let gap { gapRun = try await makeGapRun(ruleID: id, gap: gap) }
@@ -408,7 +451,11 @@ public actor RuleEngine: RuleWaking {
         }
     }
 
-    func pauseLane(_ reason: PauseReason) {
+    /// - Parameter fromClaude: Anthropic answered with it (no credit or a usage limit, a rejected key,
+    ///   the model or the API unavailable). That can end without anything changing here, such as when
+    ///   you add credit, so one call tries again after `pauseProbeInterval`. Pauses the app sets (no
+    ///   key, no consent) end only through `configure`.
+    func pauseLane(_ reason: PauseReason, fromClaude: Bool = false) {
         guard ai != .paused(reason) else { return }
         ai = .paused(reason)
         let calendar = Calendar.current
@@ -420,7 +467,7 @@ public actor RuleEngine: RuleWaking {
             let month = calendar.dateInterval(of: .month, for: now)
             aiPausedUntil = month?.end
         default:
-            aiPausedUntil = nil
+            aiPausedUntil = fromClaude ? now.addingTimeInterval(Self.pauseProbeInterval) : nil
         }
         Self.log.notice("Claude rules paused: \(reason.rawValue)")
         refreshStatus()
@@ -443,7 +490,7 @@ public actor RuleEngine: RuleWaking {
         ai = .ready
         aiPausedUntil = nil
         do {
-            let released = try await writing { try await store.releaseWaitingAI() }
+            let released = try await releaseWaiting()
             let resumed = try await resumeRuns(pausedFor: .ai)
             releasePending = false
             Self.log.info("Claude rules ready: \(released) waiting message(s) released, \(resumed) run(s) resumed")
@@ -453,6 +500,25 @@ public actor RuleEngine: RuleWaking {
         }
         refreshStatus()
         wakeNow()
+    }
+
+    /// Mail waiting for Claude is due again, apart from what waited too long: that moves to a backlog
+    /// run first, which waits for your confirmation (`holdStaleWaiting`), also after a relaunch or a
+    /// pause that ended while the app was closed. Returns how many were released.
+    func releaseWaiting() async throws -> Int {
+        try await holdStaleWaiting()
+        return try await writing { try await store.releaseWaitingAI() }
+    }
+
+    /// Arrived mail that waited 3 days for Claude (by its date) moves to a backlog run that waits for
+    /// your confirmation, so labels never land weeks late in one burst.
+    func holdStaleWaiting() async throws {
+        let now = clock.now
+        lastStaleCheck = now
+        if let backlog = try await writing({ try await store.holdStaleWaiting(olderThan: Self.staleWaitingAge, now: now) }) {
+            Self.log.notice("Mail waited 3 days for Claude: held in backlog run #\(backlog) for confirmation")
+            refreshStatus()
+        }
     }
 
     /// Continues the runs paused for `reason`. Returns how many.
@@ -478,10 +544,11 @@ public actor RuleEngine: RuleWaking {
 
     // MARK: - Upkeep
 
-    /// Before each pass: lifts a budget pause that has run out, releases what an earlier launch left
-    /// waiting for Claude, retries marking runs out of date after a model change, continues runs
-    /// paused at a budget once the day turns, moves mail that waited too long for Claude to a backlog
-    /// run, and once a day deletes rule history past its use.
+    /// Before each pass: lifts a budget pause that has run out (or tries Claude again after a pause
+    /// Anthropic reported), releases what an earlier launch left waiting for Claude, retries marking
+    /// runs out of date after a model change, continues runs paused at a budget once the day turns,
+    /// moves mail that waited too long for Claude to a backlog run, and once a day deletes rule
+    /// history past its use.
     func maintain() async {
         let now = clock.now
         if case .paused = ai, let until = aiPausedUntil, now >= until { await laneReady() }
@@ -503,12 +570,8 @@ public actor RuleEngine: RuleWaking {
             }
         }
         if lastStaleCheck.map({ now.timeIntervalSince($0) >= Self.staleCheckInterval }) ?? true {
-            lastStaleCheck = now
             do {
-                if let backlog = try await writing({ try await store.holdStaleWaiting(olderThan: Self.staleWaitingAge, now: now) }) {
-                    Self.log.notice("Mail waited 3 days for Claude: held in backlog run #\(backlog) for confirmation")
-                    refreshStatus()
-                }
+                try await holdStaleWaiting()
             } catch {
                 Self.log.error("Could not check for stale waiting mail: \(String(describing: type(of: error)))")
             }
@@ -545,7 +608,8 @@ public actor RuleEngine: RuleWaking {
             let status = await makeStatus()
             guard !stopped else { break }
             lastStatus = pace.now
-            keepAwake(status.runs.contains { $0.state == .running })
+            // Not while you paused all rules: nothing works then.
+            keepAwake(!status.userPaused && status.runs.contains { $0.state == .running })
             statusContinuation.yield(status)
         }
         statusTask = nil

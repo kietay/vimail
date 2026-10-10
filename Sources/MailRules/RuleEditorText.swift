@@ -51,6 +51,16 @@ public enum RuleSuggestion {
         return "-from:@\(yours)"
     }
 
+    /// The WHEN field's hint while it is empty: an example (`-from:@yours` only when your domain is
+    /// not a consumer one, as `when` would suggest, else a sender's domain), and what empty means:
+    /// every message in the rule's scope, all of them judged by Claude when the rule has an ASK.
+    /// - Parameter account: your address, or "" when unknown.
+    public static func whenPlaceholder(account: String, asksClaude: Bool) -> String {
+        let yours = domain(of: account)
+        let example = !yours.isEmpty && !isConsumerDomain(yours) ? "-from:@\(yours)" : "from:@stripe.com"
+        return "\(example) · empty: \(asksClaude ? "Claude judges all received mail" : "all received mail")"
+    }
+
     /// A name for a new label: the sender's organization ("Stripe" for receipts@mail.stripe.com), or
     /// for a person writing from a consumer address, their name.
     public static func labelName(for sender: EmailAddress) -> String {

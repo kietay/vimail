@@ -278,7 +278,8 @@ extension MailStore {
     /// A resync in progress (meta `rules_resync`): the live watermark when it started, how many
     /// messages it queued live, and the backlog run holding the rest.
     struct ResyncIntake: Codable {
-        /// nil when rules had not processed live mail yet: nothing is queued.
+        /// The live watermark; before rules committed any live mail (it all waited for Claude, say),
+        /// when the first rule that is on went live. nil without such a rule: nothing is queued.
         var since: Date?
         var live = 0
         var backlog: Int64?
@@ -300,7 +301,7 @@ extension MailStore {
             try queue(received, run: try liveRun(rules, db), priority: 0, held: false, db)
         case .resync:
             // Fixed when the resync starts: live processing moves the watermark meanwhile.
-            var resync = try resyncIntake(db) ?? ResyncIntake(since: try liveWatermark(db))
+            var resync = try resyncIntake(db) ?? ResyncIntake(since: try liveWatermark(db) ?? rulesLiveSince(db))
             try queueResync(inserted, me: me, &resync, db)
             try setMeta("rules_resync", try json(resync), db)
         }
@@ -349,6 +350,11 @@ extension MailStore {
     static func liveWatermark(_ db: SQLiteDatabase) throws -> Date? {
         let value = try db.first("SELECT value FROM meta WHERE key = 'rules_live_watermark'") { Double($0.string(0)) } ?? nil
         return value.map { Date(timeIntervalSince1970: $0 / 1000) }
+    }
+
+    /// When the earliest rule that is on started judging arriving mail (`live_from`).
+    static func rulesLiveSince(_ db: SQLiteDatabase) throws -> Date? {
+        try db.first("SELECT MIN(live_from) FROM rules WHERE enabled = 1") { $0.optionalDate(0) } ?? nil
     }
 
     /// The given messages that rules may see, newest first, optionally only those dated `since` or later.
@@ -780,6 +786,27 @@ extension MailStore {
             """,
             [now, list, liveDay(now)]
         )
+        try extendCoverage(finishedAt: now, among: list, db)
+    }
+
+    /// Runs over a stretch of stored mail that just finished move their rules' `covered_since` back
+    /// to where they began: the window's start, or the oldest stored message for all stored mail.
+    /// Runs over chosen messages (`=`, a backlog, a re-check of what a rule labeled) cover no stretch.
+    static func extendCoverage(finishedAt now: Date, among list: String, _ db: SQLiteDatabase) throws {
+        let finished = try db.query(
+            """
+            SELECT rules, window_start FROM rule_runs
+            WHERE id IN (SELECT value FROM json_each(?)) AND state = 'done' AND finished_at = ?
+              AND (kind = 'backfill' OR kind IN ('recheck', 'gap') AND window_start IS NOT NULL)
+            """,
+            [list, now]
+        ) { (rules: (try? decoder.decode([RunRule].self, from: Data($0.string(0).utf8))) ?? [], start: $0.optionalDate(1)) }
+        for run in finished {
+            guard let start = try run.start ?? db.first("SELECT MIN(date) FROM messages", [], { $0.optionalDate(0) }) ?? nil else { continue }
+            for rule in run.rules {
+                try db.run("UPDATE rules SET covered_since = ? WHERE id = ? AND (covered_since IS NULL OR covered_since > ?)", [start, rule.id, start])
+            }
+        }
     }
 
     static let runColumns = """
@@ -1097,7 +1124,8 @@ extension MailStore {
 
     /// How the message `m` is decided for a Claude rule without a call, or NULL when it needs one:
     /// 'you' by your mark on its label, an example or a sender override; 'verdict' by a verdict cached
-    /// at `judgeHash`; 'earlier' by a decision at the rule's revision.
+    /// at `judgeHash`; 'earlier' by Claude's decision at the rule's revision, as the engine reuses it.
+    /// A decision your mark, example or sender rule made counts only while that still stands.
     static func decidedWithoutCall(_ rule: Rule, judgeHash: String?) throws -> (String, [SQLBindable]) {
         let sender = "unicode_lower(m.from_email)"
         let yours = [
@@ -1111,8 +1139,8 @@ extension MailStore {
             sql += " WHEN EXISTS (SELECT 1 FROM verdicts v WHERE v.message_id = m.id AND v.judge_hash = ?) THEN 'verdict'"
             args.append(judgeHash)
         }
-        sql += " WHEN EXISTS (SELECT 1 FROM rule_decisions d WHERE d.message_id = m.id AND d.rule_id = ? AND d.revision = ?) THEN 'earlier' END"
-        args += [rule.id, rule.revision]
+        sql += " WHEN EXISTS (SELECT 1 FROM rule_decisions d WHERE d.message_id = m.id AND d.rule_id = ? AND d.revision = ? AND d.source IN (?, ?)) THEN 'earlier' END"
+        args += [rule.id, rule.revision, DecisionSource.claude.rawValue, DecisionSource.cache.rawValue]
         return (sql, args)
     }
 

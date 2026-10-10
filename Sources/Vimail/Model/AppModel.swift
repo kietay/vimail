@@ -203,6 +203,8 @@ final class AppModel {
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var omniTask: Task<Void, Never>?
     @ObservationIgnored private var toastTask: Task<Void, Never>?
+    /// The account switch under way: the next one waits for it.
+    @ObservationIgnored private var accountSwitch: Task<Void, Never>?
     @ObservationIgnored var keyTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var threadCache: [String: MailThread] = [:]
     @ObservationIgnored private var renderedThreadID: String?
@@ -282,7 +284,19 @@ final class AppModel {
 
     /// Closes the current account and opens the one the settings select (dummy data or Gmail).
     /// Local state of the closed account stays on disk; an open compose is saved as a draft first.
+    /// Switches go one at a time: a second one waits for the first to finish, then opens what the
+    /// settings select then, so no account is opened twice or left running unseen.
     func reopenAccount() async {
+        let previous = accountSwitch
+        let current = Task { [weak self] in
+            await previous?.value
+            await self?.switchAccount()
+        }
+        accountSwitch = current
+        await current.value
+    }
+
+    private func switchAccount() async {
         Self.log.info("Switching account: \(services.accountKey) → \(settings.dataSource == .gmail ? GmailAccounts.accountKey(email: settings.gmailAccount) : "dummy")")
         if let compose {
             await compose.finish()

@@ -49,6 +49,9 @@ public struct RunEstimate: Sendable, Hashable {
     public var capMicros: Int64
     /// Within what runs may still spend today. True when the app reports no spend figures.
     public var fitsToday: Bool
+    /// Debug builds: the run takes only this many messages, the newest the rule has not decided
+    /// yet, so `messages` and `needClaude` are fewer than `counts` says. nil when it takes them all.
+    public var cappedAt: Int? = nil
 }
 
 /// `=` on a selection.
@@ -122,14 +125,27 @@ extension RuleEngine {
         let rule = try await rule(plan.ruleID)
         let price = try await callPrice()
         if case .labeled = plan.window {
-            let messages = limited(try await store.messagesLabeled(byRule: rule.id))
-            let calls = try await claudeCalls(rules: [rule], messageIDs: messages)
-            return await priced(plan: plan, counts: nil, window: nil, messages: messages.count, needClaude: calls, price: price, asks: rule.asksClaude)
+            let messages = try await limited(try await store.messagesLabeled(byRule: rule.id), for: rule)
+            let calls = try await claudeCalls(rules: [rule], messageIDs: messages.ids)
+            var estimate = await priced(plan: plan, counts: nil, window: nil, messages: messages.ids.count, needClaude: calls, price: price, asks: rule.asksClaude)
+            estimate.cappedAt = messages.complete ? nil : runMessageLimit
+            return estimate
         }
         let counts = try await store.estimate(rule, window: estimateWindow(plan.window), judgeHash: judgeHash(rule))
-        let messages = runMessageLimit.map { min($0, counts.passing) } ?? counts.passing
-        let calls = rule.asksClaude ? min(counts.needClaude, messages) : 0
-        return await priced(plan: plan, counts: counts, window: counts.window, messages: messages, needClaude: calls, price: price, asks: rule.asksClaude)
+        if let limit = runMessageLimit, counts.passing > limit || plan.kind == .recheck {
+            // Debug builds: price exactly the messages the capped run takes.
+            let messages = try await limited(try await runMessages(plan, rule: rule, window: counts.window), for: rule)
+            if !messages.complete {
+                let calls = rule.asksClaude ? try await claudeCalls(rules: [rule], messageIDs: messages.ids) : 0
+                var estimate = await priced(
+                    plan: plan, counts: counts, window: counts.window, messages: messages.ids.count, needClaude: calls, price: price, asks: rule.asksClaude
+                )
+                estimate.cappedAt = limit
+                return estimate
+            }
+        }
+        let calls = rule.asksClaude ? counts.needClaude : 0
+        return await priced(plan: plan, counts: counts, window: counts.window, messages: counts.passing, needClaude: calls, price: price, asks: rule.asksClaude)
     }
 
     /// The run the "how far back" sheet preselects after you save a rule (USER DECISIONS #5), or nil
@@ -208,15 +224,23 @@ extension RuleEngine {
         return record.rule
     }
 
-    func limited(_ messageIDs: [String]) -> [String] {
-        runMessageLimit.map { Array(messageIDs.prefix($0)) } ?? messageIDs
+    /// Debug builds take at most `runMessageLimit` messages of a run: the newest the rule has not
+    /// decided at its revision come first, so the next run goes on where this one stopped.
+    /// `complete`: every message the rule has not decided is in.
+    func limited(_ messageIDs: [String], for rule: Rule) async throws -> (ids: [String], complete: Bool) {
+        guard let limit = runMessageLimit, messageIDs.count > limit else { return (messageIDs, true) }
+        let decisions = try await store.decisions(for: messageIDs)
+        let open = messageIDs.filter { decisions[$0]?[rule.id]?.decision.revision != rule.revision }
+        let decided = messageIDs.filter { decisions[$0]?[rule.id]?.decision.revision == rule.revision }
+        return (Array((open + decided).prefix(limit)), open.count <= limit)
     }
 
     /// The messages a run covers, newest first: in the rule's scope and passing its WHEN in the
     /// window (those already decided too: they cost nothing and get their labels), or the ones it
     /// labeled. A re-check over a window also takes what it labeled there, to find labels to remove.
+    /// Not capped: `limited(_:for:)` caps them in debug builds.
     func runMessages(_ plan: RunPlan, rule: Rule, window: ClosedRange<Date>?) async throws -> [String] {
-        if case .labeled = plan.window { return limited(try await store.messagesLabeled(byRule: rule.id)) }
+        if case .labeled = plan.window { return try await store.messagesLabeled(byRule: rule.id) }
         var ids = try await store.ruleMatches(try RuleFilter.parse(rule.when), scope: rule.scope.mailboxes, window: window)
         if plan.kind == .recheck {
             let passing = Set(ids)
@@ -225,7 +249,7 @@ extension RuleEngine {
                 .filter { window?.contains($0.date) ?? true }
                 .map(\.messageID)
         }
-        return limited(ids)
+        return ids
     }
 
     // MARK: - Starting and steering runs
@@ -257,8 +281,14 @@ extension RuleEngine {
 
     private func cover(_ plan: RunPlan) async throws -> Cover {
         let rule = try await rule(plan.ruleID)
-        let estimate = try await estimate(plan)
-        return (rule, estimate, try await runMessages(plan, rule: rule, window: estimate.window))
+        var estimate = try await estimate(plan)
+        let messages = try await limited(try await runMessages(plan, rule: rule, window: estimate.window), for: rule)
+        if !messages.complete, plan.window != .labeled, let oldest = try await store.messageFacts(messages.ids).map(\.date).min() {
+            // Capped: it covers back to its oldest message, not the whole window.
+            let window = estimate.window ?? Date.distantPast...Date.distantFuture
+            estimate.window = max(window.lowerBound, oldest)...max(window.upperBound, oldest)
+        }
+        return (rule, estimate, messages.ids)
     }
 
     /// Creates a run of one rule at its current revision, priced with the current model.
@@ -324,7 +354,11 @@ extension RuleEngine {
     @discardableResult
     public func cancelRun(_ runID: Int64) async throws -> Bool {
         let cancelled = try await writing { try await store.cancelRun(runID) }
-        if cancelled { Self.log.info("Run #\(runID) cancelled") }
+        if cancelled {
+            // Its calls in the batch under way stop too.
+            haltedRuns.insert(runID)
+            Self.log.info("Run #\(runID) cancelled")
+        }
         refreshStatus()
         return cancelled
     }
@@ -365,6 +399,7 @@ extension RuleEngine {
             case .ledger(let ids): try await store.revertLedger(.rows(ids), reason: .undo)
             }
         }
+        if case .run(let id) = target { haltedRuns.insert(id) }
         Self.log.info("Rules undo: \(summary.rows) label(s) released, \(summary.labelsRemoved) removed")
         if summary.syncedChanges > 0 { outboxChanged() }
         refreshStatus()

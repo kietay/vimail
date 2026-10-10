@@ -77,6 +77,10 @@ final class FakeJudge: RuleJudge, @unchecked Sendable {
     /// Rule keys left out of every answer.
     private var omitted: Set<String> = []
     private var holding = false
+    /// Calls after the first `holdAfter` wait like held ones.
+    private var holdAfter: Int?
+    /// Held calls ignore cancellation: they wait for `release()` whatever happens.
+    private var stubborn = false
     private var held: [UUID: CheckedContinuation<Void, Never>] = [:]
     let costMicros: Int64
 
@@ -115,9 +119,24 @@ final class FakeJudge: RuleJudge, @unchecked Sendable {
         lock.withLock { holding = true }
     }
 
+    /// Calls after the first `count` wait until `release()`.
+    func hold(after count: Int) {
+        lock.withLock { holdAfter = count }
+    }
+
+    /// Calls wait until `release()`, even when cancelled, then answer: like an answer already on its
+    /// way (and paid for) when the engine stops.
+    func holdIgnoringCancellation() {
+        lock.withLock {
+            holding = true
+            stubborn = true
+        }
+    }
+
     func release() {
         let waiting: [CheckedContinuation<Void, Never>] = lock.withLock {
             holding = false
+            holdAfter = nil
             defer { held = [:] }
             return Array(held.values)
         }
@@ -132,23 +151,24 @@ final class FakeJudge: RuleJudge, @unchecked Sendable {
             ))
             return log.count
         }
-        if lock.withLock({ holding }) {
+        func holds() -> Bool { holding || holdAfter.map { number > $0 } ?? false }
+        if lock.withLock({ holds() }) {
             let id = UUID()
             await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
                     let wait = lock.withLock {
-                        guard holding else { return false }
+                        guard holds() else { return false }
                         held[id] = continuation
                         return true
                     }
                     if !wait { continuation.resume() }
                 }
             } onCancel: {
-                let continuation = lock.withLock { held.removeValue(forKey: id) }
+                let continuation = lock.withLock { stubborn ? nil : held.removeValue(forKey: id) }
                 continuation?.resume()
             }
         }
-        if Task.isCancelled { throw .offline }
+        if Task.isCancelled && !lock.withLock({ stubborn }) { throw .offline }
         let laneKey = switch request.lane {
         case .live: "live"
         case .run: "run"
@@ -185,6 +205,23 @@ final class Counter: @unchecked Sendable {
 
     func increment() {
         lock.withLock { value += 1 }
+    }
+}
+
+/// The newest value another task saw, such as the engine's last status.
+final class Latest<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: Value?
+    private var all: [Value] = []
+
+    var value: Value? { lock.withLock { current } }
+    var values: [Value] { lock.withLock { all } }
+
+    func set(_ value: Value) {
+        lock.withLock {
+            current = value
+            all.append(value)
+        }
     }
 }
 
@@ -270,6 +307,11 @@ struct Harness {
 
     func rule(_ name: String) async throws -> Rule {
         try #require(try await store.rules().first { $0.rule.name == name }).rule
+    }
+
+    /// The rule's judge hash at the test model: where its verdicts are cached.
+    func judgeHash(_ name: String) async throws -> String? {
+        try await rule(name).judgeHash(model: testConfig.model, effort: testConfig.effort, promptVersion: testConfig.promptVersion)
     }
 
     func labelID(_ name: String) async throws -> String {

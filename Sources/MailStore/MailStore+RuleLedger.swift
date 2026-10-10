@@ -97,6 +97,9 @@ public struct ThreadExplanation: Hashable, Sendable {
     /// Rules that judged a message and decided no (`no_match`, `unsure` or `declined`), with
     /// Claude's reason when Claude decided. Rules whose WHEN filtered the message out are left out.
     public var misses: [RuleMiss]
+    /// Rules that matched a message already carrying their label, which you or Gmail added: the
+    /// label stays yours and no rule owns it, but the rule agrees.
+    public var agreements: [RuleAgreement] = []
 }
 
 public struct LabelExplanation: Hashable, Sendable {
@@ -134,6 +137,19 @@ public struct LabelOwner: Hashable, Sendable {
     public var servedBy: String?
     /// Added under a dry-run provider: Gmail never saw it.
     public var simulated: Bool
+}
+
+/// A rule that matched a message whose label was already there, added by you or Gmail.
+public struct RuleAgreement: Hashable, Sendable {
+    public var messageID: String
+    public var ruleID: String
+    public var ruleName: String?
+    public var revision: Int
+    public var labelID: String
+    public var source: DecisionSource
+    public var reason: String?
+    /// The model that answered, when Claude decided.
+    public var model: String?
 }
 
 /// A rule that decided a message does not match.
@@ -581,11 +597,13 @@ extension MailStore {
     // MARK: - Explain
 
     /// Why the conversation's messages carry their labels: for each label, the rules that own it,
-    /// how they decided and Claude's reason; with no owner, you or Gmail added it. Also the rules that
-    /// judged a message and decided no.
+    /// how they decided and Claude's reason; with no owner, you or Gmail added it, and rules that
+    /// matched it there agree. Also the rules that judged a message and decided no.
     public func explain(threadID: String) async throws -> ThreadExplanation {
         try await read { db in
-            let names = Dictionary(try Self.ruleRecords(db).map { ($0.id, $0.rule.name) }, uniquingKeysWith: { first, _ in first })
+            let records = try Self.ruleRecords(db)
+            let names = Dictionary(records.map { ($0.id, $0.rule.name) }, uniquingKeysWith: { first, _ in first })
+            let targets = Dictionary(records.map { ($0.id, Set($0.rule.labelTargets.map(\.id))) }, uniquingKeysWith: { first, _ in first })
             let carried = try db.query(
                 """
                 SELECT x.message_id, l.id, l.name, l.kind, l.color_index FROM message_labels x
@@ -641,7 +659,30 @@ extension MailStore {
                     reason: row.optionalString(5), model: row.optionalString(6)
                 )
             }
-            return ThreadExplanation(labels: labels, misses: misses)
+            // Matches where the label was already there: the commit recorded the decision, no ledger row.
+            let carrying = Set(carried.map { "\($0.messageID) \($0.label.id)" })
+            let owned = Set(owners.map { "\($0.owner.messageID) \($0.owner.ruleID) \($0.target)" })
+            var agreements: [RuleAgreement] = []
+            for (messageID, ruleID, revision, source, reason, model) in try db.query(
+                """
+                SELECT d.message_id, d.rule_id, d.revision, d.source, v.reason, COALESCE(v.served_by, v.model)
+                FROM rule_decisions d JOIN messages m ON m.id = d.message_id
+                LEFT JOIN verdicts v ON v.message_id = d.message_id AND v.judge_hash = d.judge_hash
+                WHERE m.thread_id = ? AND d.outcome = ? AND d.source != ?
+                ORDER BY m.date, d.rule_id
+                """,
+                [threadID, Verdict.match.rawValue, DecisionSource.mark.rawValue],
+                { ($0.string(0), $0.string(1), $0.int(2), DecisionSource(rawValue: $0.string(3)) ?? .gate, $0.optionalString(4), $0.optionalString(5)) }
+            ) {
+                for target in (targets[ruleID] ?? []).sorted()
+                where carrying.contains("\(messageID) \(target)") && !owned.contains("\(messageID) \(ruleID) \(target)") {
+                    agreements.append(RuleAgreement(
+                        messageID: messageID, ruleID: ruleID, ruleName: names[ruleID], revision: revision, labelID: target, source: source,
+                        reason: reason, model: model
+                    ))
+                }
+            }
+            return ThreadExplanation(labels: labels, misses: misses, agreements: agreements)
         }
     }
 }
