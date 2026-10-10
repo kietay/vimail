@@ -186,7 +186,9 @@ extension AppModel {
             if focusTarget == .composeBody, let textView = context.textView {
                 return handleBodyKey(stroke, compose: compose, textView: textView)
             }
-            if let field = focusTarget, ComposeModel.recipientFields.contains(field), handleRecipientKey(stroke, field: field, compose: compose) {
+            if let field = focusTarget, ComposeModel.recipientFields.contains(field),
+               handleRecipientKey(stroke, suggestions: compose.suggestions, take: { compose.acceptSuggestion(for: field) },
+                                  finish: { compose.commitInput(field) }, removeLast: { compose.removeLastRecipient(field) }) {
                 return true
             }
             if stroke.isEscape {
@@ -215,30 +217,32 @@ extension AppModel {
         return !stroke.command
     }
 
-    /// To, Cc and Bcc: the suggestion list, Enter and Tab finish an address, Backspace in an
-    /// empty field removes the last one.
-    private func handleRecipientKey(_ stroke: KeyStroke, field: FocusTarget, compose: ComposeModel) -> Bool {
-        if !compose.suggestions.isEmpty {
+    /// To, Cc, Bcc and the event editor's Guests: the suggestion list, Enter and Tab finish an address
+    /// (`finish`), Backspace in an empty field removes the last one (`removeLast`).
+    private func handleRecipientKey(
+        _ stroke: KeyStroke, suggestions: ContactSuggestions, take: () -> Void, finish: () -> Void, removeLast: () -> Bool
+    ) -> Bool {
+        if !suggestions.isEmpty {
             switch stroke.key {
-            case .down: compose.moveSuggestion(1); return true
-            case .up: compose.moveSuggestion(-1); return true
-            case .enter, .tab: compose.acceptSuggestion(for: field); return true
-            case .escape: compose.suggestions = []; return true
+            case .down: suggestions.move(1); return true
+            case .up: suggestions.move(-1); return true
+            case .enter, .tab: take(); return true
+            case .escape: suggestions.close(); return true
             default:
-                if stroke.isControl("n") { compose.moveSuggestion(1); return true }
-                if stroke.isControl("p") { compose.moveSuggestion(-1); return true }
+                if stroke.isControl("n") { suggestions.move(1); return true }
+                if stroke.isControl("p") { suggestions.move(-1); return true }
             }
         }
         switch stroke.key {
         case .enter:
-            compose.commitInput(field)
+            finish()
             return true
         case .tab:
             // Tab still moves to the next field.
-            compose.commitInput(field)
+            finish()
             return false
         case .backspace where !stroke.command && !stroke.option:
-            return compose.removeLastRecipient(field)
+            return removeLast()
         default:
             return false
         }
