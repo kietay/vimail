@@ -116,6 +116,12 @@ struct ICalendarInvitationTests {
         // Outlook writes both and reads its own.
         #expect(try #require(event("DTSTART:20261012T090000Z\nTRANSP:OPAQUE\nX-MICROSOFT-CDO-BUSYSTATUS:FREE")).showsAsFree == true)
         #expect(try #require(event("DTSTART:20261012T090000Z\nTRANSP:TRANSPARENT\nX-MICROSOFT-CDO-BUSYSTATUS:BUSY")).showsAsFree == nil)
+        // An Outlook invitation: BUSYSTATUS is a placeholder for your copy until you answer; INTENDEDSTATUS is the
+        // organizer's choice.
+        let optional = "DTSTART:20261012T090000Z\nTRANSP:OPAQUE\nX-MICROSOFT-CDO-BUSYSTATUS:TENTATIVE\nX-MICROSOFT-CDO-INTENDEDSTATUS:FREE"
+        #expect(try #require(event(optional)).showsAsFree == true)
+        let away = "DTSTART:20261012T090000Z\nX-MICROSOFT-CDO-BUSYSTATUS:TENTATIVE\nX-MICROSOFT-CDO-INTENDEDSTATUS:WORKINGELSEWHERE"
+        #expect(try #require(event(away)).showsAsFree == true)
     }
 
     @Test func cancellation() throws {

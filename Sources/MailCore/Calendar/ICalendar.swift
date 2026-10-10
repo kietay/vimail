@@ -379,10 +379,11 @@ extension ICalendar {
 
         let description = first("DESCRIPTION").map { unescapedText($0.value) }
         let location = text("LOCATION")
-        // Outlook's busy status wins over TRANSP, as Outlook writes both and reads its own.
-        let busyStatus = first("X-MICROSOFT-CDO-BUSYSTATUS")?.value.trimmingCharacters(in: .whitespaces).uppercased()
-        let transparent = first("TRANSP")?.value.trimmingCharacters(in: .whitespaces).uppercased() == "TRANSPARENT"
-        let free = busyStatus.map { $0 == "FREE" } ?? transparent
+        // Outlook writes its own status beside TRANSP and reads its own. In an invitation, BUSYSTATUS is a placeholder
+        // (TENTATIVE) for your copy until you answer; INTENDEDSTATUS is what the organizer chose for it.
+        func upper(_ name: String) -> String? { first(name)?.value.trimmingCharacters(in: .whitespaces).uppercased() }
+        let showAs = upper("X-MICROSOFT-CDO-INTENDEDSTATUS") ?? upper("X-MICROSOFT-CDO-BUSYSTATUS")
+        let free = showAs.map { $0 == "FREE" || $0 == "WORKINGELSEWHERE" } ?? (upper("TRANSP") == "TRANSPARENT")
         let details = description.map { withoutGoogleBoilerplate($0).trimmingCharacters(in: .whitespacesAndNewlines) }
         return Invitation(
             method: method, uid: uid, sequence: first("SEQUENCE").flatMap { Int($0.value.trimmingCharacters(in: .whitespaces)) } ?? 0,

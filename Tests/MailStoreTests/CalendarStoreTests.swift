@@ -660,32 +660,36 @@ struct InvitationSearchTests {
         #expect(try await waiting().isEmpty)
     }
 
-    @Test func conflictFindsInvitationsThatOverlapYourEvents() async throws {
+    @Test func conflictListsTheConversationsOfTheEventsThatOverlap() async throws {
         let store = try await seededStore()
         try await store.upsertMessages([message("c1", thread: "tc1", subject: "Invitation: Review"), message("c2", thread: "tc2", subject: "Invitation: Lunch")])
+        let start = EventTime.timed(Date().addingTimeInterval(2 * 86_400), timeZone: nil)
+        try await store.saveInvitations([Invitation(method: .request, uid: "review", summary: "Review", start: start)], messageID: "c1", threadID: "tc1")
+        try await store.saveInvitations([Invitation(method: .request, uid: "lunch", summary: "Lunch", start: start)], messageID: "c2", threadID: "tc2")
+        var query = ThreadQuery(scope: .anywhere).narrowed(by: SearchQuery.parse("invite:conflict"))
+        #expect(try await store.threads(query).isEmpty)
+        query.conflictingInvitationUIDs = ["review"]
+        #expect(try await store.threads(query).map(\.id) == ["tc1"])
+    }
+
+    @Test func overlapsAreWithAnotherEvent() {
         let base = Calendar.current.date(byAdding: .day, value: 2, to: Calendar.current.startOfDay(for: Date()))!
-        func at(_ hour: Int) -> EventTime { .timed(base.addingTimeInterval(TimeInterval(hour * 3600)), timeZone: nil) }
-        try await store.saveInvitations([Invitation(method: .request, uid: "review", summary: "Review", start: at(14))], messageID: "c1", threadID: "tc1")
-        try await store.saveInvitations([Invitation(method: .request, uid: "lunch", summary: "Lunch", start: at(12))], messageID: "c2", threadID: "tc2")
-        let calendar = CalendarInfo(id: "sam@studionorth.co", summary: "Sam", isPrimary: true)
-        try await store.applyCalendarList([calendar], removed: [], replaceAll: true)
-        let me = Attendee(email: "sam@studionorth.co", response: .needsAction, isSelf: true)
-        try await store.applyEvents([
-            CalendarEvent(id: "review", calendarID: calendar.id, iCalUID: "review", summary: "Review", start: at(14), end: at(15), attendees: [me]),
-            CalendarEvent(id: "lunch", calendarID: calendar.id, iCalUID: "lunch", summary: "Lunch", start: at(12), end: at(13), attendees: [me]),
-            CalendarEvent(id: "sync", calendarID: calendar.id, summary: "Sync", start: at(14), end: at(15)),
-            // Time marked free does not count.
-            CalendarEvent(id: "focus", calendarID: calendar.id, summary: "Focus", start: at(12), end: at(13), isBusy: false),
-        ], calendarID: calendar.id, window: CalendarWindow.around(Date()))
-        // A colleague's calendar shown beside yours, even one you manage, has their meetings.
-        let jamie = CalendarInfo(id: "jamie@studionorth.co", summary: "Jamie", accessRole: .owner)
-        try await store.applyCalendarList([calendar, jamie], removed: [], replaceAll: true)
-        try await store.applyEvents(
-            [CalendarEvent(id: "dentist", calendarID: jamie.id, summary: "Dentist", start: at(12), end: at(13))],
-            calendarID: jamie.id, window: CalendarWindow.around(Date())
-        )
-        let found = try await store.threads(ThreadQuery(scope: .anywhere).narrowed(by: SearchQuery.parse("invite:conflict"))).map(\.id)
-        #expect(found == ["tc1"])
+        func row(_ id: String, uid: String?, _ from: Int, _ to: Int) -> AgendaItem {
+            let start = EventTime.timed(base.addingTimeInterval(TimeInterval(from * 3600)), timeZone: nil)
+            let end = EventTime.timed(base.addingTimeInterval(TimeInterval(to * 3600)), timeZone: nil)
+            return AgendaItem(calendarID: "c", event: CalendarEvent(id: id, calendarID: "c", iCalUID: uid, summary: id, start: start, end: end),
+                              seriesID: nil, originalStart: "", start: start, end: end)
+        }
+        let review = row("review", uid: "review", 14, 15)
+        let lunch = row("lunch", uid: "lunch", 12, 13)
+        let sync = row("sync", uid: nil, 14, 15)
+        let standup = row("standup", uid: "standup", 9, 10)
+        let standupAgain = row("standup-2", uid: "standup", 9, 10)
+        // Review overlaps the sync; lunch touches nothing; an event never overlaps itself (another row of its UID).
+        let uids = AgendaItem.overlappingUIDs([review, lunch, standup], busy: [review, lunch, sync, standupAgain])
+        #expect(uids == ["review"])
+        // Back to back is not an overlap.
+        #expect(AgendaItem.overlappingUIDs([row("a", uid: "a", 10, 11)], busy: [row("b", uid: "b", 11, 12)]).isEmpty)
     }
 
     @Test func organizerMeFindsYourEventsAndYourGuestsAnswers() async throws {

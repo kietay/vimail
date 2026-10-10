@@ -137,6 +137,41 @@ struct InvitationAnswerStoreTests {
         #expect(try await store.invitationAnswer(uid: "review@studio.co")?.covered == ["20261012T160000Z": 1])
     }
 
+    @Test func aRefusedAnswerSaysWhetherAnEarlierAnswerStillCoversTheInvitation() async throws {
+        let store = try await seededStore()
+        try await save([invite("i1", thread: "ti")], in: store)
+        // A yes that went out, then a no that the provider refuses: the yes stands.
+        let yes = try await queue(.accepted, in: store)
+        #expect(try await store.claimNextOutboxItem(now: Date().addingTimeInterval(61))?.id == yes)
+        try await store.completeOutboxItem(yes)
+        let no = try await queue(.declined, in: store)
+        let refused = try #require(try await queuedReplies(store)[no])
+        _ = try await store.cancelOutboxItems([no])
+        #expect(try await store.restoreFailedInvitationReply(refused, outboxID: no))
+        // The organizer moves the meeting (SEQUENCE 1) and the answer to it is refused: the yes was for before, so the
+        // invitation waits again.
+        try await save([invite("i2", thread: "tu", sequence: 1)], in: store)
+        let maybe = try await queue(.tentative, in: store, thread: "tu", sequence: 1)
+        let second = try #require(try await queuedReplies(store)[maybe])
+        _ = try await store.cancelOutboxItems([maybe])
+        #expect(try await store.restoreFailedInvitationReply(second, outboxID: maybe) == false)
+        #expect(try await waitingInvitations(store).map(\.sequence) == [1])
+    }
+
+    @Test func aYesToAnInvitationOnlyInSpamIsYourTime() async throws {
+        let store = try await seededStore()
+        let (mail, invitation) = invite("i1", thread: "ti")
+        var spam = mail
+        spam.labelIDs = ["SPAM"]
+        try await save([(spam, invitation)], in: store)
+        // Not answered: mail in Spam neither waits nor is your time.
+        #expect(try await store.mailOnlyEvents(includingAccepted: true).isEmpty)
+        _ = try await queue(.accepted, in: store)
+        let known = try #require(try await store.mailOnlyEvents(includingAccepted: true).first)
+        #expect(known.event.main?.uid == "review@studio.co" && known.event.answer(at: "", answers: known.answers)?.response == .accepted)
+        #expect(try await waitingInvitations(store).isEmpty)
+    }
+
     @Test func anAnswerToAnInvitationInSpamIsKept() async throws {
         let store = try await seededStore()
         let (mail, invitation) = invite("i1", thread: "ti")
@@ -144,9 +179,13 @@ struct InvitationAnswerStoreTests {
         spam.labelIDs = ["SPAM"]
         try await save([(spam, invitation)], in: store)
         _ = try await queue(.accepted, in: store)
-        // No mail tells the event here (Spam does not count), but your answer is still known.
+        // Mail in Spam does not count, but once you said yes it tells the event you go to; your answer is known.
         let known = try await store.mailOnlyEvent(uid: "review@studio.co")
-        #expect(known.event.main == nil && known.answers[""]?.response == .accepted)
+        #expect(known.event.main?.uid == "review@studio.co" && known.answers[""]?.response == .accepted)
+        // A no keeps Spam out: no mail tells the event here, and the answer is still known.
+        _ = try await queue(.declined, in: store)
+        let declined = try await store.mailOnlyEvent(uid: "review@studio.co")
+        #expect(declined.event.main == nil && declined.answers[""]?.response == .declined)
     }
 
     @Test func undoBeforeTheEmailLeavesTakesBackTheEmailItsCopyAndTheAnswer() async throws {

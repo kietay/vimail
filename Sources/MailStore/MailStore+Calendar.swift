@@ -2,6 +2,21 @@ import Foundation
 import MailCore
 
 /// One row of the agenda or the day column: an occurrence and the event that describes it.
+extension AgendaItem {
+    /// The events (iCalendar UIDs) of `candidates` with a date that overlaps a row of another event in `busy`: what
+    /// `invite:conflict` finds. Both are timed rows that count: not declined, not cancelled, not shown as free.
+    public static func overlappingUIDs(_ candidates: [AgendaItem], busy: [AgendaItem]) -> Set<String> {
+        var uids = Set<String>()
+        for row in candidates {
+            guard let uid = row.event.iCalUID, !uids.contains(uid) else { continue }
+            let from = row.start.instant()
+            let to = row.end.instant()
+            if busy.contains(where: { $0.event.iCalUID != uid && $0.start.instant() < to && $0.end.instant() > from }) { uids.insert(uid) }
+        }
+        return uids
+    }
+}
+
 public struct AgendaItem: Identifiable, Hashable, Sendable {
     public var calendarID: String
     /// The event with the details: a single event, the series, or a changed occurrence of it.
@@ -800,8 +815,14 @@ extension MailStore {
 
     /// The events with these UIDs as their mail tells them, with your answers by email: one read for all of them.
     static func mailOnlyEvents(uids: [String], me: Set<String>, _ db: SQLiteDatabase) throws -> [MailOnlyEvent] {
-        let events = try invitedEvents(uids: uids, me: me, db)
+        var events = try invitedEvents(uids: uids, me: me, db)
         let answers = try invitationAnswers(uids: uids, db)
+        // You said yes or maybe to an invitation whose mail is only in Spam: that mail tells the event you go to.
+        let told = Set(events.map(\.uid))
+        let accepted = uids.filter { uid in
+            !told.contains(uid) && answers[uid]?.values.contains { [.accepted, .tentative].contains($0.response) } == true
+        }
+        if !accepted.isEmpty { events += try invitedEvents(uids: accepted, me: me, includingSpam: true, db) }
         return events.map { MailOnlyEvent(event: $0, answers: answers[$0.uid] ?? [:]) }
     }
 
@@ -820,19 +841,18 @@ extension MailStore {
         return answers
     }
 
-    /// The events with these UIDs as their mail tells them (`invitedEvent`), each from its mail oldest first.
-    static func invitedEvents(uids: [String], me: Set<String>, _ db: SQLiteDatabase) throws -> [InvitedEvent] {
+    /// The events with these UIDs as their mail tells them (`invitedEvent`), each from its mail oldest first. With
+    /// `includingSpam`, mail in Spam counts too.
+    static func invitedEvents(uids: [String], me: Set<String>, includingSpam: Bool = false, _ db: SQLiteDatabase) throws -> [InvitedEvent] {
         var files: [StoredInvitation] = []
+        let spam = includingSpam ? "" : """
+             AND (i.method = 'CANCEL'
+                OR NOT EXISTS (SELECT 1 FROM message_labels l WHERE l.message_id = i.message_id AND l.label_id = 'SPAM'))
+            """
         for start in stride(from: 0, to: uids.count, by: 400) {
             let chunk = Array(uids[start..<min(start + 400, uids.count)])
             let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
-            files += try storedInvitations(
-                where: """
-                    i.uid IN (\(placeholders)) AND (i.method = 'CANCEL'
-                        OR NOT EXISTS (SELECT 1 FROM message_labels l WHERE l.message_id = i.message_id AND l.label_id = 'SPAM'))
-                    """,
-                chunk, me: me, db
-            )
+            files += try storedInvitations(where: "i.uid IN (\(placeholders))" + spam, chunk, me: me, db)
         }
         let wanted = Set(uids)
         return InvitedEvent.events(from: files.sorted { $0.date < $1.date }.flatMap(\.invitations).filter { wanted.contains($0.uid) })

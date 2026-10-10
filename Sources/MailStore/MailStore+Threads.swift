@@ -187,28 +187,10 @@ extension MailStore {
                 conditions.append("EXISTS (\(file) AND i.method = 'REQUEST' AND i.uid IN (SELECT value FROM json_each(?)))")
                 args.append((try? json(query.waitingInvitationUIDs ?? [])) ?? "[]")
             case .conflict:
-                // An occurrence of the invitation's event in the next 60 days that overlaps a busy event you have not declined.
-                // Only your copy of the invitation's event, and only your own calendars' events: a colleague's calendar
-                // shown beside yours has their meetings.
-                let addresses = (try? json(me.sorted())) ?? "[]"
-                conditions.append(
-                    "EXISTS (SELECT 1 FROM invitations i JOIN events e ON e.ical_uid = i.uid"
-                        + " JOIN occurrences o ON o.calendar_id = e.calendar_id AND (o.event_id = e.id OR o.series_id = e.id)"
-                        + " JOIN occurrences o2 ON o2.start_ms > o.start_ms - 86400000 AND o2.start_ms < o.end_ms AND o2.end_ms > o.start_ms"
-                        + " JOIN events e2 ON e2.calendar_id = o2.calendar_id AND e2.id = o2.event_id"
-                        + " JOIN calendars c2 ON c2.id = o2.calendar_id"
-                        + " WHERE i.thread_id = t.id AND i.method = 'REQUEST' AND \(Self.yourCopy("e")) AND \(Self.yourCalendar("c2"))"
-                        + " AND e.status != 'cancelled' AND COALESCE(e.self_response, '') != 'declined'"
-                        + " AND o.start_day IS NULL AND o.end_ms > ? AND o.start_ms < ? AND o2.start_day IS NULL"
-                        + " AND COALESCE(o2.series_id, o2.event_id) != COALESCE(o.series_id, o.event_id)"
-                        + " AND (e2.ical_uid IS NULL OR e2.ical_uid != i.uid) AND e2.status != 'cancelled'"
-                        + " AND COALESCE(e2.self_response, '') != 'declined' AND COALESCE(json_extract(e2.payload, '$.isBusy'), 1) = 1"
-                        + " AND COALESCE(json_extract(c2.payload, '$.isSelected'), 1) = 1)")
-                let now = Date()
-                args.append(addresses)
-                args.append(addresses)
-                args.append(now)
-                args.append(now.addingTimeInterval(60 * 86_400))
+                // The events the app found overlapping something else you go to (`AgendaItem.overlappingUIDs`), by their
+                // invitations' conversations.
+                conditions.append("EXISTS (\(file) AND i.method = 'REQUEST' AND i.uid IN (SELECT value FROM json_each(?)))")
+                args.append((try? json(query.conflictingInvitationUIDs ?? [])) ?? "[]")
             }
         }
         if query.organizedByMe == true {

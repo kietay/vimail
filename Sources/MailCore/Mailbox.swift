@@ -173,6 +173,9 @@ public struct ThreadQuery: Hashable, Sendable {
     /// For `invite:pending`: the events (iCalendar UIDs) waiting for your answer, as the app's waiting list has them by
     /// the answer rule. The store lists the conversations with their invitations; nil lists none.
     public var waitingInvitationUIDs: [String]?
+    /// For `invite:conflict`: the events (iCalendar UIDs) that overlap something else you go to, as the app works them
+    /// out from your time. The store lists the conversations with their invitations; nil lists none.
+    public var conflictingInvitationUIDs: [String]?
     /// Calendar mail about events you organize (`organizer:me`).
     public var organizedByMe: Bool?
     public var before: Date?

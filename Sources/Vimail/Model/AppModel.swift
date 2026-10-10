@@ -150,6 +150,8 @@ final class AppModel {
     var waitingInvitationCount = 0
     /// The events (iCalendar UIDs) of the waiting list, for `invite:pending`.
     var waitingInvitationUIDs: [String] = []
+    /// The events (iCalendar UIDs) of invitations that overlap something else you go to, for `invite:conflict`.
+    var conflictingInvitationUIDs: [String] = []
     var agendaCursorID: String?
     /// Agenda rows that overlap another event you go to.
     var agendaOverlaps: Set<String> = []
@@ -500,6 +502,7 @@ final class AppModel {
             "snoozed": .mailbox(.snoozed),
             "list-unread": baseQuery.applying(.unread),
         ]
+        if views.contains(where: { $0.pinned && $0.query.invitation == .conflict }) { await reloadConflictingInvitations() }
         for view in views where view.pinned { queries["view:\(view.id)"] = resolved(view.query) }
         let store = services.store
         let allQueries = queries
@@ -598,6 +601,11 @@ final class AppModel {
             return
         }
         let generation = listGeneration
+        // invite:conflict lists what overlaps your time now.
+        if currentQuery.invitation == .conflict {
+            await reloadConflictingInvitations()
+            guard generation == listGeneration else { return }
+        }
         var pagedQuery = currentQuery
         pagedQuery.limit = max(Self.pageSize, threads.count)
         let query = pagedQuery

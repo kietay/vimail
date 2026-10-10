@@ -62,13 +62,20 @@ extension MailStore {
     }
 
     /// After the provider refused the email: its copy leaves Sent and the answer before it comes back. Returns true when
-    /// an answer still stands for that invitation (the one before, or a later one); else it waits for an answer again.
+    /// an answer still covers what this one answered (the one before, or a later one, by the answer rule); else the
+    /// invitation waits for an answer again.
     @discardableResult
     public func restoreFailedInvitationReply(_ reply: InvitationReply, outboxID: Int64) async throws -> Bool {
-        try await write { db, change in
+        let me = selfAddresses
+        return try await write { db, change in
             try Self.takeBack(reply, outboxID: outboxID, db, &change)
-            try Self.refreshThreads(change.threadIDs, db, selfAddresses: self.selfAddresses)
-            return try Self.invitationAnswer(uid: reply.answer.uid, recurrenceID: reply.answer.recurrenceID, db) != nil
+            try Self.refreshThreads(change.threadIDs, db, selfAddresses: me)
+            let answer = reply.answer
+            if let known = try Self.mailOnlyEvents(uids: [answer.uid], me: me, db).first {
+                return known.event.answer(at: answer.recurrenceID, answers: known.answers) != nil
+            }
+            // No mail tells the event here: the answer kept must be for this version or a newer one.
+            return try Self.invitationAnswer(uid: answer.uid, recurrenceID: answer.recurrenceID, db).map { $0.sequence >= answer.sequence } ?? false
         }
     }
 

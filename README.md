@@ -93,7 +93,7 @@ them with one key, and you create events from one typed line. Everything works o
   answered; a date the organizer changes after your answer waits again and is answered on its own, and a newer
   invitation to the whole event waits again. The page of a series says whether `Y` `M` `N` answer the whole series or
   this date only. Here the invitation stops waiting and says "you said yes by email", and a yes or maybe counts as your
-  time (next meeting, overlaps), also after you bin its mail. Like a send, the email leaves after the undo-send window, and `u` takes it back until then (once sent, it
+  time (next meeting, overlaps), also after you bin its mail (until Gmail deletes it from Trash). Like a send, the email leaves after the undo-send window, and `u` takes it back until then (once sent, it
   cannot be unsent). Nothing is sent for a meeting cancelled since, or one the organizer took you off, nor when the
   organizer's address is not a plain `name@domain`.
   A join link is used only when it is a web link (`https://`).
@@ -161,7 +161,8 @@ them with one key, and you create events from one typed line. Everything works o
   says so.
 - **Your own time.** A colleague's calendar shown beside yours lists their events (also one you manage), but your next
   meeting, overlaps, free times, find a time and the invitations waiting for you count only your own calendars. Your
-  time also has the invitations only in mail that you said yes or maybe to by email, unless they show as free.
+  time also has the invitations only in mail that you said yes or maybe to by email. Events that show as free (Outlook's
+  *Show as: Free*, or `TRANSP:TRANSPARENT`) never count as overlaps or busy time.
 
 ## Logs
 
@@ -218,9 +219,9 @@ In read-filtered lists (Unread tab, unread views) it stays visible until you ref
 **Search:** `from:` `to:` `subject:` `label:` `in:inbox|sent|trash|spam|snoozed|archive|anywhere`
 `is:unread|read|starred` `has:attachment` `before:` `after:` `older_than:` `newer_than:` `"phrases"` `-exclude`,
 and for calendar mail `has:invite` `invite:request|update|cancel|reply|pending|conflict` (pending: the conversations of
-the calendar view's waiting list, not answered yet on your calendar or by email; conflict: overlaps an event on your
-own calendars that you go to, in the next 60 days) and `organizer:me` (events you organize; with `invite:reply`, your
-guests' answers).
+the calendar view's waiting list, not answered yet on your calendar or by email; conflict: invitations, on your
+calendar or only in mail, with a date in the next 60 days that overlaps something else you go to) and `organizer:me`
+(events you organize; with `invite:reply`, your guests' answers).
 
 **Unsubscribe (`⌘U`)** uses the fastest way the sender offers, from its `List-Unsubscribe` header:
 
