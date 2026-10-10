@@ -1091,7 +1091,10 @@ final class AppModel {
         }
         switch overlay {
         case .omnibox: return .command
-        case .picker, .viewEditor, .quickAdd, .eventEditor: return .insert
+        case .eventEditor:
+            if eventEditor?.vimRunning == true { return .vim }
+            return focusTarget == .eventNotes && eventEditor?.notesMode == .normal ? .normal : .insert
+        case .picker, .viewEditor, .quickAdd: return .insert
         default: break
         }
         if focusTarget == .search { return .search }

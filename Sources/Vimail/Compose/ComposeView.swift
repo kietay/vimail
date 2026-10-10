@@ -178,7 +178,7 @@ struct ComposeView: View {
                     .onAppear {
                         guard compose.focusBodyOnAppear else { return }
                         compose.focusBodyOnAppear = false
-                        Task { await focusBodyTextView() }
+                        Task { await MainWindow.focusTextView() }
                     }
                 if compose.draft.body.isEmpty {
                     Text("Write a message…")
@@ -190,19 +190,6 @@ struct ComposeView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    /// Focuses the body after the embedded editor quits (:wq). SwiftUI drops focus requests made
-    /// before the new text view is in the window, so this waits for it and asks AppKit, like a
-    /// click does. SwiftUI's focus state follows.
-    private func focusBodyTextView() async {
-        for _ in 0..<40 {
-            if let textView = MainWindow.shared?.contentView?.firstDescendant(of: NSTextView.self, where: { !$0.isFieldEditor && $0.isEditable }) {
-                textView.window?.makeFirstResponder(textView)
-                return
-            }
-            try? await Task.sleep(for: .milliseconds(25))
         }
     }
 

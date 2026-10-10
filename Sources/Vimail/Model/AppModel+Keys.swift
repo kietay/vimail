@@ -208,16 +208,24 @@ extension AppModel {
         return !stroke.command
     }
 
-    /// The event editor: its shortcuts, then Guests' suggestions and pills. Esc closes it and keeps a draft.
+    /// The event editor: its shortcuts, then the vim keys in Notes and Guests' suggestions and pills. Esc closes it and
+    /// keeps a draft (in Notes, after leaving insert mode).
     private func handleEditorKey(_ stroke: KeyStroke, context: KeyContext) -> Bool {
         if stroke.command, stroke.isEnter { saveEditor(notify: !stroke.shift); return true }
         if stroke.command, stroke.shift, case .backspace = stroke.key { removeFromEditor(); return true }
         if stroke.isCommand("]") { findTime(forward: true); return true }
         if stroke.isCommand("[") { findTime(forward: false); return true }
+        if stroke.isControl("g") {
+            editNotesInVim()
+            return true
+        }
         if let editor = eventEditor {
             if stroke.isCommand("e"), editor.occurrence != nil {
                 editor.cycleScope()
                 return true
+            }
+            if context.textFocused, focusTarget == .eventNotes, let textView = context.textView {
+                return handleNotesKey(stroke, editor: editor, textView: textView)
             }
             if context.textFocused, focusTarget == .eventGuests,
                handleRecipientKey(stroke, suggestions: editor.suggestions, take: { editor.acceptSuggestion() },
@@ -227,6 +235,22 @@ extension AppModel {
         }
         if stroke.isEscape { closeEditor(); return true }
         return false
+    }
+
+    /// Notes: vim keys in its text view, as in the compose body. Esc in insert mode goes to normal mode;
+    /// esc in normal mode closes the editor, keeping a draft.
+    private func handleNotesKey(_ stroke: KeyStroke, editor: EventEditorModel, textView: NSTextView) -> Bool {
+        let outcome = editor.notesVim.handle(stroke, in: textView)
+        editor.syncNotesVim()
+        switch outcome {
+        case .handled:
+            return true
+        case .passThrough:
+            return false
+        case .escape:
+            closeEditor()
+            return true
+        }
     }
 
     /// To, Cc, Bcc and the event editor's Guests: the suggestion list, Enter and Tab finish an address

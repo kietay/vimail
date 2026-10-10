@@ -3,6 +3,7 @@ import MailCore
 import MailStore
 import MailSync
 import Observation
+import VimailKit
 
 /// What the editor holds, kept when esc closes it with changes (like a mail draft). A draft kept by an older vimail that
 /// no longer decodes is ignored.
@@ -53,7 +54,17 @@ final class EventEditorModel {
     /// "weekly", "every tue", "daily until dec 18"; empty for a single event.
     var repeats: String
     var addConference: Bool
+    /// Notes, in Markdown.
     var details: String
+    /// Vim keys in Notes (esc for normal mode), as in the compose body. ^g is your own editor, `vim`.
+    @ObservationIgnored let notesVim = BodyVim()
+    private(set) var notesMode: InlineVim.Mode = .insert
+    private(set) var notesPendingKeys = ""
+    /// Your editor on the notes (^g), in place of the fields until it quits.
+    var vim: VimSession?
+    var vimRunning: Bool { vim != nil }
+    /// Set when your editor quits: Notes takes the cursor once its text view is back.
+    @ObservationIgnored var focusNotesOnAppear = false
     /// This event, this and following, or all events, for an occurrence of a series. When shows this occurrence's times
     /// in every case: for all events, a new time moves every event by the same change.
     var scope: Scope
@@ -139,6 +150,9 @@ final class EventEditorModel {
     func changed(_ field: KeyPath<EventDraft, String>) -> Bool {
         opened.map { $0[keyPath: field] != draft[keyPath: field] } ?? true
     }
+
+    /// Notes as the editor showed them on opening: a save keeps the stored description while they are unchanged.
+    var openedNotes: String { opened?.details ?? "" }
 
     /// Guests differ from how the editor opened: other pills (in any order), or something typed after them.
     var guestsChanged: Bool {
@@ -231,7 +245,8 @@ final class EventEditorModel {
         return true
     }
 
-    /// The cursor moved to another field (or none). Leaving Guests finishes a full address typed there.
+    /// The cursor moved to another field (or none). Leaving Guests finishes a full address typed there; Notes starts
+    /// in insert mode each time it gets the cursor again, as the compose body does.
     func focusChanged(to field: FocusTarget?) {
         let leftGuests = guestsFocused && field != .eventGuests
         guestsFocused = field == .eventGuests
@@ -239,6 +254,17 @@ final class EventEditorModel {
             suggestions.close()
             finishGuests()
         }
+        guard field != .eventNotes else { return }
+        notesVim.reset()
+        syncNotesVim()
+    }
+
+    // MARK: - Notes
+
+    /// Copies the notes' vim state into observed properties (status bar, footer).
+    func syncNotesVim() {
+        if notesMode != notesVim.mode { notesMode = notesVim.mode }
+        if notesPendingKeys != notesVim.pendingDisplay { notesPendingKeys = notesVim.pendingDisplay }
     }
 }
 
@@ -497,6 +523,10 @@ extension AppModel {
     /// ⌘↵ (notify guests) or ⌘⇧↵ (no email) in the editor.
     func saveEditor(notify: Bool) {
         guard let editor = eventEditor else { return }
+        if editor.vimRunning {
+            showToast("Save and quit vim (:wq) before saving.")
+            return
+        }
         // Names still typed in Guests are looked up in the contacts first. One that matches nobody stops the save: it is
         // never dropped quietly.
         let unknown = EventGuests.names(editor.guestInput).filter { quickAddContacts[$0.lowercased()] == nil }
@@ -576,13 +606,11 @@ extension AppModel {
         let guests = !seriesFromOneDay || editor.guestsChanged
             ? typedGuests.guests
             : (series?.attendees ?? []).filter { !$0.isSelf && !$0.isResource }.map(\.address)
-        // Notes left alone keep the description exactly as it was: Google's formatting and links stay.
-        let details: String?
-        if editor.changed(\.details) {
-            details = editor.details
-        } else {
-            details = seriesFromOneDay ? series?.details : editor.originalDetails
-        }
+        // Notes left alone keep the description exactly as it was: Google's formatting and links stay. Changed notes are
+        // Markdown, sent as HTML.
+        let details = EventNotes.description(
+            notes: editor.details, opened: editor.openedNotes, stored: seriesFromOneDay ? series?.details : editor.originalDetails
+        )
         // The series' rules from this day on (its count less the events before, for this and following).
         let rules = cut?.after ?? editor.originalRecurrence
         let recurrence: [String]
@@ -697,6 +725,7 @@ extension AppModel {
         overlay = nil
         guard let editor = eventEditor else { return }
         eventEditor = nil
+        stopNotesVim(editor)
         guard editor.keepsDraft else {
             forgetDraft(id: editor.draftID)
             return
@@ -726,6 +755,7 @@ extension AppModel {
         }
         overlay = nil
         eventEditor = nil
+        stopNotesVim(editor)
         forgetDraft(id: editor.draftID)
         guard let original = editor.original else {
             showToast("Discarded the new event.")
@@ -736,6 +766,45 @@ extension AppModel {
             return
         }
         removeEvent(editor.changesOneOccurrence ? (editor.occurrence ?? original) : original)
+    }
+
+    /// ^g in the editor: the notes in your own editor ($VISUAL, $EDITOR or nvim), in place of the fields, as compose's
+    /// ^g does for a message. `:w` updates the notes, `:wq` comes back to them.
+    func editNotesInVim() {
+        guard let editor = eventEditor else { return }
+        if let vim = editor.vim {
+            vim.focusTerminal()
+            return
+        }
+        // A file of its own, so your editor sees Markdown, and nothing of it stays after.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("vimail-notes-\(UUID().uuidString)", isDirectory: true)
+        let file = directory.appendingPathComponent("notes.md")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try editor.details.write(to: file, atomically: true, encoding: .utf8)
+        } catch {
+            showToast("Could not start the editor: \(error.localizedDescription)", isError: true)
+            return
+        }
+        let session = VimSession(file: file, command: settings.editorCommand)
+        session.onChange = { [weak editor] text in editor?.details = text }
+        session.onExit = { [weak editor] text in
+            try? FileManager.default.removeItem(at: directory)
+            guard let editor else { return }
+            if let text { editor.details = text }
+            editor.vim = nil
+            editor.focusNotesOnAppear = true
+        }
+        editor.vim = session
+        focusTarget = nil
+    }
+
+    /// Ends your editor on the notes when the event editor closes. What :w saved is already in the notes.
+    private func stopNotesVim(_ editor: EventEditorModel) {
+        guard let vim = editor.vim else { return }
+        vim.stop()
+        editor.vim = nil
+        try? FileManager.default.removeItem(at: vim.file.deletingLastPathComponent())
     }
 
     func loadDraft(id: String) async -> EventDraft? {

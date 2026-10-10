@@ -40,7 +40,7 @@ struct StatusBar: View {
                     .buttonStyle(.plain)
                     .help("Join the meeting (gj)")
                 }
-                let pending = model.compose?.bodyPendingKeys ?? model.pendingKeys
+                let pending = model.compose?.bodyPendingKeys ?? model.eventEditor?.notesPendingKeys ?? model.pendingKeys
                 if !pending.isEmpty {
                     Text(pending)
                         .foregroundStyle(theme.statusBright)

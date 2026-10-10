@@ -141,9 +141,11 @@ struct EventEditorView: View {
         if let editor = model.eventEditor {
             DialogShell(title: editor.isNew ? "New event" : "Edit event", width: 900, footer: footer(editor), onClose: { model.closeEditor() }) {
                 HStack(alignment: .top, spacing: 0) {
-                    form(editor)
-                        .padding(22)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Group {
+                        if let vim = editor.vim { notesInVim(editor, vim: vim) } else { form(editor) }
+                    }
+                    .padding(22)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     Rectangle().fill(theme.border).frame(width: 1)
                     AvailabilityView(editor: editor)
                         .padding(18)
@@ -169,8 +171,16 @@ struct EventEditorView: View {
         }
     }
 
+    /// The keys for where the cursor is, as compose's footer.
     private func footer(_ editor: EventEditorModel) -> String {
-        "⌘↵ save and email guests · ⌘⇧↵ save without email · ⌘[ ⌘] find a time · ⌘⇧⌫ \(editor.isNew ? "discard" : "remove") · esc keep as draft"
+        if editor.vimRunning { return ":w updates the notes · :wq returns to the event" }
+        if model.focusTarget == .eventNotes {
+            return editor.notesMode == .normal
+                ? "vim keys · i insert · esc close, keeping a draft · ^g your editor · ⌘↵ save and email guests"
+                : "esc vim keys · ^g your editor · ⌘↵ save and email guests · ⌘⇧↵ save without email"
+        }
+        return "⌘↵ save and email guests · ⌘⇧↵ save without email · ⌘[ ⌘] find a time · ^g notes in your editor · "
+            + "⌘⇧⌫ \(editor.isNew ? "discard" : "remove") · esc keep as draft"
     }
 
     @ViewBuilder
@@ -234,15 +244,62 @@ struct EventEditorView: View {
                     Toggle("Add a Google Meet link", isOn: $editor.addConference).toggleStyle(.checkbox)
                 }
             }
+            notesLabel(vim: false)
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $editor.details)
+                    .font(AppFonts.mono(12))
+                    .foregroundStyle(theme.foreground)
+                    .scrollContentBackground(.hidden)
+                    .focused($field, equals: .eventNotes)
+                    .onAppear {
+                        // Back from your editor (:wq): the cursor goes to the notes again.
+                        guard editor.focusNotesOnAppear else { return }
+                        editor.focusNotesOnAppear = false
+                        Task { await MainWindow.focusTextView() }
+                    }
+                if editor.details.isEmpty {
+                    Text("Notes for guests, in Markdown")
+                        .font(AppFonts.mono(12))
+                        .foregroundStyle(theme.mutedForeground.opacity(0.6))
+                        .padding(.leading, 5)
+                        .allowsHitTesting(false)
+                }
+            }
+            .padding(8)
+            .frame(height: 110)
+            .background(theme.background.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.border.opacity(0.6), lineWidth: 1))
+        }
+    }
+
+    /// "NOTES" and what writes them: Markdown in the field, or your editor (^g).
+    private func notesLabel(vim: Bool) -> some View {
+        HStack(spacing: 8) {
             Text("NOTES").font(AppFonts.mono(9)).tracking(1).foregroundStyle(theme.mutedForeground)
-            TextEditor(text: $editor.details)
-                .font(AppFonts.sans(12))
-                .scrollContentBackground(.hidden)
-                .padding(8)
-                .frame(height: 110)
+            Text(vim ? "VIM" : "MARKDOWN")
+                .font(AppFonts.mono(8, .semibold))
+                .tracking(1)
+                .foregroundStyle(vim ? theme.green : theme.mutedForeground)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(vim ? theme.greenSoft : theme.muted, in: RoundedRectangle(cornerRadius: 3))
+            Spacer()
+            if !vim { KeyChip("^g", alwaysVisible: true).help("Write the notes in your own editor") }
+        }
+    }
+
+    /// ^g: your editor on the notes, in place of the fields until :wq.
+    private func notesInVim(_ editor: EventEditorModel, vim: VimSession) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(editor.title.isEmpty ? "(no title)" : editor.title)
+                .font(AppFonts.sans(18, .semibold))
+                .foregroundStyle(theme.foreground)
+                .lineLimit(1)
+            notesLabel(vim: true)
+            VimTerminalView(session: vim, palette: theme.palette)
+                .frame(height: 380)
                 .background(theme.background.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.border.opacity(0.6), lineWidth: 1))
-                .focused($field, equals: .eventNotes)
         }
     }
 
