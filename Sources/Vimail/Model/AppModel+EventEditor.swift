@@ -507,6 +507,11 @@ extension AppModel {
             recurrence = []
         } else if editor.repeats == editor.originalRepeats || !editor.repeatsEditable {
             recurrence = rules
+            // This and following keeps the series' end: a first event moved past it would leave nothing to repeat.
+            if cut != nil, rules.contains(where: { Recurrence.parseRule($0)?.until.map { $0.dayDate(in: calendar) < start.dayDate(in: calendar) } == true }) {
+                showToast("That repeat ends before the event starts. Type an earlier day, or a later “until” in Repeats.", isError: true)
+                return
+            }
         } else if editor.repeats.trimmingCharacters(in: .whitespaces).isEmpty {
             recurrence = []
         } else {
