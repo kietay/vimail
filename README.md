@@ -90,12 +90,13 @@ them with one key, and you create events from one typed line. Everything works o
   With *Archive invitations after answering* on (Settings → Calendar), the mail is archived and the cursor moves on,
   and one `u` takes back both. The answer leaves after the undo-send window. `O` shows the original email.
 - **Calendar view.** `gc` (from an invitation: at its event). Invitations waiting for your answer come first, then
-  two weeks of days. Invitations that are only in mail (not on your Google Calendar) are dashed. A repeating one is on
-  each of its days, with the days later mail moved or cancelled, and waits once, at its next day; answering any of its
-  days answers the series. `j` `k` move, `{` `}` `[` `]` change the day or week, `t` is today, `↵` edits your own event,
+  two weeks of days. Invitations that are only in mail (not on your Google Calendar) are marked "from mail". A repeating
+  one is on each of its days (a day that later mail moved is at its new time, a cancelled day is gone, even when you
+  binned that mail) and waits once, at its next day; answering any of its days, `#` too, answers the whole series.
+  `j` `k` move, `{` `}` `[` `]` change the day or week, `t` is today, `↵` edits your own event,
   `r` `a` email the organizer or the guests, `#` cancels your event or declines an invitation, `gm` opens the
   invitation mail, `gj` joins the meeting. The status bar shows your next meeting; `gj` joins it from the list or the reader too.
-- **Repeating events, one day at a time.** On a day of a series, `#` removes or declines only that day (the editor's
+- **Repeating events, one day at a time.** On a day of a series on your calendar, `#` removes or declines only that day (the editor's
   *All events* and `⌘⇧⌫` remove the series), and `↵` edits only that
   day until you switch the editor to *All events* (`⌘E`). *When* shows that day either way; for all events, a new
   time moves every event by the same change and their days stay (change *Repeats*, like `every thu`, to move the
