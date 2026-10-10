@@ -789,8 +789,8 @@ struct RecurrenceEditTests {
 @Suite("Recurrence splits")
 struct RecurrenceSplitTests {
     /// The old series' lines and the new one's, when the series is cut in two.
-    func split(_ recurrence: [String], first: EventTime, at: EventTime) -> (before: [String], after: [String])? {
-        guard case .split(let before, let after)? = Recurrence.split(recurrence: recurrence, seriesStart: first, at: at, calendar: la) else { return nil }
+    func split(_ recurrence: [String], first: EventTime, at: EventTime, calendar viewer: Calendar = la) -> (before: [String], after: [String])? {
+        guard case .split(let before, let after)? = Recurrence.split(recurrence: recurrence, seriesStart: first, at: at, calendar: viewer) else { return nil }
         return (before, after)
     }
 
@@ -994,5 +994,58 @@ struct RecurrenceSplitTests {
         let new = try #require(occurrences(parts.after, from: cutStart))
         #expect(old + new == whole)
         #expect(old.count == index)
+    }
+
+    /// Whole days have no zone: cut at any of its days and seen from anywhere, the two series are the old one.
+    @Test(arguments: [laID, "Asia/Tokyo", "Pacific/Honolulu", "Pacific/Kiritimati"])
+    func anAllDaySeriesSplitsTheSameSeenFromAnyZone(zone: String) throws {
+        let viewer = calendar(zone)
+        func occurrences(_ lines: [String], from first: DayDate) -> [Occurrence]? {
+            Recurrence.occurrences(
+                start: .allDay(first), end: .allDay(first.adding(days: 1, in: calendar("UTC"))), recurrence: lines,
+                from: day("2026-09-01").start(in: viewer), to: day("2027-12-01").start(in: viewer), calendar: viewer
+            )
+        }
+        for rules in [
+            ["RRULE:FREQ=DAILY;COUNT=12"],
+            ["RRULE:FREQ=WEEKLY;BYDAY=MO,TH;COUNT=9", "EXDATE;VALUE=DATE:20261015"],
+            ["RRULE:FREQ=MONTHLY;BYMONTHDAY=-1;COUNT=6"],
+            ["RRULE:FREQ=WEEKLY;INTERVAL=2;UNTIL=20270201", "RDATE;VALUE=DATE:20261120"],
+        ] {
+            let whole = try #require(occurrences(rules, from: day("2026-10-01")))
+            let ruleDays = try #require(occurrences(rules.filter { $0.hasPrefix("RRULE") }, from: day("2026-10-01"))).map(\.originalStart)
+            // Cut at the rule's own days: a new series that started on an added day would repeat from that day.
+            for index in 1..<min(whole.count, 10) where ruleDays.contains(whole[index].originalStart) {
+                let cut = try #require(whole[index].start.day)
+                let parts = try #require(split(rules, first: .allDay(day("2026-10-01")), at: .allDay(cut), calendar: viewer))
+                let old = try #require(occurrences(parts.before, from: day("2026-10-01")))
+                let new = try #require(occurrences(parts.after, from: cut))
+                #expect(old + new == whole, "\(rules) cut at \(cut)")
+                #expect(old.count == index, "\(rules) cut at \(cut)")
+            }
+        }
+    }
+
+    /// A London series seen from Los Angeles, cut on each day of the weeks when only one of the two has changed its clocks.
+    @Test func aSeriesInAnotherZoneSplitsOnItsOwnClock() throws {
+        let first = at(2026, 10, 19, 9, zone: "Europe/London")
+        func occurrences(_ lines: [String], from start: Date) -> [Occurrence]? {
+            Recurrence.occurrences(
+                start: .timed(start, timeZone: "Europe/London"), end: .timed(start.addingTimeInterval(1800), timeZone: "Europe/London"),
+                recurrence: lines, from: at(2026, 10, 1), to: at(2026, 12, 1), calendar: la
+            )
+        }
+        for rules in [["RRULE:FREQ=DAILY;COUNT=20"], ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=12", "EXDATE;TZID=Europe/London:20261028T090000"]] {
+            let whole = try #require(occurrences(rules, from: first))
+            for index in 1..<whole.count {
+                let cut = try #require(whole[index].originalStart)
+                let parts = try #require(split(rules, first: .timed(first, timeZone: "Europe/London"), at: cut))
+                let old = try #require(occurrences(parts.before, from: first))
+                let cutStart = try #require(cut.date)
+                let new = try #require(occurrences(parts.after, from: cutStart))
+                #expect(old + new == whole, "\(rules) cut at \(index)")
+                #expect(new.allSatisfy { calendar("Europe/London").component(.hour, from: $0.start.instant()) == 9 })
+            }
+        }
     }
 }
