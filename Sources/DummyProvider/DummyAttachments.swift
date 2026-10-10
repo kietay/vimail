@@ -7,13 +7,13 @@ import UniformTypeIdentifiers
 
 /// Generates real, openable bytes for dummy attachments (text, calendar invites, PDFs, PNGs).
 enum DummyAttachments {
-    static func data(for attachment: MailAttachment, in message: MailMessage) -> Data {
+    static func data(for attachment: MailAttachment, in message: MailMessage, invite: DummyInvite? = nil) -> Data {
         if attachment.id == "att-studio-next-chapter" {
             return Data("Studio North — The next chapter\n\nFewer projects. Deeper focus. More intention.\n\n1. Protect time for meaningful work.\n2. Choose fewer, better projects.\n3. Make room for experimentation.\n".utf8)
         }
         let ext = (attachment.filename as NSString).pathExtension.lowercased()
         switch ext {
-        case "ics": return calendar(for: message)
+        case "ics": return invite.map { Data($0.icsFile().utf8) } ?? calendar(for: message)
         case "pdf": return pdf(title: (attachment.filename as NSString).deletingPathExtension, subtitle: message.subject, body: message.plainText)
         case "png": return png(title: (attachment.filename as NSString).deletingPathExtension)
         default: return Data("\(attachment.filename)\n\nAttached to “\(message.subject)” from \(message.from.formatted).\n".utf8)

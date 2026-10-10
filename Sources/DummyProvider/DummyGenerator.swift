@@ -10,6 +10,8 @@ struct DummyGenerator {
     private let calendar = Calendar.current
     private var counter: UInt64 = 0
     private let me = DummyContent.account
+    /// The meetings that generated invitation mails are about, keyed by message ID.
+    private(set) var invites: [String: DummyInvite] = [:]
 
     init(seed: UInt64, now: Date) {
         self.rng = SeededGenerator(seed: seed)
@@ -43,7 +45,8 @@ struct DummyGenerator {
             nextID: counter,
             nextLabelNumber: DummyContent.userLabels.count,
             scheduledReplies: [],
-            incomingCounter: 0
+            incomingCounter: 0,
+            invites: invites
         )
     }
 
@@ -254,21 +257,39 @@ struct DummyGenerator {
 
     private mutating func calendarInvite(daysAgo: Int) -> MailMessage {
         let organizer = pick(DummyContent.colleagues + DummyContent.clients).address
-        let meeting = pick(DummyContent.meetings)
         let sent = workTime(daysAgo: daysAgo)
-        let start = sent.addingTimeInterval(Double(Int.random(in: 1...6, using: &rng)) * 86_400)
-        let when = start.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute())
+        let day = calendar.startOfDay(for: sent.addingTimeInterval(Double(Int.random(in: 1...6, using: &rng)) * 86_400))
+        var start = calendar.date(bySettingHour: pick([9, 10, 11, 13, 14, 15, 16]), minute: pick([0, 0, 30]), second: 0, of: day)!
+        // Meetings land on weekdays.
+        while [1, 7].contains(calendar.component(.weekday, from: start)) { start = calendar.date(byAdding: .day, value: 1, to: start)! }
+        let others = (DummyContent.colleagues + DummyContent.clients).map(\.address).filter { $0 != organizer }.shuffled(using: &rng).prefix(Int.random(in: 0...3, using: &rng))
+        let guests = [organizer, me] + others
+        return invitation(DummyInvite(
+            uid: "\(newID())@vimail.dummy", messageID: "", title: pick(DummyContent.meetings), start: start, minutes: pick([30, 30, 45, 60]),
+            organizer: organizer, guests: guests, accepted: others.filter { _ in chance(0.5) }.map(\.normalized),
+            conference: "https://meet.example.com/\(Int.random(in: 100...999, using: &rng))-studio",
+            agenda: chance(0.5) ? pick(DummyContent.middles) : nil, sequence: 0, sent: sent
+        ), labels: DummyContent.calendar.labels)
+    }
+
+    /// An invitation mail as Google sends it: from the organizer, with the event in two `invite.ics` parts.
+    private mutating func invitation(_ meeting: DummyInvite, labels: Set<String>) -> MailMessage {
+        let when = meeting.start.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute())
         let html = DummyContent.notificationHTML(
-            brand: "Google Calendar", accent: "#1a73e8", title: "Invitation: \(meeting)",
-            body: "<b>When</b>: \(when)<br><b>Organizer</b>: \(organizer.displayName)<br><b>Join</b>: meet.example.com/\(Int.random(in: 100...999, using: &rng))-studio",
+            brand: "Google Calendar", accent: "#1a73e8", title: "Invitation: \(meeting.title)",
+            body: "<b>When</b>: \(when)<br><b>Organizer</b>: \(meeting.organizer.displayName)\(meeting.conference.map { "<br><b>Join</b>: \($0)" } ?? "")",
             button: "Yes, I'll attend", footer: "Invitation from Google Calendar"
         )
-        return message(
-            thread: nil, from: EmailAddress(name: "\(organizer.displayName) (Google Calendar)", email: DummyContent.calendar.address.email),
-            to: [me], subject: "Invitation: \(meeting) @ \(when)", text: "\(organizer.displayName) has invited you to \(meeting).\nWhen: \(when)",
-            html: html, date: sent, labels: DummyContent.calendar.labels,
-            attachments: [attachment("invite.ics", "application/ics", size: 2_000...7_000)]
+        let mail = message(
+            thread: nil, from: meeting.organizer, to: [me], subject: "Invitation: \(meeting.title) @ \(when)",
+            text: "\(meeting.organizer.displayName) has invited you to \(meeting.title).\nWhen: \(when)",
+            html: html, date: meeting.sent, labels: labels,
+            attachments: [attachment("invite.ics", "text/calendar", size: 1_000...3_000), attachment("invite.ics", "application/ics", size: 1_000...3_000)]
         )
+        var stored = meeting
+        stored.messageID = mail.id
+        invites[mail.id] = stored
+        return mail
     }
 
     private mutating func newsletter(daysAgo: Int) -> MailMessage {
@@ -410,6 +431,16 @@ struct DummyGenerator {
         )
         result += [lessFirst, lessReply]
 
+        // An invitation for next Monday 14:00 that overlaps the dummy calendar's Lumen check-in (14:30).
+        let priya = DummyContent.person("Priya Raman").address
+        let maya = DummyContent.person("Maya Brooks").address
+        result.append(invitation(DummyInvite(
+            uid: "design-review-\(newID())@vimail.dummy", messageID: "", title: "Design review", start: Self.nextMonday(after: now, hour: 14, calendar: calendar),
+            minutes: 45, organizer: jamie, guests: [jamie, me, alex, priya, maya], accepted: [alex.normalized, priya.normalized],
+            conference: "https://meet.example.com/482-studio", agenda: "Walk through the new Lumen onboarding screens before Thursday's client review.",
+            sequence: 0, sent: minutesBefore(100)
+        ), labels: [SystemLabel.inbox, SystemLabel.unread, DummyContent.work, SystemLabel.categoryPersonal]))
+
         result.append(message(
             thread: nil, from: DummyContent.theBrowser.address, to: [me], subject: "Five things worth your time", text: nil,
             html: DummyContent.newsletterHTML(name: "The Browser", issue: "Issue 412 · \(now.formatted(date: .long, time: .omitted))", intro: "A few good reads for a slower morning.", items: [
@@ -466,8 +497,9 @@ struct DummyGenerator {
             fresh = reply(to: previous, from: previous.from, account: account, id: newID())
         } else {
             var generated: MailMessage
-            switch Int.random(in: 0...3, using: &rng) {
+            switch Int.random(in: 0...4, using: &rng) {
             case 0, 1: generated = notification(daysAgo: 0)
+            case 4: generated = calendarInvite(daysAgo: 0)
             case 2:
                 // A new conversation that someone else started.
                 let starters = conversation(daysAgo: 0, people: DummyContent.colleagues + DummyContent.clients, subjects: DummyContent.workSubjects + DummyContent.clientSubjects, label: DummyContent.work)
@@ -476,11 +508,18 @@ struct DummyGenerator {
             default: generated = personalConversation(daysAgo: 0)[0]
             }
             let id = newID()
+            if var meeting = invites.removeValue(forKey: generated.id) {
+                meeting.messageID = id
+                meeting.sent = now
+                invites[id] = meeting
+            }
             generated.id = id
             generated.threadID = id
             generated.date = now
             generated.messageIDHeader = "<\(id)@vimail.dummy>"
-            generated.attachments = generated.attachments.map { MailAttachment(id: "att-\(id)-\($0.filename)", filename: $0.filename, mimeType: $0.mimeType, size: $0.size) }
+            generated.attachments = generated.attachments.enumerated().map { index, attachment in
+                MailAttachment(id: "att-\(id)-\(index)-\(attachment.filename)", filename: attachment.filename, mimeType: attachment.mimeType, size: attachment.size)
+            }
             fresh = generated
         }
         var message = fresh
@@ -503,5 +542,12 @@ struct DummyGenerator {
             messageIDHeader: "<\(id)@vimail.dummy>", inReplyTo: original.messageIDHeader, references: references,
             sizeEstimate: text.utf8.count
         )
+    }
+
+    /// The first Monday after `date` (never `date` itself), at `hour`.
+    static func nextMonday(after date: Date, hour: Int, calendar: Calendar) -> Date {
+        var day = calendar.startOfDay(for: date)
+        repeat { day = calendar.date(byAdding: .day, value: 1, to: day)! } while calendar.component(.weekday, from: day) != 2
+        return calendar.date(bySettingHour: hour, minute: 0, second: 0, of: day)!
     }
 }

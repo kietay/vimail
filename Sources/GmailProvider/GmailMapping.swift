@@ -185,8 +185,9 @@ enum GmailMapping {
             return
         }
 
-        // Calendar invites repeat as an .ics attachment; AMP and watch variants have an HTML twin.
-        if filename.isEmpty, ["text/calendar", "text/x-amp-html", "text/watch-html"].contains(mime) { return }
+        // AMP and watch variants have an HTML twin. A calendar part stays, with or without a file name:
+        // it is the invitation (Outlook sends it without one).
+        if filename.isEmpty, ["text/x-amp-html", "text/watch-html"].contains(mime) { return }
         guard let body = part.body, body.attachmentId != nil || body.data != nil else { return }
         let contentID = part.header("Content-ID").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "<> ")) }
         content.attachments.append(MailAttachment(
@@ -201,6 +202,7 @@ enum GmailMapping {
 
     static func defaultFilename(mimeType: String) -> String {
         if mimeType == "message/rfc822" { return "message.eml" }
+        if mimeType == "text/calendar" { return "invite.ics" }
         let ext = UTType(mimeType: mimeType)?.preferredFilenameExtension
         return ext.map { "attachment.\($0)" } ?? "attachment"
     }

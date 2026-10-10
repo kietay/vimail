@@ -206,11 +206,11 @@ struct MappingTests {
         #expect(message.sizeEstimate == 4321)
 
         let files = message.fileAttachments.map(\.filename)
-        #expect(files == ["photo.jpg", "Plan.pdf"])
+        #expect(files == ["photo.jpg", "Plan.pdf", "invite.ics"])
         let logo = message.attachments.first { $0.filename == "logo.png" }
         #expect(logo?.isInline == true && logo?.contentID == "logo@x" && logo?.id == "att-logo")
-        // The calendar part repeats an invite; it is not listed.
-        #expect(!message.attachments.contains { $0.mimeType == "text/calendar" })
+        // A calendar part without a file name (as Outlook sends invitations) is kept, so the invitation can be read.
+        #expect(message.attachments.contains { $0.mimeType == "text/calendar" && $0.filename == "invite.ics" && $0.id == "att-cal" })
     }
 
     @Test func decodesEncodedWordsAndCharsets() {
