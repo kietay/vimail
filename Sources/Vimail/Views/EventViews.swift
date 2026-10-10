@@ -182,12 +182,13 @@ struct EventEditorView: View {
                 row("Change") {
                     Picker("", selection: $editor.scope) {
                         Text("This event").tag(EventEditorModel.Scope.thisEvent)
+                        Text("This and following").tag(EventEditorModel.Scope.thisAndFollowing)
                         Text("All events").tag(EventEditorModel.Scope.allEvents)
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .fixedSize()
-                    .help("This event or every event in the series (⌘E)")
+                    .help("This event, this event and the ones after it, or every event in the series (⌘E)")
                     KeyChip("⌘E", alwaysVisible: true)
                 }
             }
@@ -213,14 +214,10 @@ struct EventEditorView: View {
                 Text("This repeat can only be changed in Google Calendar. The rest of the event can be changed here.")
                     .font(AppFonts.sans(10)).foregroundStyle(theme.mutedForeground).padding(.leading, 86)
             }
-            if let occurrence = editor.occurrence, editor.scope == .thisEvent {
-                Text("Only \(Formatting.dayTitle(occurrence.start.instant())) changes. ⌘E changes all events.")
-                    .font(AppFonts.sans(10)).foregroundStyle(theme.mutedForeground).padding(.leading, 86)
-            } else if editor.occurrence != nil {
-                Text("Every event in the series changes. A new time moves them all; Repeats changes their days.")
-                    .font(AppFonts.sans(10)).foregroundStyle(theme.mutedForeground).padding(.leading, 86)
-            } else if editor.original?.isSeries == true {
-                Text("Changes apply to all events in this series.").font(AppFonts.sans(10)).foregroundStyle(theme.mutedForeground).padding(.leading, 86)
+            if let note = scopeNote(editor) {
+                Text(note).font(AppFonts.sans(10))
+                    .foregroundStyle(editor.scope == .thisAndFollowing && editor.split == nil ? theme.yellow : theme.mutedForeground)
+                    .padding(.leading, 86)
             }
             row("Calendar") {
                 Picker("", selection: $editor.calendarID) {
@@ -244,6 +241,26 @@ struct EventEditorView: View {
                 .background(theme.background.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.border.opacity(0.6), lineWidth: 1))
                 .focused($field, equals: .details)
+        }
+    }
+
+    /// The line under Repeats: what saving changes.
+    private func scopeNote(_ editor: EventEditorModel) -> String? {
+        guard let occurrence = editor.occurrence else {
+            return editor.original?.isSeries == true ? "Changes apply to all events in this series." : nil
+        }
+        let day = Formatting.dayTitle(occurrence.start.instant())
+        switch editor.scope {
+        case .thisEvent:
+            return "Only \(day) changes. ⌘E: this and following, or all events."
+        case .thisAndFollowing:
+            switch editor.split {
+            case .wholeSeries?: return "\(day) is the first event, so every event in the series changes."
+            case .split?: return "\(day) and the events after it change, as a new series. Earlier events stay."
+            case nil: return AppModel.uncountedRepeat
+            }
+        case .allEvents:
+            return "Every event in the series changes. A new time moves them all; Repeats changes their days."
         }
     }
 

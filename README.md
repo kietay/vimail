@@ -96,14 +96,18 @@ them with one key, and you create events from one typed line. Everything works o
   `j` `k` move, `{` `}` `[` `]` change the day or week, `t` is today, `↵` edits your own event,
   `r` `a` email the organizer or the guests, `#` cancels your event or declines an invitation, `gm` opens the
   invitation mail, `gj` joins the meeting. The status bar shows your next meeting; `gj` joins it from the list or the reader too.
-- **Repeating events, one day at a time.** On a day of a series on your calendar, `#` removes or declines only that day (the editor's
-  *All events* and `⌘⇧⌫` remove the series), and `↵` edits only that
-  day until you switch the editor to *All events* (`⌘E`). *When* shows that day either way; for all events, a new
-  time moves every event by the same change and their days stay (change *Repeats*, like `every thu`, to move the
-  days). Answers in the day list change only that day once the
-  series is answered (the first answer, from the waiting group or the mail, answers the series).
-  A rule the words cannot say ("monthly on the second Tuesday") shows in *Repeats* but changes only in Google
-  Calendar. "This and following" is not supported yet.
+- **Repeating events, one day at a time.** On a day of a series on your calendar, `#` removes or declines only that day, and `↵`
+  edits only that day until you switch the editor (`⌘E`) to *This and following* or *All events*; there `⌘⇧⌫` removes what
+  the switch says. *When* shows that day in every case; for all events, a new time moves every event by the same change
+  and their days stay (change *Repeats*, like `every thu`, to move the days). Answers in the day list change only that
+  day once the series is answered (the first answer, from the waiting group or the mail, answers the series).
+  A rule the words cannot say ("monthly on the second Tuesday") shows in *Repeats* but changes only in Google Calendar.
+- **This and following** splits the series as Google Calendar does: it ends the day before, and a new series starts
+  that day with what you typed (*When* is its first event, on that day or another) and the same repeat, its count less
+  the events before, or *Repeats* as you changed it. Skipped and added days go with their half; the old series' changed
+  days from that day on are dropped. `⌘↵` tells the guests of both after the undo window, and one `u` takes it all back.
+  With `⌘⇧⌫` the series only ends. On a series' first day it is the same as *All events*. A count only Google can work
+  out (the shapes below that vimail leaves to Google) is split in Google Calendar.
 - **Creating events.** `C` opens one line: `lunch with jamie fri 12:30 1h @ Tartine`, `standup every weekday 9:30 15m`,
   `q4 planning oct 16-18`. It is read as you type (days, times, lengths, guests from your contacts, places, repeats,
   `#calendar`), with your day shown. `↵` creates it; with guests, the invitations leave after the undo window and

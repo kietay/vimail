@@ -14,19 +14,23 @@ struct EventDraft: Codable, Equatable {
     var repeats: String
     var addConference: Bool
     var details: String
-    var allEvents: Bool
+    var scope: EventEditorModel.Scope
 }
 
 /// The event editor's fields (Tab from quick add, or Enter on your own event in the calendar).
 @MainActor
 @Observable
 final class EventEditorModel {
-    enum Scope: Hashable { case thisEvent, allEvents }
+    /// What a change on one day of a series changes: that day, that day and the ones after it, or the whole series.
+    enum Scope: String, Codable, Hashable { case thisEvent, thisAndFollowing, allEvents }
 
     /// The event being changed (the series for a repeating event); nil for a new event.
     let original: CalendarEvent?
     /// One occurrence of a series opened from the calendar, as its own event (`CalendarEvent.instance`).
     let occurrence: CalendarEvent?
+    /// Where "this and following" cuts the series on this day. Nil when it cannot be worked out on the Mac (a COUNT
+    /// only Google can count), or when the editor is not on one day of a series.
+    let split: Recurrence.Split?
     var title: String
     /// Typed like quick add: "fri 12:30-13:30", "oct 16 all day".
     var when: String
@@ -38,8 +42,8 @@ final class EventEditorModel {
     var repeats: String
     var addConference: Bool
     var details: String
-    /// This event or all events, for an occurrence of a series. When shows this occurrence's times either way:
-    /// for all events, a new time moves every event by the same change.
+    /// This event, this and following, or all events, for an occurrence of a series. When shows this occurrence's times
+    /// in every case: for all events, a new time moves every event by the same change.
     var scope: Scope
     /// The times When showed on opening (this occurrence's, for a series), kept exactly while When is unchanged.
     let shownStart: EventTime?
@@ -83,6 +87,13 @@ final class EventEditorModel {
         self.addConference = addConference
         self.details = details
         scope = occurrence == nil ? .allEvents : .thisEvent
+        if let occurrence, let original {
+            split = Recurrence.split(
+                recurrence: original.recurrence, seriesStart: original.start, at: occurrence.originalStart ?? occurrence.start, calendar: .current
+            )
+        } else {
+            split = nil
+        }
         originalRecurrence = recurrence
         originalRepeats = repeats
         self.repeatsEditable = repeatsEditable
@@ -93,13 +104,15 @@ final class EventEditorModel {
     var isNew: Bool { original == nil }
     /// Changes go to one occurrence only.
     var changesOneOccurrence: Bool { occurrence != nil && scope == .thisEvent }
+    /// The scope a save or a removal uses: "this and following" on the series' first day is all events.
+    var appliedScope: Scope { scope == .thisAndFollowing && split == .wholeSeries ? .allEvents : scope }
     /// The draft key: the occurrence's ID for one day of a series (each day keeps its own), the event's, or "new".
     var draftID: String { occurrence?.id ?? original?.id ?? "new" }
 
     var draft: EventDraft {
         EventDraft(
             title: title, when: when, guests: guests, location: location, calendarID: calendarID, repeats: repeats,
-            addConference: addConference, details: details, allEvents: scope == .allEvents
+            addConference: addConference, details: details, scope: scope
         )
     }
 
@@ -108,6 +121,11 @@ final class EventEditorModel {
     /// A field differs from how the editor opened.
     func changed(_ field: KeyPath<EventDraft, String>) -> Bool {
         opened.map { $0[keyPath: field] != draft[keyPath: field] } ?? true
+    }
+
+    /// Something was typed in a field (the scope alone is no change).
+    var fieldsChanged: Bool {
+        [\EventDraft.title, \.when, \.guests, \.location, \.repeats, \.details].contains { changed($0) }
     }
     /// The times as opened, while When is unchanged: they may say more than When can (seconds, a zone, a long event).
     var keptTimes: (start: EventTime, end: EventTime)? {
@@ -120,8 +138,17 @@ final class EventEditorModel {
         return ![title, when, guests, location, details].allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
+    /// ⌘E: this event, this and following, all events, in turn.
+    func cycleScope() {
+        scope = switch scope {
+        case .thisEvent: .thisAndFollowing
+        case .thisAndFollowing: .allEvents
+        case .allEvents: .thisEvent
+        }
+    }
+
     func restore(_ draft: EventDraft) {
-        if occurrence != nil { scope = draft.allEvents ? .allEvents : .thisEvent }
+        if occurrence != nil { scope = draft.scope }
         title = draft.title
         when = draft.when
         guests = draft.guests
@@ -303,14 +330,7 @@ extension AppModel {
                 } else {
                     showToast("Created · \(event.summary) · \(Formatting.eventRange(event.start, event.end))", undoable: true)
                 }
-                if destination == .calendar {
-                    // The fortnight that shows the new event, so it can be selected.
-                    let day = Calendar.current.startOfDay(for: event.start.instant())
-                    let lastShown = Calendar.current.date(byAdding: .day, value: 13, to: agendaStart) ?? agendaStart
-                    if day < agendaStart || day > lastShown { agendaStart = Self.agendaStart(showing: day) }
-                    pendingAgendaEventID = event.id
-                    await reloadAgenda()
-                }
+                await showInAgenda(event)
             } catch {
                 showToast("Could not create the event: \(error.localizedDescription)", isError: true)
             }
@@ -345,8 +365,8 @@ extension AppModel {
         overlay = .eventEditor
     }
 
-    /// Enter on your own event in the calendar view. For a repeating event, changes go to this occurrence
-    /// unless the editor is switched to all events. When shows this occurrence's times either way.
+    /// Enter on your own event in the calendar view. For a repeating event, changes go to this occurrence unless the
+    /// editor is switched (⌘E) to this and following, or all events. When shows this occurrence's times in every case.
     func editEvent(_ item: AgendaItem) {
         Task {
             let series = (try? await services.store.event(calendarID: item.calendarID, id: item.seriesID ?? item.event.id)) ?? item.event
@@ -411,6 +431,24 @@ extension AppModel {
             showToast("No contact matches “\(missing)”. Type an address, or take the name out.", isError: true)
             return
         }
+        let scope = editor.appliedScope
+        // This and following: the series ends the day before, and a new series takes over from this day.
+        var cut: (before: [String], after: [String])?
+        if editor.occurrence != nil, scope == .thisAndFollowing {
+            guard case .split(let before, let after)? = editor.split else {
+                showToast(Self.uncountedRepeat, isError: true)
+                return
+            }
+            // Nothing typed: a cut would change nothing, yet send guests a new invitation.
+            guard editor.fieldsChanged else {
+                overlay = nil
+                eventEditor = nil
+                forgetDraft(id: editor.draftID)
+                showToast("Nothing changed: the series stays as it is.")
+                return
+            }
+            cut = (before, after)
+        }
         let calendar = Calendar.current
         var start: EventTime
         var end: EventTime
@@ -425,8 +463,8 @@ extension AppModel {
             (start, end) = (parsedStart, parsedEnd)
         }
         // All events, opened on one occurrence: the series moves by the same change, on its own days.
-        let wholeSeriesFromOneDay = editor.occurrence != nil && editor.scope == .allEvents
-        if let occurrence = editor.occurrence, let series = editor.original, editor.scope == .allEvents {
+        // (This and following takes the times as typed: they are the new series' first event.)
+        if let occurrence = editor.occurrence, let series = editor.original, scope == .allEvents {
             if editor.keptTimes != nil {
                 (start, end) = (series.start, series.end)
             } else if let moved = Recurrence.seriesTimes(
@@ -438,9 +476,11 @@ extension AppModel {
                 return
             }
         }
-        // That day may differ from the series (its own title or place): only what was changed goes to every event.
+        // That day may differ from the series (its own title or place): only what was changed goes to the events after it,
+        // or to every event.
         let series = editor.original
-        func edited(_ field: KeyPath<EventDraft, String>) -> Bool { !wholeSeriesFromOneDay || editor.changed(field) }
+        let seriesFromOneDay = editor.occurrence != nil && scope != .thisEvent
+        func edited(_ field: KeyPath<EventDraft, String>) -> Bool { !seriesFromOneDay || editor.changed(field) }
         let title = edited(\.title) ? editor.title : (series?.summary ?? editor.title)
         let location = edited(\.location) ? editor.location : (series?.location ?? "")
         let guests = edited(\.guests)
@@ -451,13 +491,15 @@ extension AppModel {
         if editor.changed(\.details) {
             details = editor.details
         } else {
-            details = wholeSeriesFromOneDay ? series?.details : editor.originalDetails
+            details = seriesFromOneDay ? series?.details : editor.originalDetails
         }
+        // The series' rules from this day on (its count less the events before, for this and following).
+        let rules = cut?.after ?? editor.originalRecurrence
         let recurrence: [String]
         if editor.changesOneOccurrence {
             recurrence = []
         } else if editor.repeats == editor.originalRepeats || !editor.repeatsEditable {
-            recurrence = editor.originalRecurrence
+            recurrence = rules
         } else if editor.repeats.trimmingCharacters(in: .whitespaces).isEmpty {
             recurrence = []
         } else {
@@ -470,13 +512,17 @@ extension AppModel {
                 return
             }
             // Days the series already skips or adds stay as they are.
-            recurrence = [rule] + editor.originalRecurrence.filter { !$0.uppercased().hasPrefix("RRULE:") }
+            recurrence = [rule] + rules.filter { !$0.uppercased().hasPrefix("RRULE:") }
         }
         // "every thu" starts on a Thursday.
         if editor.isNew || editor.repeats != editor.originalRepeats {
             (start, end) = Recurrence.aligned(start: start, end: end, recurrence: recurrence, calendar: calendar)
         }
-        let base = editor.changesOneOccurrence ? editor.occurrence : editor.original
+        let base: CalendarEvent? = if cut != nil, let series {
+            CalendarActions.followingSeries(of: series)
+        } else {
+            editor.changesOneOccurrence ? editor.occurrence : editor.original
+        }
         let event = makeEvent(
             id: base?.id ?? CalendarActions.newEventID(), calendarID: editor.calendarID, title: title, start: start, end: end,
             guests: guests, location: location, recurrence: recurrence, details: details, base: base
@@ -484,6 +530,10 @@ extension AppModel {
         overlay = nil
         eventEditor = nil
         forgetDraft(id: editor.draftID)
+        if let cut, let series, let occurrence = editor.occurrence {
+            saveFollowing(event, ending: series, keeping: cut.before, from: occurrence, notify: notify)
+            return
+        }
         guard let original = base else {
             save(new: event, addConference: editor.addConference, notify: notify)
             return
@@ -506,6 +556,45 @@ extension AppModel {
                 showToast("Could not save the event: \(error.localizedDescription)", isError: true)
             }
         }
+    }
+
+    /// Saves "this and following": `series` ends the day before `occurrence`, and `event` takes over from that day as a
+    /// new series. ⌘↵ tells the guests of both after the undo window, like a send.
+    private func saveFollowing(_ event: CalendarEvent, ending series: CalendarEvent, keeping recurrence: [String], from occurrence: CalendarEvent, notify: Bool) {
+        let me = services.store.selfAddresses
+        let told = (series.attendees + event.attendees).filter { !$0.isSelf && !$0.isResource && !me.contains($0.normalized) }
+        let waits = notify && !told.isEmpty && settings.undoSendSeconds > 0
+        let name = "\(event.summary) from \(Formatting.dayTitle(occurrence.start.instant())) on"
+        Task {
+            do {
+                let records = try await services.calendarActions.split(
+                    series, at: occurrence.originalStart ?? occurrence.start, keeping: recurrence, following: event,
+                    sendUpdates: notify && !told.isEmpty ? .all : .none, undoWindow: waits ? settings.undoSendSeconds : 0
+                )
+                undoStack.append(.eventChanges(records))
+                redoStack.removeAll()
+                showToast(waits ? "Telling guests about \(name)" : "Saved · \(name)", undoable: true,
+                          countdownTo: waits ? Date().addingTimeInterval(settings.undoSendSeconds) : nil)
+                // The row now belongs to the new series: the cursor follows it.
+                await showInAgenda(event)
+            } catch {
+                showToast("Could not save the event: \(error.localizedDescription)", isError: true)
+            }
+        }
+    }
+
+    /// Why "this and following" cannot be done here.
+    static let uncountedRepeat = "vimail cannot count this repeat's events: change this and the following ones in Google Calendar."
+
+    /// In the calendar view: the fortnight with `event`'s first day, with that row selected.
+    func showInAgenda(_ event: CalendarEvent) async {
+        guard destination == .calendar else { return }
+        let day = Calendar.current.startOfDay(for: event.start.instant())
+        let lastShown = Calendar.current.date(byAdding: .day, value: 13, to: agendaStart) ?? agendaStart
+        if day < agendaStart || day > lastShown { agendaStart = Self.agendaStart(showing: day) }
+        pendingAgendaEventID = event.id
+        pendingAgendaDay = day
+        await reloadAgenda()
     }
 
     /// Guests typed in the editor: addresses, or names matched in the contacts.
@@ -535,14 +624,27 @@ extension AppModel {
         showToast(editor.isNew ? "Kept as a draft. C then ↑ continues it." : "Kept your changes. ↵ on the event continues them.")
     }
 
-    /// ⌘⇧⌫ in the editor: removes the event (or this occurrence); a new event is discarded.
+    /// ⌘⇧⌫ in the editor: removes the event; on a day of a series, as ⌘E says: that day, the series from that day on
+    /// (it ends the day before), or the series. A new event is discarded.
     func removeFromEditor() {
         guard let editor = eventEditor else { return }
+        var cut: [String]?
+        if editor.occurrence != nil, editor.appliedScope == .thisAndFollowing {
+            guard case .split(let before, _)? = editor.split else {
+                showToast(Self.uncountedRepeat, isError: true)
+                return
+            }
+            cut = before
+        }
         overlay = nil
         eventEditor = nil
         forgetDraft(id: editor.draftID)
         guard let original = editor.original else {
             showToast("Discarded the new event.")
+            return
+        }
+        if let cut, let occurrence = editor.occurrence {
+            endSeries(original, keeping: cut, from: occurrence)
             return
         }
         removeEvent(editor.changesOneOccurrence ? (editor.occurrence ?? original) : original)

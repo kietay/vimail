@@ -1057,7 +1057,8 @@ extension AppModel {
     }
 
     /// # in the calendar: cancels your own event (guests are told after the undo window), or declines an invitation.
-    /// On a repeating event, only this occurrence; the editor (↵, then All events and ⌘⇧⌫) removes the series.
+    /// On a repeating event, only this occurrence; the editor (↵, then ⌘E and ⌘⇧⌫) removes the series, or this day
+    /// and the ones after it.
     func removeAgendaEvent() {
         guard let item = currentAgendaItem else { return }
         guard services.calendarCanChange else {
@@ -1100,6 +1101,43 @@ extension AppModel {
                           countdownTo: hasGuests ? Date().addingTimeInterval(settings.undoSendSeconds) : nil)
             } catch {
                 showToast("Could not remove the event: \(error.localizedDescription)", isError: true)
+            }
+        }
+    }
+
+    /// Ends a series the day before `occurrence` ("this and following", then ⌘⇧⌫ in the editor): that day and the ones
+    /// after it go. Guests are told after the undo window.
+    func endSeries(_ series: CalendarEvent, keeping recurrence: [String], from occurrence: CalendarEvent) {
+        let hasGuests = series.attendees.contains { !$0.isSelf && !$0.isResource }
+        let name = "“\(series.summary)” from \(Formatting.dayTitle(occurrence.start.instant())) on"
+        Task {
+            do {
+                let records = try await services.calendarActions.split(
+                    series, at: occurrence.originalStart ?? occurrence.start, keeping: recurrence, following: nil,
+                    sendUpdates: hasGuests ? .all : .none, undoWindow: hasGuests ? settings.undoSendSeconds : 0
+                )
+                undoStack.append(.eventChanges(records))
+                redoStack.removeAll()
+                showToast(hasGuests ? "Cancelling \(name)" : "Removed \(name).", undoable: true,
+                          countdownTo: hasGuests ? Date().addingTimeInterval(settings.undoSendSeconds) : nil)
+            } catch {
+                showToast("Could not remove the events: \(error.localizedDescription)", isError: true)
+            }
+        }
+    }
+
+    /// Undoes calendar changes made together, last first: "this and following" ended a series, and started the one
+    /// that took over unless it was a removal.
+    func undoEventChanges(_ records: [CalendarActions.ChangeRecord]) {
+        Task {
+            do {
+                for record in records.reversed() { try await services.calendarActions.undo(record) }
+                let series = records.first?.before ?? records.first?.after
+                let day = records.first?.splitDay.map { " from \(Formatting.dayTitle($0.instant())) on" } ?? ""
+                let name = "“\(series?.summary ?? "event")”\(day)"
+                showToast(records.contains { $0.before == nil } ? "Undone: the change to \(name)." : "Undone: \(name) is back.")
+            } catch {
+                showToast("Could not undo: \(error.localizedDescription)", isError: true)
             }
         }
     }

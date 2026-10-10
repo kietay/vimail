@@ -67,6 +67,8 @@ enum UndoEntry {
     case answer([CalendarActions.AnswerRecord], archive: UndoRecord?)
     /// A calendar event created, edited or removed.
     case eventChange(CalendarActions.ChangeRecord)
+    /// Calendar changes made together, undone last first: "this and following" ends a series and starts the one after it.
+    case eventChanges([CalendarActions.ChangeRecord])
 }
 
 /// A ⌘U still checking how to unsubscribe. `u` cancels it then, before it has done anything.

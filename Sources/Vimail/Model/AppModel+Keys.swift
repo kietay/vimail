@@ -102,7 +102,7 @@ extension AppModel {
             if stroke.isCommand("]") { findTime(forward: true); return true }
             if stroke.isCommand("[") { findTime(forward: false); return true }
             if stroke.isCommand("e"), let editor = eventEditor, editor.occurrence != nil {
-                editor.scope = editor.scope == .thisEvent ? .allEvents : .thisEvent
+                editor.cycleScope()
                 return true
             }
             return false

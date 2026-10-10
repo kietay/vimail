@@ -447,7 +447,8 @@ extension AppModel {
         ]),
         ("Event editor", [
             ("⌘↵ / ⌘⇧↵", "Save and email guests / save without email"), ("⌘[ / ⌘]", "Find a time: previous / next time everyone is free"),
-            ("⌘E", "This event / all events of a series"), ("⌘⇧⌫", "Remove the event (or discard a new one)"), ("esc", "Close, keeping changes as a draft"),
+            ("⌘E", "This event / this and following / all events of a series"),
+            ("⌘⇧⌫", "Remove the event; on a series, what ⌘E says (a new one is discarded)"), ("esc", "Close, keeping changes as a draft"),
         ]),
         ("App", [("/", "Search mail"), (": / ⌘K", "Omnibox"), ("?", "This help"), ("^l", "Sync now"), ("go", "Open attachment"), ("^\\", "Toggle sidebar")]),
     ]

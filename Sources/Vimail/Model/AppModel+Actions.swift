@@ -176,6 +176,8 @@ extension AppModel {
             undoAnswer(records, archive: archive)
         case .eventChange(let record):
             undoEventChange(record)
+        case .eventChanges(let records):
+            undoEventChanges(records)
         case .send(let outboxID, let draft, let localMessageID, let archived):
             Task {
                 if let archived {
