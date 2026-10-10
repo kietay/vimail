@@ -365,7 +365,7 @@ extension AppModel {
         guard !start.isAllDay else { return "All day" }
         let from = start.instant()
         let to = end.instant()
-        let items = ((try? await services.store.agenda(from: from, to: to)) ?? []).filter { item in
+        let items = await agendaWithMail(from: from, to: to).filter { item in
             isYourTime(item) && !item.start.isAllDay && item.event.selfResponse != .declined && item.event.isBusy
                 && item.event.id != eventID && item.seriesID != eventID
         }
@@ -874,7 +874,7 @@ extension AppModel {
         let from = max(calendar.startOfDay(for: min(day, now)), calendar.date(byAdding: .day, value: -21, to: eventDay) ?? eventDay)
         let to = calendar.date(byAdding: .day, value: 22, to: calendar.startOfDay(for: max(day, now))) ?? now
         let excluded = Set([editor.original?.id, editor.occurrence?.id].compactMap { $0 })
-        let items = (try? await services.store.agenda(from: from, to: to)) ?? []
+        let items = await agendaWithMail(from: from, to: to)
         // The event's own times are in its guests' busy times too: they are taken out.
         let ownTimes = items.filter { excluded.contains($0.event.id) || excluded.contains($0.seriesID ?? "") }
             .map { DateInterval(start: $0.start.instant(), end: max($0.start.instant(), $0.end.instant())) }
@@ -971,7 +971,7 @@ extension AppModel {
         guard let first = days.first, let last = days.last else { return nil }
         let from = first.start(in: calendar)
         let to = last.adding(days: 1, in: calendar).start(in: calendar)
-        let busy = ((try? await services.store.agenda(from: from, to: to)) ?? []).filter { item in
+        let busy = await agendaWithMail(from: from, to: to).filter { item in
             isYourTime(item) && !item.start.isAllDay && item.event.isBusy && item.event.selfResponse != .declined && item.event.status != .cancelled
         }.map { DateInterval(start: $0.start.instant(), end: max($0.start.instant(), $0.end.instant())) }
         let slots = FreeTime.slots(busy: busy, days: days, workStart: settings.workdayStart, workEnd: settings.workdayEnd, minimum: 1800, now: now, calendar: calendar)
