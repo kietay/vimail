@@ -563,8 +563,8 @@ extension AppModel {
             }
             // Nothing typed: a cut would change nothing, yet send guests a new invitation.
             guard editor.fieldsChanged else {
-                overlay = nil
                 eventEditor = nil
+                overlay = nil
                 forgetDraft(id: editor.draftID)
                 showToast("Nothing changed: the series stays as it is.")
                 return
@@ -655,8 +655,8 @@ extension AppModel {
             id: base?.id ?? CalendarActions.newEventID(), calendarID: editor.calendarID, title: title, start: start, end: end,
             guests: guests, location: location, recurrence: recurrence, details: details, base: base
         )
-        overlay = nil
         eventEditor = nil
+        overlay = nil
         forgetDraft(id: editor.draftID)
         if let cut, let series, let occurrence = editor.occurrence {
             saveFollowing(event, ending: series, keeping: cut.before, from: occurrence, notify: notify)
@@ -757,9 +757,16 @@ extension AppModel {
 
     /// Esc in the editor: closes it. Unsaved changes stay as a draft: C then tab (a new event), or ↵ on the event.
     func closeEditor() {
-        overlay = nil
-        guard let editor = eventEditor else { return }
+        let editor = eventEditor
+        // Before the overlay goes, so its change does not keep the draft a second time.
         eventEditor = nil
+        overlay = nil
+        if let editor { keepDraft(of: editor) }
+    }
+
+    /// The editor closed without a save: unsaved changes stay as a draft, and your editor on the notes stops. Esc, and
+    /// anything else that takes the editor's place (⌘K, a menu command).
+    func keepDraft(of editor: EventEditorModel) {
         stopNotesVim(editor)
         guard editor.keepsDraft else {
             forgetDraft(id: editor.draftID)
@@ -788,8 +795,8 @@ extension AppModel {
             }
             cut = before
         }
-        overlay = nil
         eventEditor = nil
+        overlay = nil
         stopNotesVim(editor)
         forgetDraft(id: editor.draftID)
         guard let original = editor.original else {

@@ -1043,6 +1043,12 @@ final class AppModel {
     // MARK: - Overlays, focus and toasts
 
     private func overlayChanged(from old: Overlay?) {
+        // Something took the event editor's place without esc, a save or a removal (⌘K, a menu command): its changes
+        // stay as a draft, as with esc, and your editor on its notes stops.
+        if old == .eventEditor, let editor = eventEditor {
+            eventEditor = nil
+            keepDraft(of: editor)
+        }
         switch overlay {
         case .omnibox:
             omniQuery = ""
