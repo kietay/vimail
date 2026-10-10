@@ -30,7 +30,7 @@ let package = Package(
         .target(name: "MailRules", dependencies: ["MailCore", "MailStore", "HTTPKit", "VimailLog"]),
         // Claude for rules: the model catalog with prices, and the API client.
         .target(name: "MailAI", dependencies: ["MailCore", "HTTPKit", "VimailLog"]),
-        // UI-free app logic: vim keymap parser, Markdown -> email HTML, fuzzy matching.
+        // UI-free app logic: vim keymap parser, Markdown -> email HTML, fuzzy matching, Settings' sections.
         .target(name: "VimailKit", dependencies: ["MailCore"]),
         .executableTarget(
             name: "Vimail",

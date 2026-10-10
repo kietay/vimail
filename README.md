@@ -278,7 +278,7 @@ this Mac. Removing a label a rule added stops it adding it there again and, unle
 2. An email to the list's unsubscribe address, from your account. It shows in Sent.
 3. The sender's unsubscribe page, in your browser. Without a header, the "unsubscribe" link in the message.
 
-The conversation is archived at once. The first two wait out the undo window, like a send (Settings → Undo send),
+The conversation is archived at once. The first two wait out the undo window, like a send (Settings → General → Undo send),
 so `u` takes the unsubscribe back and returns the conversation. When a list's server does not answer, vimail
 tries again for about 8 minutes without holding up your mail, then says so. Mail in Spam is not unsubscribed: that only tells
 a spammer your address works. With several conversations selected, one `⌘U` opens at most 5 pages; the rest stay

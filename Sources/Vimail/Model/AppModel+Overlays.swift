@@ -450,6 +450,32 @@ extension AppModel {
         items[min(pickerHighlighted, items.count - 1)].run(keepOpen)
     }
 
+    // MARK: - Settings
+
+    /// Settings at a section: Rules & Claude from the omnibox, Compose from compose's signature menu.
+    /// ⌘, and the sidebar open the section used last.
+    func openSettings(at section: SettingsSection) {
+        settingsSection = section
+        overlay = .settings
+    }
+
+    /// The sections Settings lists: Developer only with dummy data.
+    var settingsSections: [SettingsSection] { SettingsSection.visible(dummyData: services.dummy != nil) }
+
+    /// The section Settings shows: the one used last, or the first after a switch hid it.
+    var shownSettingsSection: SettingsSection { settingsSection.shown(in: settingsSections) }
+
+    /// j/k in Settings.
+    func moveSettingsSection(_ delta: Int) {
+        selectSettingsSection(shownSettingsSection.moved(by: delta, in: settingsSections))
+    }
+
+    /// A section picked with j/k, a digit or a click. The keyboard goes back to the list.
+    func selectSettingsSection(_ section: SettingsSection) {
+        settingsSection = section
+        settingsFocus = .sidebar
+    }
+
     // MARK: - Help
 
     static let shortcutSections: [(String, [(String, String)])] = [
@@ -508,6 +534,9 @@ extension AppModel {
             ("⌘⇧⌫", "Remove the event; on a series, what ⌘E says (a new one is discarded)"),
             ("esc", "Vim keys in Notes, then close, keeping changes as a draft"),
         ]),
-        ("App", [("/", "Search mail"), (": / ⌘K", "Omnibox"), ("?", "This help"), ("^l", "Sync now"), ("go", "Open attachment"), ("^\\", "Toggle sidebar")]),
+        ("App", [
+            ("/", "Search mail"), (": / ⌘K", "Omnibox"), ("?", "This help"), ("^l", "Sync now"), ("go", "Open attachment"), ("^\\", "Toggle sidebar"),
+            ("⌘,", "Settings: j / k or a digit picks a section, tab goes in, esc back"),
+        ]),
     ]
 }

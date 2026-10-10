@@ -1,9 +1,11 @@
 import MailAI
 import MailCore
 import SwiftUI
+import VimailKit
 
 // MARK: - Settings
 
+/// Settings: its sections on the left (j/k, 1…n), the settings of the one picked on the right (tab goes in).
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.theme) private var theme
@@ -12,169 +14,303 @@ struct SettingsView: View {
     @State private var replacingKey = false
     @State private var savingKey = false
     @State private var spend: SpendGuard.Snapshot?
+    @FocusState private var focus: Field?
+
+    /// What has the keyboard: the list of sections, or a text field in the section shown.
+    private enum Field: Hashable {
+        case sidebar
+        case quickSnooze, editor, key, monthlyBudget, dailyBudget, previewBudget
+        case signatureName(String), signatureText(String)
+
+        var place: SettingsFocus { self == .sidebar ? .sidebar : .pane }
+    }
 
     var body: some View {
-        @Bindable var model = model
-        DialogShell(title: "Settings", width: 600, onClose: { model.overlay = nil }) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 22) {
-                        divider("ACCOUNT")
-                        row("Mail", detail: accountDetail) {
-                            if model.gmailAccount != nil {
-                                Picker("", selection: Binding(get: { model.settings.dataSource }, set: { model.switchDataSource($0) })) {
-                                    Text("Gmail · \(model.gmailAccount ?? "")").tag(DataSource.gmail)
-                                    Text("Dummy data").tag(DataSource.dummy)
-                                }
-                                .labelsHidden()
-                                .frame(width: 260)
-                            } else {
-                                Text("Dummy data").font(AppFonts.sans(12)).foregroundStyle(theme.mutedForeground)
-                            }
-                        }
-                        HStack(spacing: 10) {
-                            if model.signingIn {
-                                settingsButton("Waiting for the browser… Cancel", key: nil) { model.cancelSignIn() }
-                            } else if model.gmailAccount == nil {
-                                settingsButton("Connect Gmail…", key: nil) { model.connectGmail() }
-                            } else {
-                                settingsButton("Sign in again", key: nil) { model.connectGmail() }
-                                settingsButton("Sign out", key: nil) { model.confirmSignOut() }
-                            }
-                        }
-
-                        divider("APPEARANCE")
-                        row("Appearance", detail: "Auto follows macOS light and dark mode.") {
-                            Picker("", selection: $model.settings.appearance) {
-                                ForEach(AppearanceMode.allCases) { Text($0.title).tag($0) }
-                            }
-                            .labelsHidden()
-                            .frame(width: 200)
-                        }
-                        row("Dark theme") {
-                            Picker("", selection: $model.settings.darkTheme) {
-                                ForEach(ThemeID.darkThemes) { Text($0.title).tag($0) }
-                            }
-                            .labelsHidden()
-                            .frame(width: 200)
-                        }
-                        row("Light theme") {
-                            Picker("", selection: $model.settings.lightTheme) {
-                                ForEach(ThemeID.lightThemes) { Text($0.title).tag($0) }
-                            }
-                            .labelsHidden()
-                            .frame(width: 200)
-                        }
-                        row("Mark as read", detail: "After a conversation stays selected this long.") {
-                            Picker("", selection: $model.settings.markReadDelay) {
-                                Text("Immediately").tag(0.0)
-                                Text("After 1 second").tag(1.0)
-                                Text("After 3 seconds").tag(3.0)
-                                Text("Only when opened (↵)").tag(-1.0)
-                            }
-                            .labelsHidden()
-                            .frame(width: 200)
-                        }
-                        row("Undo send", detail: "Time to press u before a message or an unsubscribe (⌘U) leaves.") {
-                            Picker("", selection: $model.settings.undoSendSeconds) {
-                                Text("Off").tag(0.0)
-                                Text("5 seconds").tag(5.0)
-                                Text("10 seconds").tag(10.0)
-                                Text("20 seconds").tag(20.0)
-                            }
-                            .labelsHidden()
-                            .frame(width: 200)
-                        }
-                        row("Quick snooze", detail: quickSnoozeDetail) {
-                            TextField("tomorrow", text: $model.settings.quickSnooze)
-                                .fieldStyle()
-                                .frame(width: 200)
-                        }
-                        toggle("Load remote images", detail: "Off blocks tracking pixels. Show per message from the reader.", isOn: $model.settings.loadRemoteImages)
-                        toggle("Always show key hints", detail: "Otherwise hints appear on hover.", isOn: $model.settings.alwaysShowKeyHints)
-
-                        divider("CALENDAR")
-                        row("Calendar", detail: calendarDetail) {
-                            if model.services.isGmail {
-                                settingsButton(model.services.calendarEngine == nil ? "Connect Google Calendar" : "Connect again", key: nil) { model.connectCalendar() }
-                                    .frame(width: 200)
-                            }
-                        }
-                        toggle("Archive invitations after answering", detail: "Y, M or N also archives the invitation and moves to the next conversation. u undoes both.",
-                               isOn: $model.settings.archiveInvitationsAfterAnswer)
-                        row("Working hours", detail: "The day column on an invitation shows at least these hours.") {
-                            HStack(spacing: 6) {
-                                Picker("", selection: $model.settings.workdayStart) {
-                                    ForEach(Array(stride(from: 5 * 60, through: 12 * 60, by: 30)), id: \.self) { Text(Formatting.minuteTime($0)).tag($0) }
-                                }
-                                .labelsHidden()
-                                .frame(width: 90)
-                                Text("to").font(AppFonts.sans(11)).foregroundStyle(theme.mutedForeground)
-                                Picker("", selection: $model.settings.workdayEnd) {
-                                    ForEach(Array(stride(from: 13 * 60, through: 23 * 60, by: 30)), id: \.self) { Text(Formatting.minuteTime($0)).tag($0) }
-                                }
-                                .labelsHidden()
-                                .frame(width: 90)
-                            }
-                        }
-
-                        divider("COMPOSE")
-                        toggle("Show HTML preview", detail: "The exact email recipients get, next to the editor.", isOn: $model.settings.showComposePreview)
-                        toggle("Archive on send", detail: "Sending a reply archives the conversation. Undo send brings it back.", isOn: $model.settings.archiveOnSend)
-                        toggle("Reply and forward start in vim", detail: "Ctrl+G toggles vim in any compose window.", isOn: $model.settings.composeStartsInVim)
-                        VStack(alignment: .leading, spacing: 8) {
-                            label("Editor command", detail: "Empty uses $VISUAL, $EDITOR, then nvim from your login shell. Mail-only settings: ~/.config/vimail/vimrc.")
-                            TextField("nvim", text: $model.settings.editorCommand).fieldStyle()
-                        }
-                        signatures
-
-                        rulesSection
-
-                        divider("DATA")
-                        if model.services.dummy != nil {
-                            toggle("Simulate incoming mail", detail: "The dummy server delivers new mail every few minutes.", isOn: $model.settings.dummySimulateIncomingMail)
-                            row("Simulated latency", detail: "Per server call. Local actions stay instant.") {
-                                Picker("", selection: $model.settings.dummyLatencyMilliseconds) {
-                                    Text("None").tag(0)
-                                    Text("120 ms").tag(120)
-                                    Text("600 ms").tag(600)
-                                    Text("2 s").tag(2000)
-                                }
-                                .labelsHidden()
-                                .frame(width: 200)
-                            }
-                            row("Simulated failures", detail: "Test the offline queue and retries.") {
-                                Picker("", selection: $model.settings.dummyFailureRate) {
-                                    Text("None").tag(0.0)
-                                    Text("20% of calls").tag(0.2)
-                                    Text("Offline (100%)").tag(1.0)
-                                }
-                                .labelsHidden()
-                                .frame(width: 200)
-                            }
-                        }
-                        HStack(spacing: 10) {
-                            settingsButton("Keyboard shortcuts", key: "?") { model.overlay = .help }
-                            settingsButton("Show data folder", key: nil) { model.revealDataFolder() }
-                        }
-                        Text("All app state lives on this Mac in ~/Library/Application Support/\(AppPaths.folderName).")
-                            .font(AppFonts.sans(10))
-                            .foregroundStyle(theme.mutedForeground)
-                    }
-                    .padding(24)
-                }
-                .frame(maxHeight: 600)
-                .onAppear { scroll(proxy) }
-                .onChange(of: model.settingsSection) { _, _ in scroll(proxy) }
+        let sections = model.settingsSections
+        let section = model.shownSettingsSection
+        DialogShell(title: "Settings", width: 820, footer: nil, onClose: { model.overlay = nil }) {
+            HStack(spacing: 0) {
+                sidebar(sections, selected: section)
+                Rectangle().fill(theme.border).frame(width: 1)
+                pane(section)
+            }
+            // As tall as the window allows, up to 560, whatever the section: switching never resizes the dialog.
+            .frame(minHeight: 320, maxHeight: 560)
+        }
+        .padding(.bottom, 24)
+        // Focus set in the same pass that inserts the overlay is dropped; defer it one turn.
+        .onAppear { DispatchQueue.main.async { focus = .sidebar } }
+        .onChange(of: model.settingsFocus) { _, target in
+            // A section picked, esc in a field or after a control tab reached: the keyboard goes back to the list.
+            if target == .sidebar, focus != .sidebar { focus = .sidebar }
+        }
+        .onChange(of: model.settingsTabs) { old, new in tab(by: new - old) }
+        .onChange(of: focus) { old, value in
+            if let value {
+                model.settingsFocus = value.place
+            } else if !NSApp.isFullKeyboardAccessEnabled {
+                // Only the list and the text fields take the keys then. A field gone (the key once saved, a signature
+                // deleted) gives them back to the list.
+                focus = .sidebar
+            } else if model.settingsFocus == old?.place {
+                // Gone to a control tab reached, or nowhere.
+                model.settingsFocus = nil
             }
         }
     }
 
-    /// Opens at the section asked for (the rules status opens the rules section).
-    private func scroll(_ proxy: ScrollViewProxy) {
-        guard let section = model.settingsSection else { return }
-        model.settingsSection = nil
-        DispatchQueue.main.async { proxy.scrollTo(section, anchor: .top) }
+    /// Tab and ⇧tab without full keyboard access: round the list and the section's text fields, in order.
+    private func tab(by delta: Int) {
+        let stops = [Field.sidebar] + fields(model.shownSettingsSection)
+        let index = focus.flatMap { stops.firstIndex(of: $0) } ?? 0
+        focus = stops[((index + delta) % stops.count + stops.count) % stops.count]
+    }
+
+    /// The section's text fields, in the order tab reaches them.
+    private func fields(_ section: SettingsSection) -> [Field] {
+        switch section {
+        case .general: [.quickSnooze]
+        case .compose: [.editor] + model.settings.signatures.flatMap { [Field.signatureName($0.id), .signatureText($0.id)] }
+        case .rules: (replacingKey ? [.key] : []) + [.monthlyBudget, .dailyBudget, .previewBudget]
+        case .appearance, .account, .calendar, .developer: []
+        }
+    }
+
+    // MARK: Sidebar
+
+    private func sidebar(_ sections: [SettingsSection], selected: SettingsSection) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(sections.enumerated()), id: \.element) { index, section in
+                sidebarRow(section, number: index + 1, selected: section == selected)
+            }
+            Spacer(minLength: 12)
+            Text(focus == nil || focus == .sidebar ? "j/k · 1-\(sections.count) · tab" : "esc back to the list")
+                .font(AppFonts.mono(9))
+                .foregroundStyle(theme.mutedForeground)
+                .padding(.horizontal, 10)
+        }
+        .padding(12)
+        .frame(width: 180)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(theme.sidebar.opacity(0.5), in: Rectangle())
+        // The list itself takes the keyboard (j/k, the digits); tab goes on into the section and comes back round.
+        .focusable(interactions: .edit)
+        .focusEffectDisabled()
+        .focused($focus, equals: .sidebar)
+    }
+
+    private func sidebarRow(_ section: SettingsSection, number: Int, selected: Bool) -> some View {
+        HStack(spacing: 10) {
+            Icon(name: section.icon, size: 15)
+            Text(section.title).font(AppFonts.sans(12, selected ? .semibold : .regular)).lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+        // Shown on hover, over the row: it takes none of the title's width.
+        .overlay(alignment: .trailing) { HintText("\(number)").padding(.trailing, 10) }
+        .foregroundStyle(selected ? theme.green : theme.mutedForeground)
+        .contentShape(Rectangle())
+        .hoverHighlight(cornerRadius: 6, active: selected)
+        .hintScope()
+        .onTapGesture { model.selectSettingsSection(section) }
+        .help("\(section.title) (\(number))")
+    }
+
+    // MARK: Sections
+
+    private func pane(_ section: SettingsSection) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    Text(section.title).font(AppFonts.sans(14, .semibold)).foregroundStyle(theme.foreground)
+                    switch section {
+                    case .general: generalSection
+                    case .appearance: appearanceSection
+                    case .account: accountSection
+                    case .compose: composeSection
+                    case .calendar: calendarSection
+                    case .rules: rulesSection
+                    case .developer: developerSection
+                    }
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            // The field tab reaches scrolls to the middle (an anchor of nil does not scroll here).
+            .onChange(of: focus) { _, field in
+                guard let field, field != .sidebar else { return }
+                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(field, anchor: .center) }
+            }
+        }
+        // Each section opens at its top.
+        .id(section)
+    }
+
+    private var generalSection: some View {
+        @Bindable var model = model
+        return VStack(alignment: .leading, spacing: 22) {
+            row("Mark as read", detail: "After a conversation stays selected this long.") {
+                Picker("", selection: $model.settings.markReadDelay) {
+                    Text("Immediately").tag(0.0)
+                    Text("After 1 second").tag(1.0)
+                    Text("After 3 seconds").tag(3.0)
+                    Text("Only when opened (↵)").tag(-1.0)
+                }
+                .labelsHidden()
+                .frame(width: 200)
+            }
+            row("Undo send", detail: "Time to press u before a message or an unsubscribe (⌘U) leaves.") {
+                Picker("", selection: $model.settings.undoSendSeconds) {
+                    Text("Off").tag(0.0)
+                    Text("5 seconds").tag(5.0)
+                    Text("10 seconds").tag(10.0)
+                    Text("20 seconds").tag(20.0)
+                }
+                .labelsHidden()
+                .frame(width: 200)
+            }
+            row("Quick snooze", detail: quickSnoozeDetail) {
+                TextField("tomorrow", text: $model.settings.quickSnooze)
+                    .fieldStyle()
+                    .focused($focus, equals: .quickSnooze)
+                    .frame(width: 200)
+            }
+            .id(Field.quickSnooze)
+            toggle("Load remote images", detail: "Off blocks tracking pixels. Show per message from the reader.", isOn: $model.settings.loadRemoteImages)
+            toggle("Always show key hints", detail: "Otherwise hints appear on hover.", isOn: $model.settings.alwaysShowKeyHints)
+            settingsButton("Keyboard shortcuts", key: "?") { model.overlay = .help }
+        }
+    }
+
+    private var appearanceSection: some View {
+        @Bindable var model = model
+        return VStack(alignment: .leading, spacing: 22) {
+            row("Appearance", detail: "Auto follows macOS light and dark mode.") {
+                Picker("", selection: $model.settings.appearance) {
+                    ForEach(AppearanceMode.allCases) { Text($0.title).tag($0) }
+                }
+                .labelsHidden()
+                .frame(width: 200)
+            }
+            row("Dark theme") {
+                Picker("", selection: $model.settings.darkTheme) {
+                    ForEach(ThemeID.darkThemes) { Text($0.title).tag($0) }
+                }
+                .labelsHidden()
+                .frame(width: 200)
+            }
+            row("Light theme") {
+                Picker("", selection: $model.settings.lightTheme) {
+                    ForEach(ThemeID.lightThemes) { Text($0.title).tag($0) }
+                }
+                .labelsHidden()
+                .frame(width: 200)
+            }
+        }
+    }
+
+    private var accountSection: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            row("Mail", detail: accountDetail) {
+                if model.gmailAccount != nil {
+                    Picker("", selection: Binding(get: { model.settings.dataSource }, set: { model.switchDataSource($0) })) {
+                        Text("Gmail · \(model.gmailAccount ?? "")").tag(DataSource.gmail)
+                        Text("Dummy data").tag(DataSource.dummy)
+                    }
+                    .labelsHidden()
+                    .frame(width: 260)
+                } else {
+                    Text("Dummy data").font(AppFonts.sans(12)).foregroundStyle(theme.mutedForeground)
+                }
+            }
+            HStack(spacing: 10) {
+                if model.signingIn {
+                    settingsButton("Waiting for the browser… Cancel", key: nil) { model.cancelSignIn() }
+                } else if model.gmailAccount == nil {
+                    settingsButton("Connect Gmail…", key: nil) { model.connectGmail() }
+                } else {
+                    settingsButton("Sign in again", key: nil) { model.connectGmail() }
+                    settingsButton("Sign out", key: nil) { model.confirmSignOut() }
+                }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                settingsButton("Show data folder", key: nil) { model.revealDataFolder() }
+                Text("All app state lives on this Mac in ~/Library/Application Support/\(AppPaths.folderName).")
+                    .font(AppFonts.sans(10))
+                    .foregroundStyle(theme.mutedForeground)
+            }
+        }
+    }
+
+    private var composeSection: some View {
+        @Bindable var model = model
+        return VStack(alignment: .leading, spacing: 22) {
+            toggle("Show HTML preview", detail: "The exact email recipients get, next to the editor.", isOn: $model.settings.showComposePreview)
+            toggle("Archive on send", detail: "Sending a reply archives the conversation. Undo send brings it back.", isOn: $model.settings.archiveOnSend)
+            toggle("Reply and forward start in vim", detail: "Ctrl+G toggles vim in any compose window.", isOn: $model.settings.composeStartsInVim)
+            VStack(alignment: .leading, spacing: 8) {
+                label("Editor command", detail: "Empty uses $VISUAL, $EDITOR, then nvim from your login shell. Mail-only settings: ~/.config/vimail/vimrc.")
+                TextField("nvim", text: $model.settings.editorCommand).fieldStyle().focused($focus, equals: .editor)
+            }
+            .id(Field.editor)
+            signatures
+        }
+    }
+
+    private var calendarSection: some View {
+        @Bindable var model = model
+        return VStack(alignment: .leading, spacing: 22) {
+            row("Calendar", detail: calendarDetail) {
+                if model.services.isGmail {
+                    settingsButton(model.services.calendarEngine == nil ? "Connect Google Calendar" : "Connect again", key: nil) { model.connectCalendar() }
+                        .frame(width: 200)
+                }
+            }
+            toggle("Archive invitations after answering", detail: "Y, M or N also archives the invitation and moves to the next conversation. u undoes both.",
+                   isOn: $model.settings.archiveInvitationsAfterAnswer)
+            row("Working hours", detail: "The day column on an invitation shows at least these hours.") {
+                HStack(spacing: 6) {
+                    Picker("", selection: $model.settings.workdayStart) {
+                        ForEach(Array(stride(from: 5 * 60, through: 12 * 60, by: 30)), id: \.self) { Text(Formatting.minuteTime($0)).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 90)
+                    Text("to").font(AppFonts.sans(11)).foregroundStyle(theme.mutedForeground)
+                    Picker("", selection: $model.settings.workdayEnd) {
+                        ForEach(Array(stride(from: 13 * 60, through: 23 * 60, by: 30)), id: \.self) { Text(Formatting.minuteTime($0)).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 90)
+                }
+            }
+        }
+    }
+
+    /// The dummy server's switches. Settings lists this section only with dummy data.
+    private var developerSection: some View {
+        @Bindable var model = model
+        return VStack(alignment: .leading, spacing: 22) {
+            toggle("Simulate incoming mail", detail: "The dummy server delivers new mail every few minutes.", isOn: $model.settings.dummySimulateIncomingMail)
+            row("Simulated latency", detail: "Per server call. Local actions stay instant.") {
+                Picker("", selection: $model.settings.dummyLatencyMilliseconds) {
+                    Text("None").tag(0)
+                    Text("120 ms").tag(120)
+                    Text("600 ms").tag(600)
+                    Text("2 s").tag(2000)
+                }
+                .labelsHidden()
+                .frame(width: 200)
+            }
+            row("Simulated failures", detail: "Test the offline queue and retries.") {
+                Picker("", selection: $model.settings.dummyFailureRate) {
+                    Text("None").tag(0.0)
+                    Text("20% of calls").tag(0.2)
+                    Text("Offline (100%)").tag(1.0)
+                }
+                .labelsHidden()
+                .frame(width: 200)
+            }
+        }
     }
 
     private var calendarDetail: String {
@@ -210,26 +346,31 @@ struct SettingsView: View {
         @Bindable var model = model
         let ai = model.ai
         return VStack(alignment: .leading, spacing: 22) {
-            divider("RULES & CLAUDE").id(SettingsSection.rules)
             #if DEBUG
             if model.services.isGmail, ai.hasKey, !ai.usesSimulator {
                 Text("DEBUG · real mail, real spend").font(AppFonts.mono(10, .semibold)).foregroundStyle(theme.orange)
             }
             #endif
+            subheading("CLAUDE")
             label("API key", detail: keyDetail)
             if replacingKey {
                 HStack(spacing: 10) {
                     SecureField("sk-ant-…", text: $newKey)
                         .fieldStyle()
+                        .focused($focus, equals: .key)
                         .onSubmit(saveKey)
                     settingsButton(savingKey ? "Checking…" : "Check and save", key: "↵", action: saveKey)
                         .frame(width: 170)
                 }
+                .id(Field.key)
             }
             HStack(spacing: 10) {
                 settingsButton(ai.hasKey ? "Replace key…" : "Add key…", key: nil) {
                     newKey = ""
                     replacingKey.toggle()
+                    // Straight into the new field; hiding it gives the keyboard back to the list.
+                    let field: Field = replacingKey ? .key : .sidebar
+                    DispatchQueue.main.async { focus = field }
                 }
                 if ai.hasKey {
                     settingsButton("Remove key", key: nil) { model.removeAnthropicKey() }
@@ -242,7 +383,9 @@ struct SettingsView: View {
                 .labelsHidden()
                 .frame(width: 260)
             }
-            row("This account", detail: consentDetail) {
+
+            subheading("THIS ACCOUNT")
+            row("Send mail to Claude", detail: consentDetail) {
                 if ai.usesSimulator {
                     EmptyView()
                 } else if ai.hasConsent(model.services.accountKey) {
@@ -251,21 +394,28 @@ struct SettingsView: View {
                     settingsButton("Allow…", key: nil) { model.openConsent() }.frame(width: 120)
                 }
             }
+
+            subheading("BUDGET")
             row("Monthly budget", detail: "For every account together. Claude stops for the month here.") {
-                budgetField($model.settings.ai.monthlyBudgetUSD)
+                budgetField($model.settings.ai.monthlyBudgetUSD, focus: .monthlyBudget)
             }
+            .id(Field.monthlyBudget)
             row("Daily budget", detail: "Starts again at midnight.") {
-                budgetField($model.settings.ai.dailyBudgetUSD)
+                budgetField($model.settings.ai.dailyBudgetUSD, focus: .dailyBudget)
             }
+            .id(Field.dailyBudget)
             row("Previews", detail: "A day, for trying rules in the editor.") {
-                budgetField($model.settings.ai.previewDailyUSD)
+                budgetField($model.settings.ai.previewDailyUSD, focus: .previewBudget)
             }
+            .id(Field.previewBudget)
             if let spend {
                 Text(verbatim: "Spent \(Formatting.dollars(spend.spendMonth)) this month, \(Formatting.dollars(spend.spendToday)) today."
                     + (spend.fallbacksUnavailable ? " Fallback models are not available to this key: refusals stay unlabeled." : ""))
                     .font(AppFonts.sans(10))
                     .foregroundStyle(theme.mutedForeground)
             }
+
+            subheading("RULES")
             toggle("Pause all rules", detail: "On every account. Arriving mail waits until you resume.", isOn: $model.settings.ai.pauseAll)
             HStack(spacing: 10) {
                 settingsButton("Manage rules", key: "gr") { model.openRules() }
@@ -285,8 +435,11 @@ struct SettingsView: View {
         savingKey = true
         Task {
             if await model.saveAnthropicKey(key) {
+                // Back to the list, unless the keyboard went on to another field while Anthropic checked.
+                let fromKeyField = focus == .key
                 replacingKey = false
                 newKey = ""
+                if fromKeyField { focus = .sidebar }
             }
             savingKey = false
         }
@@ -337,11 +490,12 @@ struct SettingsView: View {
         return "Mail from this account may go to Claude, since \(since.formatted(date: .abbreviated, time: .omitted))."
     }
 
-    private func budgetField(_ value: Binding<Double>) -> some View {
+    private func budgetField(_ value: Binding<Double>, focus field: Field) -> some View {
         HStack(spacing: 4) {
             Text("$").font(AppFonts.sans(12)).foregroundStyle(theme.mutedForeground)
             TextField("", value: value, format: .number.precision(.fractionLength(0...2)))
                 .fieldStyle()
+                .focused($focus, equals: field)
                 .frame(width: 90)
         }
     }
@@ -366,7 +520,7 @@ struct SettingsView: View {
             ForEach($model.settings.signatures) { $signature in
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 8) {
-                        TextField("Name", text: $signature.name).fieldStyle()
+                        TextField("Name", text: $signature.name).fieldStyle().focused($focus, equals: .signatureName(signature.id))
                         Button { removeSignature(signature.id) } label: {
                             Icon(name: .close, size: 12).foregroundStyle(theme.mutedForeground)
                                 .frame(width: 26, height: 26)
@@ -375,13 +529,16 @@ struct SettingsView: View {
                         .buttonStyle(.plain)
                         .help("Delete this signature")
                     }
+                    .id(Field.signatureName(signature.id))
                     TextEditor(text: $signature.markdown)
                         .font(AppFonts.mono(12))
                         .scrollContentBackground(.hidden)
+                        .focused($focus, equals: .signatureText(signature.id))
                         .padding(8)
                         .frame(height: 70)
                         .background(theme.background, in: RoundedRectangle(cornerRadius: 8))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.border, lineWidth: 1))
+                        .id(Field.signatureText(signature.id))
                 }
             }
             Button {
@@ -402,6 +559,8 @@ struct SettingsView: View {
         model.settings.signatures.removeAll { $0.id == id }
         if model.settings.defaultSignature == .custom(id) { model.settings.defaultSignature = model.defaultSignatureChoice }
     }
+
+    // MARK: Rows
 
     private func label(_ title: String, detail: String?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -424,7 +583,8 @@ struct SettingsView: View {
         }
     }
 
-    private func divider(_ title: String) -> some View {
+    /// A group's heading inside a section (Rules & Claude: CLAUDE, THIS ACCOUNT, BUDGET, RULES).
+    private func subheading(_ title: String) -> some View {
         Text(title).font(AppFonts.mono(9)).tracking(1.5).foregroundStyle(theme.mutedForeground).padding(.top, 6)
     }
 
@@ -443,6 +603,20 @@ struct SettingsView: View {
             .hoverHighlight(cornerRadius: 8)
         }
         .buttonStyle(.plain)
+    }
+}
+
+private extension SettingsSection {
+    var icon: IconName {
+        switch self {
+        case .general: .settings
+        case .appearance: .panel
+        case .account: .inbox
+        case .compose: .edit
+        case .calendar: .calendar
+        case .rules: .tag
+        case .developer: .command
+        }
     }
 }
 

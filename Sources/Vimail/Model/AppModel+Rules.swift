@@ -40,11 +40,6 @@ extension AppModel {
         openRules(focus: rulesStatus.runs.isEmpty ? .rules : .activity)
     }
 
-    func openSettings(at section: SettingsSection) {
-        settingsSection = section
-        overlay = .settings
-    }
-
     /// Received mail a day over the last 30 days: what Claude estimates and the live reserve assume.
     func refreshMailVolume() async {
         let services = services

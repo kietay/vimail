@@ -112,10 +112,8 @@ enum UndoEntry {
     }
 }
 
-/// Where Settings opens scrolled to.
-enum SettingsSection: Hashable {
-    case rules
-}
+/// Where the keys go in Settings: its list of sections (j/k, 1…n), or a text field in the section shown (tab).
+enum SettingsFocus: Hashable { case sidebar, pane }
 
 /// A ⌘U still checking how to unsubscribe. `u` cancels it then, before it has done anything.
 final class UnsubscribeCheck {
@@ -265,7 +263,13 @@ final class AppModel {
     var explainHighlighted = 0
     /// The model and budgets the consent panel offers.
     var consentDraft = AISettings()
-    var settingsSection: SettingsSection?
+    /// The section Settings shows: the last one used this session.
+    var settingsSection = SettingsSection.general
+    /// Nil while a control tab reached has the keys (full keyboard access), or nothing has.
+    var settingsFocus: SettingsFocus?
+    /// Tab adds one and ⇧tab takes one away, without full keyboard access. Settings moves the keyboard by the change,
+    /// round its list and the section's text fields.
+    var settingsTabs = 0
 
     // Rules: the manager, the rule being written (also while `L` or the omnibox has it put aside),
     // the "how far back" sheet, and the list of a rule's matches.
@@ -1259,6 +1263,11 @@ final class AppModel {
             if focusTarget == nil { blurTextInput() }
         case .quickAdd:
             focusTarget = .quickAdd
+        case .settings:
+            // Settings puts the keyboard on its list of sections itself.
+            focusTarget = nil
+            settingsFocus = .sidebar
+            blurTextInput()
         case .eventEditor:
             // The editor puts the cursor in Title or When itself.
             focusTarget = nil
@@ -1287,6 +1296,8 @@ final class AppModel {
     }
 
     var mode: Mode {
+        // Settings has the keys even over compose (opened from its signature menu).
+        if overlay == .settings { return settingsFocus == .pane ? .insert : .normal }
         if compose?.vimRunning == true { return .vim }
         if let compose {
             if focusTarget == nil { return .compose }

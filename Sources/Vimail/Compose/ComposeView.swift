@@ -248,7 +248,7 @@ struct ComposeView: View {
     private var signatureControl: some View {
         let options = model.signatureOptions
         if options.isEmpty {
-            Button { model.overlay = .settings } label: {
+            Button { model.openSettings(at: .compose) } label: {
                 Text("Add a signature…").font(AppFonts.sans(11)).foregroundStyle(theme.mutedForeground.opacity(0.7))
             }
             .buttonStyle(.plain)
@@ -266,7 +266,7 @@ struct ComposeView: View {
                         Toggle(option.name, isOn: Binding(get: { active == option }, set: { _ in compose.chooseSignature(option.choice) }))
                     }
                     Divider()
-                    Button("Edit signatures…") { model.overlay = .settings }
+                    Button("Edit signatures…") { model.openSettings(at: .compose) }
                 } label: {
                     HStack(spacing: 3) {
                         Text((active ?? compose.signatureToRestore(in: options))?.name ?? "")

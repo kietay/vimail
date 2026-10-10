@@ -123,7 +123,9 @@ extension AppModel {
             return false
         case .eventEditor:
             return handleEditorKey(stroke, context: context)
-        case .help, .settings, .views:
+        case .settings:
+            return handleSettingsKey(stroke, context: context)
+        case .help, .views:
             if stroke.isEscape || (!context.textFocused && (stroke.isChar("q") || (overlay == .help && stroke.isChar("?")))) {
                 overlay = nil
                 return true
@@ -137,6 +139,46 @@ extension AppModel {
             return handleSearchFieldKey(stroke)
         }
         return handleNormalKey(stroke)
+    }
+
+    /// Settings: j/k (↓/↑, ⌃n/⌃p) and the digits pick a section, tab goes into it, ? shows the keys, esc or q
+    /// closes. A text field in the section takes every key but tab (the next field) and esc (back to the list).
+    private func handleSettingsKey(_ stroke: KeyStroke, context: KeyContext) -> Bool {
+        // With full keyboard access tab also reaches the pickers, switches and buttons, in AppKit's order.
+        let everyControl = NSApp.isFullKeyboardAccessEnabled
+        // Without it, tab and ⇧tab go round the list and the section's text fields, never on to the window behind.
+        // ⌥tab still types a tab in a field.
+        if stroke.isTab, !everyControl, !stroke.command, !(stroke.option && context.textFocused) {
+            settingsTabs += stroke.shift ? -1 : 1
+            return true
+        }
+        if context.textFocused {
+            guard stroke.isEscape else { return false }
+            settingsFocus = .sidebar
+            blurTextInput()
+            return true
+        }
+        if stroke.isEscape {
+            // From the list, close; from a control tab reached (or nowhere), back to the list.
+            if settingsFocus == .sidebar { overlay = nil } else { settingsFocus = .sidebar }
+        } else if stroke.isChar("q") {
+            overlay = nil
+        } else if stroke.isChar("j") || stroke.isDown || stroke.isControl("n") {
+            moveSettingsSection(1)
+        } else if stroke.isChar("k") || stroke.isUp || stroke.isControl("p") {
+            moveSettingsSection(-1)
+        } else if case .char(let character) = stroke.key, !stroke.command, !stroke.control, !stroke.option, let number = character.wholeNumberValue {
+            if let section = SettingsSection.numbered(number, in: settingsSections) { selectSettingsSection(section) }
+        } else if stroke.isChar("?") {
+            overlay = .help
+        } else if stroke.isTab {
+            // Full keyboard access: AppKit's order. ⇧tab goes back to the list and no further: before it is the window behind.
+            return stroke.shift && settingsFocus == .sidebar
+        } else if stroke.isSpace, everyControl, settingsFocus != .sidebar {
+            // Space toggles the switch tab reached, or opens its menu.
+            return false
+        }
+        return !stroke.command
     }
 
     /// "Why these labels?": j/k move, x a s e d u act on the highlighted line.
