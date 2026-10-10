@@ -16,6 +16,15 @@ struct EventNotesTests {
         #expect(EventNotes.description(notes: "", opened: "", stored: nil) == nil)
     }
 
+    /// Esc's draft and "this and following" ask the same question a save does: your editor's newline is no change.
+    @Test func onlyChangesInsideTheNotesCount() {
+        #expect(!EventNotes.changed("Agenda\n- budget", from: "Agenda\n- budget\n"))
+        #expect(!EventNotes.changed("  Agenda\n\n", from: "Agenda"))
+        #expect(EventNotes.changed("Agenda\n\n- budget", from: "Agenda\n- budget"))
+        #expect(EventNotes.changed("", from: "Agenda"))
+        #expect(!EventNotes.changed(" \n", from: ""))
+    }
+
     @Test func changedNotesAreMarkdownRenderedAsCompose() {
         let notes = "Bring the **numbers**.\n\n- budget\n- hiring"
         let description = EventNotes.description(notes: notes, opened: "Bring numbers.", stored: "<p>Bring numbers.</p>")

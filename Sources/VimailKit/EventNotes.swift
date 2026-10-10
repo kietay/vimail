@@ -6,10 +6,14 @@ import MailCore
 /// formatting and links.
 public enum EventNotes {
     /// The description a save sends. `opened` is Notes as the editor showed it, `stored` the description as stored.
-    /// Changes only to spaces and blank lines at either end are no change.
     public static func description(notes: String, opened: String, stored: String?) -> String? {
-        guard trimmed(notes) != trimmed(opened) else { return stored }
-        return html(notes)
+        changed(notes, from: opened) ? html(notes) : stored
+    }
+
+    /// Notes differ from how the editor showed them. Changes only to spaces and blank lines at either end (the newline
+    /// your own editor adds) are no change.
+    public static func changed(_ notes: String, from opened: String) -> Bool {
+        trimmed(notes) != trimmed(opened)
     }
 
     /// Markdown notes as HTML, or nil when there are none.

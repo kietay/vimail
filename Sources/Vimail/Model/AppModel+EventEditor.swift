@@ -146,7 +146,11 @@ final class EventEditorModel {
         )
     }
 
-    var hasChanges: Bool { draft != opened }
+    /// Esc keeps these as a draft. Guests in another order, and notes changed only at either end, are no change, as for a save.
+    var hasChanges: Bool {
+        guard let opened else { return true }
+        return fieldsChanged || calendarID != opened.calendarID || addConference != opened.addConference || scope != opened.scope
+    }
 
     /// A field differs from how the editor opened.
     func changed(_ field: KeyPath<EventDraft, String>) -> Bool {
@@ -156,6 +160,9 @@ final class EventEditorModel {
     /// Notes as the editor showed them on opening: a save keeps the stored description while they are unchanged.
     var openedNotes: String { opened?.details ?? "" }
 
+    /// Notes differ from how the editor opened, by the rule a save uses: the newline your own editor adds is no change.
+    var notesChanged: Bool { opened == nil || EventNotes.changed(details, from: openedNotes) }
+
     /// Guests differ from how the editor opened: other pills (in any order), or something typed after them.
     var guestsChanged: Bool {
         guard let opened else { return true }
@@ -164,7 +171,7 @@ final class EventEditorModel {
 
     /// Something was typed in a field (the scope alone is no change).
     var fieldsChanged: Bool {
-        guestsChanged || [\EventDraft.title, \.when, \.location, \.repeats, \.details].contains { changed($0) }
+        guestsChanged || notesChanged || [\EventDraft.title, \.when, \.location, \.repeats].contains { changed($0) }
     }
     /// The times as opened, while When is unchanged: they may say more than When can (seconds, a zone, a long event).
     var keptTimes: (start: EventTime, end: EventTime)? {
