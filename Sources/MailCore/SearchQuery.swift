@@ -5,8 +5,8 @@ import Foundation
 /// Supported: free words (prefix match), `"exact phrase"`, `-excluded`, `from:`, `to:`, `subject:`,
 /// `label:`, `in:inbox|sent|trash|spam|starred|snoozed|drafts|archive|anywhere`,
 /// `is:unread|read|starred`, `has:attachment`, `before:YYYY-MM-DD`, `after:YYYY-MM-DD`,
-/// `older_than:3d|2w|1m|1y`, `newer_than:...`, and for calendar mail `has:invite` and
-/// `invite:request|update|cancel|reply|pending|conflict`.
+/// `older_than:3d|2w|1m|1y`, `newer_than:...`, and for calendar mail `has:invite`,
+/// `invite:request|update|cancel|reply|pending|conflict` and `organizer:me`.
 public struct SearchQuery: Hashable, Sendable {
     /// Which calendar mail to find: any invitation file, or one kind of it.
     public enum InvitationFilter: String, Hashable, Sendable {
@@ -29,6 +29,8 @@ public struct SearchQuery: Hashable, Sendable {
     public var starred: Bool?
     public var hasAttachment: Bool?
     public var invitation: InvitationFilter?
+    /// Calendar mail about events you organize (`organizer:me`): with `invite:reply`, your guests' answers.
+    public var organizedByMe: Bool?
     public var before: Date?
     public var after: Date?
 
@@ -98,6 +100,8 @@ public struct SearchQuery: Hashable, Sendable {
                 case "conflict", "conflicts", "overlap", "overlaps": query.invitation = .conflict
                 default: query.terms.append(raw)
                 }
+            case "organizer":
+                if value.lowercased() == "me" { query.organizedByMe = true } else { query.terms.append(raw) }
             case "before": query.before = parseDate(value)
             case "after": query.after = parseDate(value)
             case "older_than": query.before = relativeDate(value, now: now, calendar: calendar)

@@ -592,14 +592,15 @@ extension MailStore {
             let payload = invitations.isEmpty ? nil : String(decoding: try Self.encoder.encode(invitations), as: UTF8.self)
             try db.run(
                 """
-                INSERT INTO invitations(message_id, thread_id, uid, method, sequence, recurrence_id, payload, error, parsed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO invitations(message_id, thread_id, uid, method, sequence, recurrence_id, organizer, payload, error, parsed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(message_id) DO UPDATE SET thread_id = excluded.thread_id, uid = excluded.uid, method = excluded.method,
-                    sequence = excluded.sequence, recurrence_id = excluded.recurrence_id, payload = excluded.payload, error = excluded.error,
-                    parsed_at = excluded.parsed_at
+                    sequence = excluded.sequence, recurrence_id = excluded.recurrence_id, organizer = excluded.organizer,
+                    payload = excluded.payload, error = excluded.error, parsed_at = excluded.parsed_at
                 """,
                 [
-                    messageID, threadID, main?.uid, main?.method.rawValue, main?.sequence ?? 0, main?.recurrenceID?.occurrenceKey, payload,
-                    error ?? (invitations.isEmpty ? "no events" : nil), Date(),
+                    messageID, threadID, main?.uid, main?.method.rawValue, main?.sequence ?? 0, main?.recurrenceID?.occurrenceKey,
+                    main?.organizer?.normalized, payload, error ?? (invitations.isEmpty ? "no events" : nil), Date(),
                 ]
             )
             change.threadIDs.insert(threadID)

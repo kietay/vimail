@@ -451,6 +451,43 @@ struct InvitationSearchTests {
         #expect(found == ["tc1"])
     }
 
+    @Test func organizerMeFindsYourEventsAndYourGuestsAnswers() async throws {
+        let store = try await seededStore()
+        try await store.upsertMessages([
+            message("o1", thread: "to1", subject: "Invitation: Studio sync"),
+            message("o2", thread: "to2", from: nina, subject: "Accepted: Studio sync"),
+            message("o3", thread: "to3", subject: "Invitation: Design review"),
+            message("o4", thread: "to4", from: nina, subject: "Declined: Design review"),
+        ])
+        let start = EventTime.timed(Date().addingTimeInterval(86_400), timeZone: nil)
+        // You organize the sync (the file writes your address in capitals); Jamie organizes the review.
+        let sam = Attendee(email: "Sam@StudioNorth.co", name: "Sam Carter", response: .accepted, isOrganizer: true)
+        let jamie = Attendee(email: "jamie@studionorth.co", name: "Jamie Chen", response: .accepted, isOrganizer: true)
+        let answer = [Attendee(email: nina.email, name: nina.name, response: .accepted)]
+        try await store.saveInvitations([Invitation(method: .request, uid: "sync", summary: "Studio sync", start: start, organizer: sam)], messageID: "o1", threadID: "to1")
+        try await store.saveInvitations(
+            [Invitation(method: .reply, uid: "sync", summary: "Studio sync", start: start, organizer: sam, attendees: answer)], messageID: "o2", threadID: "to2"
+        )
+        try await store.saveInvitations([Invitation(method: .request, uid: "review", summary: "Design review", start: start, organizer: jamie)], messageID: "o3", threadID: "to3")
+        try await store.saveInvitations(
+            [Invitation(method: .reply, uid: "review", summary: "Design review", start: start, organizer: jamie, attendees: answer)], messageID: "o4", threadID: "to4"
+        )
+
+        func query(_ text: String) -> ThreadQuery { ThreadQuery(scope: .anywhere).narrowed(by: SearchQuery.parse(text)) }
+        func ids(_ text: String) async throws -> [String] { try await store.threads(query(text)).map(\.id).sorted() }
+        #expect(try await ids("organizer:me") == ["to1", "to2"])
+        #expect(try await ids("invite:reply organizer:me") == ["to2"])
+        #expect(try await ids("organizer:me invite:request") == ["to1"])
+        #expect(try await store.count(query("organizer:me")) == 2)
+        #expect(try await store.counts(["mine": query("organizer:me"), "answers": query("invite:reply organizer:me")]) == ["mine": 2, "answers": 1])
+
+        // Without an account there is no "me".
+        let unknown = try makeStore()
+        try await unknown.upsertMessages([message("o1", thread: "to1", subject: "Invitation: Studio sync")])
+        try await unknown.saveInvitations([Invitation(method: .request, uid: "sync", summary: "Studio sync", start: start, organizer: sam)], messageID: "o1", threadID: "to1")
+        #expect(try await unknown.threads(query("organizer:me")).isEmpty)
+    }
+
     @Test func eventsOnlyInMailBringTheirMovedAndCancelledDates() async throws {
         let store = try await seededStore()
         try await store.upsertMessages([

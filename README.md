@@ -190,7 +190,8 @@ In read-filtered lists (Unread tab, unread views) it stays visible until you ref
 **Search:** `from:` `to:` `subject:` `label:` `in:inbox|sent|trash|spam|snoozed|archive|anywhere`
 `is:unread|read|starred` `has:attachment` `before:` `after:` `older_than:` `newer_than:` `"phrases"` `-exclude`,
 and for calendar mail `has:invite` `invite:request|update|cancel|reply|pending|conflict` (pending: not answered yet;
-conflict: overlaps an event you go to in the next 60 days).
+conflict: overlaps an event you go to in the next 60 days) and `organizer:me` (events you organize; with `invite:reply`,
+your guests' answers).
 
 **Unsubscribe (`⌘U`)** uses the fastest way the sender offers, from its `List-Unsubscribe` header:
 

@@ -57,6 +57,21 @@ struct SearchQueryTests {
     @Test func unknownOperatorsAreText() {
         #expect(SearchQuery.parse("re:hello").terms == ["re:hello"])
     }
+
+    @Test func organizerMeCombinesWithInvitationTerms() {
+        let answers = SearchQuery.parse("invite:reply organizer:me")
+        #expect(answers.invitation == .reply)
+        #expect(answers.organizedByMe == true)
+        #expect(answers.terms.isEmpty)
+        #expect(SearchQuery.parse("organizer:ME").organizedByMe == true)
+        // Only "me" is known; another organizer is searched as text.
+        let other = SearchQuery.parse("organizer:alex")
+        #expect(other.organizedByMe == nil)
+        #expect(other.terms == ["organizer:alex"])
+        let query = ThreadQuery.mailbox(.inbox).narrowed(by: answers)
+        #expect(query.organizedByMe == true && query.invitation == .reply)
+        #expect(ThreadQuery.mailbox(.inbox).narrowed(by: other).organizedByMe == nil)
+    }
 }
 
 @Suite("Replies")

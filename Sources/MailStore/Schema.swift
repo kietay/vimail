@@ -189,12 +189,14 @@ enum Schema {
             method TEXT,
             sequence INTEGER NOT NULL DEFAULT 0,
             recurrence_id TEXT,                   -- the occurrence key when the file is about one occurrence only
+            organizer TEXT,                       -- the event's organizer, lowercased address (organizer:me)
             payload TEXT,
             error TEXT,
             parsed_at INTEGER NOT NULL
         );
         CREATE INDEX invitations_uid ON invitations(uid);
         CREATE INDEX invitations_thread ON invitations(thread_id);
+        CREATE INDEX invitations_organizer ON invitations(organizer, thread_id);
 
         -- Calendar changes waiting to be pushed. Separate from the mail outbox, so a calendar
         -- failure never holds back mail and each sync engine resets only its own in-flight work.

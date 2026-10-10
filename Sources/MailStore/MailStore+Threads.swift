@@ -128,8 +128,9 @@ extension MailStore {
         return "%\(escaped)%"
     }
 
-    /// SQL for a thread query. `selecting` is either the summary column list or `COUNT(*)`.
-    static func threadQuerySQL(_ query: ThreadQuery, selecting: String, paged: Bool) -> (String, [SQLBindable]) {
+    /// SQL for a thread query. `selecting` is either the summary column list or `COUNT(*)`. `me` is the account's own
+    /// addresses (lowercased), for `organizer:me`.
+    static func threadQuerySQL(_ query: ThreadQuery, selecting: String, paged: Bool, me: Set<String>) -> (String, [SQLBindable]) {
         var joins: [String] = []
         var conditions: [String] = []
         var args: [SQLBindable] = []
@@ -204,6 +205,17 @@ extension MailStore {
                 args.append(now.addingTimeInterval(60 * 86_400))
             }
         }
+        if query.organizedByMe == true {
+            // An invitation file whose event's organizer is one of your addresses.
+            let addresses = me.sorted()
+            if addresses.isEmpty {
+                conditions.append("0")
+            } else {
+                let placeholders = Array(repeating: "?", count: addresses.count).joined(separator: ", ")
+                conditions.append("t.id IN (SELECT i.thread_id FROM invitations i WHERE i.organizer IN (\(placeholders)))")
+                args += addresses.map { $0 as SQLBindable }
+            }
+        }
         if let before = query.before {
             conditions.append("t.last_date < ?")
             args.append(before)
@@ -264,32 +276,35 @@ extension MailStore {
 
     public func threads(_ query: ThreadQuery) async throws -> [ThreadSummary] {
         if case .mailbox(.drafts) = query.scope { return try await draftSummaries() }
-        return try await read { db in try Self.threads(query, db) }
+        let me = selfAddresses
+        return try await read { db in try Self.threads(query, db, me: me) }
     }
 
-    static func threads(_ query: ThreadQuery, _ db: SQLiteDatabase) throws -> [ThreadSummary] {
-        let (sql, args) = threadQuerySQL(query, selecting: summaryColumns, paged: true)
+    static func threads(_ query: ThreadQuery, _ db: SQLiteDatabase, me: Set<String>) throws -> [ThreadSummary] {
+        let (sql, args) = threadQuerySQL(query, selecting: summaryColumns, paged: true, me: me)
         return try db.query(sql, args, summary)
     }
 
     public func count(_ query: ThreadQuery) async throws -> Int {
         if case .mailbox(.drafts) = query.scope { return try await read { db in try db.scalar("SELECT COUNT(*) FROM drafts") } }
+        let me = selfAddresses
         return try await read { db in
-            let (sql, args) = Self.threadQuerySQL(query, selecting: "COUNT(*)", paged: false)
+            let (sql, args) = Self.threadQuerySQL(query, selecting: "COUNT(*)", paged: false, me: me)
             return try db.scalar(sql, args)
         }
     }
 
     /// Counts for several queries in one read (sidebar and view tabs).
     public func counts(_ queries: [String: ThreadQuery]) async throws -> [String: Int] {
-        try await read { db in
+        let me = selfAddresses
+        return try await read { db in
             var result: [String: Int] = [:]
             for (key, query) in queries {
                 if case .mailbox(.drafts) = query.scope {
                     result[key] = try db.scalar("SELECT COUNT(*) FROM drafts")
                     continue
                 }
-                let (sql, args) = Self.threadQuerySQL(query, selecting: "COUNT(*)", paged: false)
+                let (sql, args) = Self.threadQuerySQL(query, selecting: "COUNT(*)", paged: false, me: me)
                 result[key] = try db.scalar(sql, args)
             }
             return result

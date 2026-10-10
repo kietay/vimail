@@ -170,6 +170,8 @@ public struct ThreadQuery: Hashable, Sendable {
     public var hasAttachment: Bool?
     /// Calendar mail only (`has:invite`, `invite:pending`, ...).
     public var invitation: SearchQuery.InvitationFilter?
+    /// Calendar mail about events you organize (`organizer:me`).
+    public var organizedByMe: Bool?
     public var before: Date?
     public var after: Date?
     /// Restricts results to these conversation IDs (used to keep "sticky" rows in filtered lists).
@@ -209,6 +211,7 @@ public struct ThreadQuery: Hashable, Sendable {
         copy.excludedTerms += search.excluded
         if let hasAttachment = search.hasAttachment { copy.hasAttachment = hasAttachment }
         if let invitation = search.invitation { copy.invitation = invitation }
+        if let organizedByMe = search.organizedByMe { copy.organizedByMe = organizedByMe }
         if let before = search.before { copy.before = before }
         if let after = search.after { copy.after = after }
         return copy
