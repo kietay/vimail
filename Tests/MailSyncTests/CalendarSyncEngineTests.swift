@@ -134,6 +134,73 @@ struct CalendarSyncEngineTests {
         #expect(try await harness.day(day(2)).contains { $0.event.summary == "Morning review" })
     }
 
+    @Test func thisAndFollowingSplitsTheSeriesOnTheProviderAndUndoJoinsItAgain() async throws {
+        let harness = try await CalendarHarness()
+        #expect(await harness.engine.cycle())
+        let calendar = Calendar.current
+        let zone = TimeZone.current.identifier
+        func day(_ offset: Int) -> Date { calendar.date(byAdding: .day, value: offset, to: harness.nextMonday)! }
+        func time(_ offset: Int, _ hour: Int) -> Date { calendar.date(bySettingHour: hour, minute: 0, second: 0, of: day(offset))! }
+        func quarter(_ start: Date) -> (EventTime, EventTime) { (.timed(start, timeZone: zone), .timed(start.addingTimeInterval(900), timeZone: zone)) }
+        let series = CalendarEvent(
+            id: CalendarActions.newEventID(), calendarID: sam.email, summary: "Morning review",
+            start: quarter(time(0, 8)).0, end: quarter(time(0, 8)).1, recurrence: ["RRULE:FREQ=DAILY;COUNT=10"]
+        )
+        _ = try await harness.actions.create(series, sendUpdates: .none, addConference: false, undoWindow: 0)
+        #expect(await harness.engine.cycle())
+        // The sixth day moves to 11:00 on its own.
+        let stored = try #require(try await harness.store.event(calendarID: sam.email, id: series.id))
+        let sixth = stored.instance(originalStart: quarter(time(5, 8)).0, start: quarter(time(5, 8)).0, end: quarter(time(5, 8)).1)
+        var moved = sixth
+        (moved.start, moved.end) = quarter(time(5, 11))
+        _ = try await harness.actions.update(moved, from: sixth, sendUpdates: .none, undoWindow: 0)
+        #expect(await harness.engine.cycle())
+
+        // From the third day on it is at 09:00: the series ends after two days and a new one takes the other eight.
+        let current = try #require(try await harness.store.event(calendarID: sam.email, id: series.id))
+        let cut = quarter(time(2, 8)).0
+        guard case .split(let before, let after)? = Recurrence.split(recurrence: current.recurrence, seriesStart: current.start, at: cut, calendar: calendar) else {
+            Issue.record("Expected the series to be cut in two")
+            return
+        }
+        #expect(after == ["RRULE:FREQ=DAILY;COUNT=8"])
+        var following = CalendarActions.followingSeries(of: current)
+        (following.start, following.end) = quarter(time(2, 9))
+        following.recurrence = after
+        let records = try await harness.actions.split(current, at: cut, keeping: before, following: following, sendUpdates: .none, undoWindow: 0)
+        #expect(records.count == 2)
+        #expect(await harness.engine.cycle())
+        #expect(try await harness.store.calendarOutboxCount() == 0)
+
+        // The provider has both series right; the old one's moved day went with the days it lost.
+        #expect(try await harness.provider.event(calendarID: sam.email, eventID: series.id)?.recurrence == before)
+        let new = try #require(try await harness.provider.event(calendarID: sam.email, eventID: following.id))
+        #expect(new.recurrence == after && new.start == following.start)
+        func starts(_ id: String) async throws -> [Date] {
+            try await harness.provider.instances(calendarID: sam.email, eventID: id, from: day(-1), to: day(30)).compactMap(\.start.date)
+        }
+        #expect(try await starts(series.id) == [time(0, 8), time(1, 8)])
+        #expect(try await starts(following.id) == (2..<10).map { time($0, 9) })
+        #expect(try await harness.provider.event(calendarID: sam.email, eventID: moved.id) == nil)
+        // So does the Mac: one review a day, at 08:00 and then at 09:00.
+        for offset in 0..<10 {
+            let items = try await harness.day(day(offset)).filter { $0.event.summary == "Morning review" }
+            #expect(items.map(\.start.date) == [time(offset, offset < 2 ? 8 : 9)], "day \(offset)")
+        }
+
+        // Undo after both left: the new series goes, and the old one comes back with its moved day, on the provider too.
+        for record in records.reversed() { try await harness.actions.undo(record) }
+        #expect(await harness.engine.cycle())
+        #expect(try await harness.store.calendarOutboxCount() == 0)
+        #expect(try await harness.provider.event(calendarID: sam.email, eventID: following.id) == nil)
+        #expect(try await harness.provider.event(calendarID: sam.email, eventID: series.id)?.recurrence == ["RRULE:FREQ=DAILY;COUNT=10"])
+        #expect(try await starts(series.id) == (0..<10).map { time($0, $0 == 5 ? 11 : 8) })
+        for offset in 0..<10 {
+            let items = try await harness.day(day(offset)).filter { $0.event.summary == "Morning review" }
+            #expect(items.map(\.start.date) == [time(offset, offset == 5 ? 11 : 8)], "day \(offset)")
+        }
+    }
+
     @Test func undoOfAnOccurrenceChangeThatNeverLeftLeavesNoException() async throws {
         let harness = try await CalendarHarness()
         #expect(await harness.engine.cycle())

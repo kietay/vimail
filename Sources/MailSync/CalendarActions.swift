@@ -32,8 +32,10 @@ public final class CalendarActions: Sendable {
         public let sendUpdates: SendUpdates
         /// The change was to one occurrence that had no exception yet.
         public var madeException = false
-        /// For a removal: what else it removed or dropped, to put back on undo.
+        /// For a removal, or a series that ended early: what else it removed or dropped, to put back on undo.
         public var removal: LocalRemoval?
+        /// For "this and following": the day the series was cut at (its start in the rule).
+        public var splitDay: EventTime?
     }
 
     /// `changed` is called after a change was queued (it wakes the calendar sync).
@@ -142,6 +144,54 @@ public final class CalendarActions: Sendable {
         )
         changed()
         return ChangeRecord(outboxID: removal.outboxID, before: event, after: nil, sendUpdates: sendUpdates, madeException: madeException, removal: removal)
+    }
+
+    /// "This and following": ends `series` before one of its days (`day`, its start in the rule) with `recurrence` as its
+    /// lines (`Recurrence.split`), and starts `following` on that day as a new series; nil only ends the series. The
+    /// series' changed occurrences from that day on go with the days it no longer has. Both changes wait for the undo
+    /// window together. Undo the records last first: that takes back the new series, then the end of the old one.
+    public func split(
+        _ series: CalendarEvent, at day: EventTime, keeping recurrence: [String], following: CalendarEvent?, sendUpdates: SendUpdates,
+        undoWindow: TimeInterval
+    ) async throws -> [ChangeRecord] {
+        var ended = series
+        ended.recurrence = recurrence
+        let result = try await store.splitLocalSeries(
+            ended, previous: series, at: day, following: following, sendUpdates: sendUpdates,
+            addConference: following.map(Self.asksForConference) ?? false,
+            notBefore: undoWindow > 0 ? Date().addingTimeInterval(undoWindow) : .distantPast, window: window, calendar: calendar
+        )
+        changed()
+        var end = ChangeRecord(outboxID: result.outboxID, before: series, after: ended, sendUpdates: sendUpdates)
+        end.removal = LocalRemoval(exceptions: result.exceptions)
+        end.splitDay = day
+        guard let following, let insertID = result.insertOutboxID else { return [end] }
+        var start = ChangeRecord(outboxID: insertID, before: nil, after: following, sendUpdates: sendUpdates)
+        start.splitDay = day
+        return [end, start]
+    }
+
+    /// The series that takes over from one day of `series` ("this and following"): the same event under a new ID, new to
+    /// the provider (no UID, link or version of its own yet).
+    public static func followingSeries(of series: CalendarEvent, id: String = newEventID()) -> CalendarEvent {
+        var copy = series
+        copy.id = id
+        copy.iCalUID = nil
+        copy.status = .confirmed
+        copy.recurringEventID = nil
+        copy.originalStart = nil
+        copy.htmlLink = nil
+        copy.etag = nil
+        copy.updated = nil
+        copy.sequence = 0
+        return copy
+    }
+
+    /// Whether a new series asks the provider for a join link of its own: vimail keeps a link, not the conference behind
+    /// it, so a link the provider made cannot be copied. One written in the place or the notes goes along with them.
+    static func asksForConference(_ event: CalendarEvent) -> Bool {
+        guard let link = event.conferenceURL else { return false }
+        return !(event.location ?? "").contains(link) && !(event.details ?? "").contains(link)
     }
 
     private func isNewException(_ event: CalendarEvent) async throws -> Bool {

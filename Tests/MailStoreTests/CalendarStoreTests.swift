@@ -371,6 +371,145 @@ struct CalendarOutboxTests {
         #expect(try await store.event(calendarID: primary.id, id: "s1")?.selfResponse == .accepted)
     }
 
+    /// The lines of a series cut at `cut` ("this and following").
+    private func split(_ series: CalendarEvent, at cut: EventTime) -> (before: [String], after: [String])? {
+        guard case .split(let before, let after)? = Recurrence.split(recurrence: series.recurrence, seriesStart: series.start, at: cut, calendar: la) else {
+            return nil
+        }
+        return (before, after)
+    }
+
+    @Test func thisAndFollowingCutsTheSeriesAndUndoPutsItBack() async throws {
+        let store = try await store()
+        let zone = "America/Los_Angeles"
+        let standup = series("s1", start: at(5, 9, 30))
+        let early = occurrence(of: standup, day: 7, hour: 11)
+        let late = occurrence(of: standup, day: 14, hour: 11)
+        var skipped = occurrence(of: standup, day: 16, hour: 9, minute: 30)
+        skipped.status = .cancelled
+        try await store.applyEvents([standup, early, late, skipped], calendarID: primary.id, window: window, calendar: la)
+
+        // From Monday Oct 12 on, the standup is at 10:00.
+        let cut = EventTime.timed(at(12, 9, 30), timeZone: zone)
+        let lines = try #require(split(standup, at: cut))
+        var ended = standup
+        ended.recurrence = lines.before
+        var following = standup
+        following.id = "s2"
+        following.iCalUID = nil
+        following.etag = nil
+        following.start = .timed(at(12, 10), timeZone: zone)
+        following.end = .timed(at(12, 10, 15), timeZone: zone)
+        following.recurrence = lines.after
+        let result = try await store.splitLocalSeries(
+            ended, previous: standup, at: cut, following: following, sendUpdates: .all, notBefore: Date().addingTimeInterval(60), window: window, calendar: la
+        )
+        #expect(Set(result.exceptions.map(\.id)) == [late.id, skipped.id])
+
+        func day(_ day: Int) async throws -> [AgendaItem] { try await store.agenda(from: at(day, 0), to: at(day + 1, 0), calendar: la) }
+        // Before the cut: the old series, with its moved Wednesday.
+        #expect(try await day(7).map(\.start) == [early.start])
+        #expect(try await day(11).map(\.start) == [.timed(at(11, 9, 30), timeZone: zone)])
+        #expect(try await day(11).map(\.event.id) == ["s1"])
+        // From the cut on: the new series every day at 10:00. The old series' changed days went with the days it lost.
+        for date in [12, 14, 16, 20] {
+            let items = try await day(date)
+            #expect(items.map(\.event.id) == ["s2"], "Oct \(date)")
+            #expect(items.first?.start == .timed(at(date, 10), timeZone: zone), "Oct \(date)")
+        }
+        // The end of the old series leaves first, then the new one.
+        let queued = try await store.calendarOutboxItems()
+        #expect(queued.map(\.id) == [result.outboxID, result.insertOutboxID])
+        guard case .update(let sent, let previous, .all)? = queued.first?.operation, case .insert(let created, .all, false)? = queued.last?.operation else {
+            Issue.record("Expected the end of the series and the new series, got \(queued.map(\.operation))")
+            return
+        }
+        #expect(sent.recurrence == lines.before && previous == standup)
+        #expect(created == following)
+
+        // Undo, last first, before anything left: the new series goes, the old one and its changed days come back.
+        #expect(try await store.revertEventChange(outboxID: result.insertOutboxID, current: following, restore: nil, sendUpdates: .all, window: window, calendar: la))
+        #expect(try await store.revertEventChange(
+            outboxID: result.outboxID, current: ended, restore: standup, sendUpdates: .all, removal: LocalRemoval(exceptions: result.exceptions),
+            window: window, calendar: la
+        ))
+        #expect(try await store.calendarOutboxCount() == 0)
+        #expect(try await store.event(calendarID: primary.id, id: "s2") == nil)
+        #expect(try await day(12).map(\.start) == [.timed(at(12, 9, 30), timeZone: zone)])
+        #expect(try await day(14).map(\.start) == [late.start])
+        #expect(try await day(16).isEmpty)
+        #expect(try await day(20).map(\.event.id) == ["s1"])
+    }
+
+    @Test func undoOfACutThatLeftAlsoQueuesTheChangedDaysBack() async throws {
+        let store = try await store()
+        let standup = series("s1", start: at(5, 9, 30))
+        let late = occurrence(of: standup, day: 14, hour: 11)
+        var skipped = occurrence(of: standup, day: 16, hour: 9, minute: 30)
+        skipped.status = .cancelled
+        try await store.applyEvents([standup, late, skipped], calendarID: primary.id, window: window, calendar: la)
+        let cut = EventTime.timed(at(12, 9, 30), timeZone: "America/Los_Angeles")
+        var ended = standup
+        ended.recurrence = try #require(split(standup, at: cut)).before
+
+        // ⌘⇧⌫ on Oct 12 with "this and following": the series just ends.
+        let result = try await store.splitLocalSeries(ended, previous: standup, at: cut, following: nil, sendUpdates: .none, window: window, calendar: la)
+        #expect(result.insertOutboxID == nil)
+        #expect(try await store.agenda(from: at(12, 0), to: at(30, 0), calendar: la).isEmpty)
+        #expect(try await store.agenda(from: at(11, 0), to: at(12, 0), calendar: la).count == 1)
+        let claimed = try #require(try await store.claimNextCalendarOperation())
+        #expect(claimed.id == result.outboxID)
+        try await store.completeCalendarOperation(claimed.id)
+
+        #expect(try await store.revertEventChange(
+            outboxID: result.outboxID, current: ended, restore: standup, sendUpdates: .none, removal: LocalRemoval(exceptions: result.exceptions),
+            window: window, calendar: la
+        ) == false)
+        // The rule goes back first; then the changed days, which the provider may have dropped with the days the series lost.
+        let queued = try await store.calendarOutboxItems().map(\.operation)
+        guard queued.count == 3, case .update(let rule, let from, _) = queued[0] else {
+            Issue.record("Expected the rule and two changed days, got \(queued)")
+            return
+        }
+        #expect(rule == standup && from == ended)
+        let moved = queued.dropFirst().compactMap { operation -> (CalendarEvent, CalendarEvent)? in
+            if case .update(let event, let previous, _) = operation { return (event, previous) }
+            return nil
+        }
+        #expect(moved.count == 1)
+        #expect(moved.first?.0.id == late.id && moved.first?.0.start == late.start && moved.first?.0.etag == nil)
+        #expect(moved.first?.1.status == .cancelled && moved.first?.1.start == late.originalStart)
+        #expect(queued.contains { operation in
+            if case .delete(let event, _) = operation { return event.id == skipped.id }
+            return false
+        })
+        // On the Mac they are back at once.
+        #expect(try await store.agenda(from: at(14, 0), to: at(15, 0), calendar: la).map(\.start) == [late.start])
+        #expect(try await store.agenda(from: at(16, 0), to: at(17, 0), calendar: la).isEmpty)
+        #expect(try await store.agenda(from: at(20, 0), to: at(21, 0), calendar: la).count == 1)
+    }
+
+    @Test func cuttingAnAllDaySeriesTakesItsChangedDaysFromThatDate() async throws {
+        let store = try await store()
+        func date(_ day: Int) -> DayDate { DayDate(year: 2026, month: 10, day: day) }
+        let visit = CalendarEvent(
+            id: "v1", calendarID: primary.id, summary: "Site visit", start: .allDay(date(5)), end: .allDay(date(6)), recurrence: ["RRULE:FREQ=WEEKLY"]
+        )
+        func renamed(_ day: Int) -> CalendarEvent {
+            var copy = visit.instance(originalStart: .allDay(date(day)), start: .allDay(date(day)), end: .allDay(date(day + 1)))
+            copy.summary = "Site visit (moved)"
+            return copy
+        }
+        try await store.applyEvents([visit, renamed(12), renamed(19), renamed(26)], calendarID: primary.id, window: window, calendar: la)
+        var ended = visit
+        ended.recurrence = try #require(split(visit, at: .allDay(date(19)))).before
+        #expect(ended.recurrence == ["RRULE:FREQ=WEEKLY;UNTIL=20261018"])
+        let result = try await store.splitLocalSeries(ended, previous: visit, at: .allDay(date(19)), following: nil, sendUpdates: .none, window: window, calendar: la)
+        #expect(Set(result.exceptions.map(\.id)) == [renamed(19).id, renamed(26).id])
+        #expect(try await store.agenda(from: at(12, 0), to: at(13, 0), calendar: la).map(\.event.summary) == ["Site visit (moved)"])
+        #expect(try await store.agenda(from: at(19, 0), to: at(30, 0), calendar: la).isEmpty)
+    }
+
     @Test func undoOnAnOccurrenceOfASeriesOnlyGoogleExpandsKeepsTheOccurrence() async throws {
         let store = try await store()
         var standup = series("s1", start: at(5, 9, 30), rule: "RRULE:FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1", response: .accepted)

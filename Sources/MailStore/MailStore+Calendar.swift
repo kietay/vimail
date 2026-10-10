@@ -60,14 +60,30 @@ public struct SavedAnswer: Hashable, Codable, Sendable {
     }
 }
 
-/// What removing an event did locally, so an undo can put it all back.
+/// What removing an event, or ending a series early, did locally, so an undo can put it all back.
 public struct LocalRemoval: Sendable {
     /// The queued removal. Nil when the event had not reached the provider yet, so nothing is sent.
     public var outboxID: Int64?
-    /// The changed occurrences a removed series took with it.
+    /// The changed occurrences a removed or shortened series took with it.
     public var exceptions: [CalendarEvent] = []
     /// Operations dropped because the event's create had not left yet; they go back on undo.
     public var dropped: [CalendarOutboxItem] = []
+
+    public init(outboxID: Int64? = nil, exceptions: [CalendarEvent] = [], dropped: [CalendarOutboxItem] = []) {
+        self.outboxID = outboxID
+        self.exceptions = exceptions
+        self.dropped = dropped
+    }
+}
+
+/// What "this and following" did locally, so an undo can put it all back.
+public struct LocalSplit: Sendable {
+    /// The queued change that ends the series before the day.
+    public var outboxID: Int64
+    /// The queued create of the series that takes over from the day; nil when the series only ends.
+    public var insertOutboxID: Int64?
+    /// The series' changed occurrences from the day on, which went with the days it no longer has.
+    public var exceptions: [CalendarEvent]
 }
 
 /// A message whose invitation file has not been read yet.
@@ -445,11 +461,42 @@ extension MailStore {
         }
     }
 
+    /// "This and following": `ended` is the series with rules that stop before `day` (that day's start in the rule), and
+    /// `following` the new series that takes over from that day (nil only ends the series). The series' changed
+    /// occurrences from that day on go with the days it no longer has. Queues the change to the series, then the create.
+    public func splitLocalSeries(
+        _ ended: CalendarEvent, previous: CalendarEvent, at day: EventTime, following: CalendarEvent?, sendUpdates: SendUpdates,
+        addConference: Bool = false, notBefore: Date = .distantPast, window: CalendarWindow, calendar: Calendar = .current
+    ) async throws -> LocalSplit {
+        try await write { db, change in
+            let exceptions = try db.query(
+                "SELECT payload FROM events WHERE calendar_id = ? AND recurring_event_id = ?", [ended.calendarID, ended.id]
+            ) { row in try Self.decoder.decode(CalendarEvent.self, from: Data(row.string(0).utf8)) }
+                .filter { Self.isOnOrAfter($0.originalStart ?? $0.start, day, calendar: calendar) }
+            for exception in exceptions {
+                try db.run("DELETE FROM events WHERE calendar_id = ? AND id = ?", [exception.calendarID, exception.id])
+                try db.run("DELETE FROM occurrences WHERE calendar_id = ? AND event_id = ?", [exception.calendarID, exception.id])
+            }
+            try Self.storeLocally(ended, window: window, db, calendar: calendar)
+            let outboxID = try Self.enqueueCalendar(.update(event: ended, previous: previous, sendUpdates: sendUpdates), notBefore: notBefore, db)
+            var insertOutboxID: Int64?
+            if let following {
+                try Self.storeLocally(following, window: window, db, calendar: calendar)
+                insertOutboxID = try Self.enqueueCalendar(
+                    .insert(event: following, sendUpdates: sendUpdates, addConference: addConference), notBefore: notBefore, db
+                )
+            }
+            change.calendar = true
+            return LocalSplit(outboxID: outboxID, insertOutboxID: insertOutboxID, exceptions: exceptions)
+        }
+    }
+
     /// Undoes a create, edit or removal. A queued operation is dropped; one that already left gets its inverse.
     /// `restore` is the event as it was before (nil after a create). `dropException`: `restore` is an occurrence
     /// that was not changed before, so a change that never left leaves no exception behind. `removal` is what a
     /// removal did locally: a series' changed occurrences come back, and a create it dropped is queued again in its old place.
-    /// Returns true when nothing had reached the provider.
+    /// After a series ended early ("this and following"), its changed occurrences come back too, on the provider as well
+    /// when the change had left. Returns true when nothing had reached the provider.
     @discardableResult
     public func revertEventChange(
         outboxID: Int64?, current: CalendarEvent?, restore: CalendarEvent?, sendUpdates: SendUpdates, dropException: Bool = false,
@@ -492,6 +539,10 @@ extension MailStore {
                     _ = try Self.enqueueCalendar(.insert(event: restore, sendUpdates: sendUpdates, addConference: false), db)
                 case (let current?, let restore?):
                     _ = try Self.enqueueCalendar(.update(event: restore, previous: current, sendUpdates: sendUpdates), db)
+                    // A series that ended early took its changed days from then on with it: they come back by changing them again.
+                    for exception in removal?.exceptions ?? [] {
+                        try Self.enqueueRestore(exception, of: restore, sendUpdates: sendUpdates, db)
+                    }
                 case (nil, nil):
                     break
                 }
@@ -775,6 +826,27 @@ extension MailStore {
             end = original
         }
         try writeOccurrence(calendarID: event.calendarID, eventID: seriesID, seriesID: seriesID, key: occurrenceKey(original), start: original, end: end, db, calendar: calendar)
+    }
+
+    /// Whether an occurrence's start in its rule is on or after `day` (all-day dates by date, the rest by moment).
+    static func isOnOrAfter(_ time: EventTime, _ day: EventTime, calendar: Calendar) -> Bool {
+        if case .allDay(let date) = time, case .allDay(let other) = day { return date >= other }
+        return time.instant(in: calendar) >= day.instant(in: calendar)
+    }
+
+    /// Queues what puts one changed day of `series` back on the provider: a removed day is removed again, a changed one
+    /// is changed again from the plain day (the provider may have dropped it with the days the series lost).
+    static func enqueueRestore(_ exception: CalendarEvent, of series: CalendarEvent, sendUpdates: SendUpdates, _ db: SQLiteDatabase) throws {
+        var restored = exception
+        restored.etag = nil
+        guard exception.status != .cancelled else {
+            _ = try enqueueCalendar(.delete(event: restored, sendUpdates: sendUpdates), db)
+            return
+        }
+        let original = exception.originalStart ?? exception.start
+        var plain = series.instance(originalStart: original, start: original, end: original)
+        plain.status = .cancelled
+        _ = try enqueueCalendar(.update(event: restored, previous: plain, sendUpdates: sendUpdates), db)
     }
 
     /// Removes an event; for a series also its changed occurrences.

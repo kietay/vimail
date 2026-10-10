@@ -161,7 +161,9 @@ public actor DummyCalendarProvider: CalendarProvider {
         updated.sequence = stored.sequence + 1
         updated.iCalUID = stored.iCalUID
         if updated.recurringEventID != nil { updated.recurrence = [] }
-        return store(updated)
+        let result = store(updated)
+        if result.isSeries, result.recurrence != stored.recurrence { cancelExceptions(outside: result) }
+        return result
     }
 
     public func delete(calendarID: String, eventID: String, sendUpdates: SendUpdates) async throws {
@@ -308,6 +310,23 @@ public actor DummyCalendarProvider: CalendarProvider {
         let moment = original.instant()
         return expandedInstances(calendarID: calendarID, seriesID: seriesID, from: moment.addingTimeInterval(-2 * 86_400), to: moment.addingTimeInterval(2 * 86_400))
             .first { $0.id == eventID }
+    }
+
+    /// A series whose rules changed (one that now ends sooner, for example) loses the changed occurrences of days it no
+    /// longer has: they are cancelled, so a sync reports them gone.
+    private func cancelExceptions(outside master: CalendarEvent) {
+        for (_, stored) in state!.events where stored.event.calendarID == master.calendarID && stored.event.recurringEventID == master.id
+            && stored.event.status != .cancelled {
+            guard let original = stored.event.originalStart else { continue }
+            let moment = original.instant()
+            guard let days = Recurrence.occurrences(
+                start: master.start, end: master.end, recurrence: master.recurrence,
+                from: moment.addingTimeInterval(-86_400), to: moment.addingTimeInterval(86_400), calendar: .current
+            ), !days.contains(where: { ($0.originalStart ?? $0.start).occurrenceKey == original.occurrenceKey }) else { continue }
+            var cancelled = stored.event
+            cancelled.status = .cancelled
+            store(cancelled)
+        }
     }
 
     private func expandedInstances(calendarID: String, seriesID: String, from: Date, to: Date) -> [CalendarEvent] {
