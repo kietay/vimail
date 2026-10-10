@@ -367,7 +367,7 @@ extension AppModel {
         let to = end.instant()
         let items = await agendaWithMail(from: from, to: to).filter { item in
             isYourTime(item) && !item.start.isAllDay && item.event.selfResponse != .declined && item.event.isBusy
-                && item.event.id != eventID && item.seriesID != eventID
+                && item.event.status != .cancelled && (eventID == nil || (item.event.id != eventID && item.seriesID != eventID))
         }
         guard !items.isEmpty else { return "Free: nothing else from \(Formatting.time(from)) to \(Formatting.time(to))" }
         return "Overlaps " + items.prefix(2).map { "\($0.event.summary) \(Formatting.time($0.start.instant()))–\(Formatting.time($0.end.instant()))" }.joined(separator: ", ")
