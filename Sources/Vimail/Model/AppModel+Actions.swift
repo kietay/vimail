@@ -233,6 +233,7 @@ extension AppModel {
             let services = services
             Task {
                 do {
+                    if let messageID = record.messageID { steppedMessageIDs.remove(messageID) }
                     try await services.actions.undo(record)
                     if let edit { await noteLabelEdit(.undone(edit), in: services) }
                     redoStack.append(record)
@@ -309,6 +310,12 @@ extension AppModel {
     func redo() {
         guard let record = redoStack.popLast() else {
             showToast("Nothing to redo.")
+            return
+        }
+        // One message of the conversation on screen: redone on that message only.
+        if let messageID = record.messageID, currentThread?.id == record.threadIDs.first, currentThread?.id == cursorID {
+            markMessageRead(messageID)
+            rerenderReader()
             return
         }
         perform(record.action, on: record.threadIDs)
@@ -550,7 +557,7 @@ extension AppModel {
             return
         }
         focus = .reader
-        if currentSummary?.isUnread == true { perform(.markRead, on: [id], recordUndo: false, silent: true) }
+        if currentSummary?.isUnread == true { Task { await markReadOnOpen(id) } }
     }
 
     // MARK: - Sync and data

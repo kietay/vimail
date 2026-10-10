@@ -10,7 +10,7 @@ import WebKit
 /// Tokens: single characters, vim notation (`<Esc> <CR> <Tab> <Space> <BS> <Up> <Down> <C-d> <D-k> <S-Space>`),
 /// `type:text` (types characters), `wait:ms`, `activate` (bring the window to the front), `hide` (hide the app),
 /// `snapshot:name` (saves the reader as `snapshots/name.png` in the data folder, and as `name.json`: which
-/// messages are collapsed, focused and on screen),
+/// messages are collapsed, focused and on screen, and the ticks of the rail),
 /// `click:menu` / `click:<action>` (clicks the reader's ⋯ button, or a reader button such as `click:unsubscribe`).
 /// Scripted runs log unsubscribe pages instead of opening the browser.
 @MainActor
@@ -84,6 +84,7 @@ enum DebugScript {
         subject: document.querySelector('h1.subject')?.textContent ?? null,
         header: document.querySelector('.message.multi') ? document.querySelector('header.thread .time').textContent : null,
         readToggle: document.querySelector('.menu [data-action="toggleRead"] .label')?.textContent ?? null,
+        rail: Array.from(document.querySelectorAll('.rail .tick')).map((tick) => tick.className.replace('tick', '').trim()),
         scrollY: Math.round(top), viewport: window.innerHeight, height: document.documentElement.scrollHeight,
         messages: Array.from(document.querySelectorAll('.message')).map((node) => {
           const box = node.getBoundingClientRect();

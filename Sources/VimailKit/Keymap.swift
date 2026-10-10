@@ -67,6 +67,8 @@ public enum KeyCommand: Hashable, Sendable {
     case down, up, top, bottom, halfPageDown, halfPageUp, pageDown, pageUp
     case focusList, focusReader, open, back, escape
     case nextMessage, previousMessage, expandAll
+    /// The focused message is read: on to the next new one in the conversation.
+    case readAndNext
     case nextThread, previousThread
     case readerPageDown, readerPageUp
     case visual, toggleSelection, selectAll, clearSelection
@@ -108,7 +110,7 @@ public enum Keymap {
         ("h", .focusList), ("<Left>", .focusList), ("l", .focusReader), ("<Right>", .focusReader),
         ("<CR>", .open), ("o", .open), ("q", .back), ("<Esc>", .escape),
         // Reader
-        ("n", .nextMessage), ("p", .previousMessage), ("O", .expandAll),
+        ("n", .nextMessage), ("p", .previousMessage), ("O", .expandAll), ("<Tab>", .readAndNext),
         ("J", .nextThread), ("K", .previousThread),
         ("<Space>", .readerPageDown), ("<S-Space>", .readerPageUp),
         ("ga", .go(.archive)),

@@ -315,6 +315,9 @@ final class AppModel {
     /// Messages that were unread when the conversation on screen was opened. They stay expanded and
     /// marked new while it stays open, so marking it read does not fold away what you are reading.
     @ObservationIgnored private var newMessageIDs = Set<String>()
+    /// Messages of the conversation on screen that Tab marked read: no longer new, whatever a render
+    /// that started before the change still says.
+    @ObservationIgnored var steppedMessageIDs = Set<String>()
     @ObservationIgnored private var storeObserver: UUID?
     @ObservationIgnored var signInTask: Task<Void, Never>?
     /// Why each recently shown conversation carries its labels, for the reader's provenance.
@@ -355,6 +358,7 @@ final class AppModel {
         }
         reader.onAction = { [weak self] name in self?.readerAction(name) }
         reader.onAttachment = { [weak self] messageID, attachmentID in self?.openAttachment(messageID: messageID, attachmentID: attachmentID) }
+        reader.onMessageRead = { [weak self] messageID in self?.markMessageRead(messageID) }
         reader.onMailto = { [weak self] url in self?.composeMailto(url) }
         reader.onInlineImage = { [weak self] messageID, contentID in await self?.inlineImage(messageID: messageID, contentID: contentID) }
 
@@ -998,7 +1002,13 @@ final class AppModel {
     private func render(_ thread: MailThread) {
         let unread = thread.messages.filter(\.isUnread).map(\.id)
         // Marking read keeps what was new; a message that arrives while the conversation is open is new too.
-        if renderedThreadID == thread.id { newMessageIDs.formUnion(unread) } else { newMessageIDs = Set(unread) }
+        if renderedThreadID == thread.id {
+            newMessageIDs.formUnion(unread)
+        } else {
+            newMessageIDs = Set(unread)
+            steppedMessageIDs = []
+        }
+        newMessageIDs.subtract(steppedMessageIDs)
         renderedThreadID = thread.id
         reader.render(readerPayload(for: thread))
     }
@@ -1192,7 +1202,44 @@ final class AppModel {
         markReadTask = Task {
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
             guard !Task.isCancelled, cursorID == id else { return }
-            perform(.markRead, on: [id], recordUndo: false, silent: true)
+            await markReadOnOpen(id)
+        }
+    }
+
+    /// Opening a conversation marks it read. One with several new messages stays as it is: Tab marks
+    /// them read one at a time, so the ones you did not get to are still new the next time.
+    func markReadOnOpen(_ id: String) async {
+        var thread = currentThread?.id == id ? currentThread : threadCache[id]
+        if thread == nil { thread = try? await services.store.thread(id: id) }
+        guard cursorID == id, (thread?.messages.filter(\.isUnread).count ?? 0) < 2 else { return }
+        perform(.markRead, on: [id], recordUndo: false, silent: true)
+    }
+
+    /// Tab: the focused message is read. The reader has already moved on to the next new one.
+    func markMessageRead(_ messageID: String, recordUndo: Bool = true) {
+        guard var thread = currentThread, renderedThreadID == thread.id,
+              let index = thread.messages.firstIndex(where: { $0.id == messageID }) else { return }
+        steppedMessageIDs.insert(messageID)
+        newMessageIDs.remove(messageID)
+        guard thread.messages[index].isUnread else { return }
+        thread.messages[index].labelIDs.remove(SystemLabel.unread)
+        currentThread = thread
+        threadCache[thread.id] = thread
+        // The last new message: the conversation is read.
+        if !thread.isUnread {
+            if currentQuery.read == .unread { stickyIDs.insert(thread.id) }
+            applyOptimistically(.markRead, to: [thread.id])
+        }
+        let services = services
+        let threadID = thread.id
+        Task {
+            do {
+                guard let record = try await services.actions.markRead(message: messageID, inThread: threadID) else { return }
+                if recordUndo { pushUndo(.action(record, nil)) }
+            } catch {
+                showToast("Could not update mail: \(error.localizedDescription)", isError: true)
+                await reloadList()
+            }
         }
     }
 

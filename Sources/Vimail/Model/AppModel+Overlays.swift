@@ -475,6 +475,7 @@ extension AppModel {
             ("j / k", "Next / previous conversation"), ("gg / G", "First / last"), ("^d / ^u", "Half page down / up"),
             ("5j", "Counts work with motions"), ("h / l", "Focus list / reader"), ("↵ / o", "Open (edit drafts)"),
             ("n / p", "Next / previous message in thread"), ("J / K", "Next / previous conversation from the reader"),
+            ("tab", "Mark the message read, go to the next new one"),
             ("space", "Page down the reader"), ("O", "Expand all messages"),
         ]),
         ("Act", [

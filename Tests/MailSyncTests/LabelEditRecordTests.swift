@@ -56,4 +56,23 @@ struct LabelEditRecordTests {
         let record = try #require(try await actions.perform(.addLabel(local.id), threads: ["t1", "t2"]))
         #expect(record.messageIDs(changing: local.id, added: true).sorted() == ["m1", "m2", "m3"])
     }
+
+    @Test func oneMessageIsMarkedReadAndTheRestStayNew() async throws {
+        let store = try await store()
+        try await store.upsertMessages([
+            message("u1", thread: "t3", labels: ["INBOX", "UNREAD"], minutesAgo: 9),
+            message("u2", thread: "t3", labels: ["INBOX", "UNREAD"], minutesAgo: 8),
+        ])
+        let actions = MailActions(store: store)
+        let record = try #require(try await actions.markRead(message: "u1", inThread: "t3"))
+        #expect(record.messageID == "u1")
+        var thread = try #require(try await store.thread(id: "t3"))
+        #expect(thread.messages.map(\.isUnread) == [false, true])
+        // Already read: nothing to do, nothing to undo.
+        #expect(try await actions.markRead(message: "u1", inThread: "t3") == nil)
+
+        try await actions.undo(record)
+        thread = try #require(try await store.thread(id: "t3"))
+        #expect(thread.messages.map(\.isUnread) == [true, true])
+    }
 }

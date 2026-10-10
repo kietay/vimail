@@ -675,6 +675,7 @@ extension AppModel {
         case .nextMessage: reader.focusMessage(count)
         case .previousMessage: reader.focusMessage(-count)
         case .expandAll: reader.expandAll()
+        case .readAndNext: reader.readAndNext()
         case .nextThread: moveCursor(by: count)
         case .previousThread: moveCursor(by: -count)
         case .readerPageDown: reader.scrollPage(0.85)
@@ -762,7 +763,7 @@ extension AppModel {
         case .previousWeek: moveAgendaStart(days: -7 * count)
         case .nextWeek: moveAgendaStart(days: 7 * count)
         case .archive, .spam, .toggleStar, .markUnread, .markRead, .move, .snooze, .quickSnooze, .forward, .unsubscribe,
-             .visual, .toggleSelection, .selectAll, .clearSelection, .openAttachments, .expandAll, .nextMessage, .previousMessage,
+             .visual, .toggleSelection, .selectAll, .clearSelection, .openAttachments, .expandAll, .nextMessage, .previousMessage, .readAndNext,
              .readerPageDown, .readerPageUp:
             if command == .readerPageDown { reader.scrollPage(0.85) } else if command == .readerPageUp { reader.scrollPage(-0.85) }
         default:
