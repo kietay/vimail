@@ -146,6 +146,20 @@ struct DialogShell<Content: View>: View {
     }
 }
 
+/// A scroll view as tall as its content, up to `maxHeight`: short lists leave no empty space.
+struct FittingScroll<Content: View>: View {
+    var maxHeight: CGFloat
+    @ViewBuilder let content: Content
+    @State private var height: CGFloat = 0
+
+    var body: some View {
+        ScrollView {
+            content.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        }
+        .frame(height: min(max(height, 1), maxHeight))
+    }
+}
+
 /// The dialog close "x" with a comfortable 28pt target.
 struct CloseButton: View {
     @Environment(\.theme) private var theme

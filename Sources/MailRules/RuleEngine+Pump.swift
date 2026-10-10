@@ -188,7 +188,7 @@ extension RuleEngine {
         var passing: [String: Set<String>] = [:]
         var conditions: [String: [RulePlanner.LabelCondition]] = [:]
         for (key, version) in versions {
-            // The editor checks WHEN before saving; one that no longer parses passes nothing.
+            // The store refuses a WHEN that does not parse; one that no longer parses passes nothing.
             guard let filter = try? RuleFilter.parse(version.rule.when) else { continue }
             passing[key] = Set(try await store.ruleMatches(filter, scope: version.rule.scope.mailboxes, labelTerms: false, among: version.ids))
             conditions[key] = filter.labelTerms.map { RulePlanner.LabelCondition(labelIDs: $0.labelIDs(in: labels), negated: $0.negated) }

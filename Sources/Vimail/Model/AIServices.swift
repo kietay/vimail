@@ -98,9 +98,10 @@ final class AIServices {
     }
 
     /// Drafts rules from a sentence with the account's judge, under its consent and budget. nil while
-    /// the offline simulator judges, which sends nothing: your sentence is the ASK as written.
+    /// Claude can't be used for the account (`aiPause`), and while the offline simulator judges, which
+    /// sends nothing: your sentence is the ASK as written.
     func drafter(forAccount account: String) -> RuleDrafter? {
-        if usesSimulator { return nil }
+        guard !usesSimulator, aiPause(forAccount: account) == nil else { return nil }
         return claudeJudge(forAccount: account).map(RuleDrafter.init)
     }
 

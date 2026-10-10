@@ -211,6 +211,42 @@ struct RulePreviewTests {
         #expect(try await !harness.hasLabel("c", "receipts"))
     }
 
+    /// `T`: the email is the unsaved rule's ✔ seed, preview marks join it, `⌃r` tests with them, and
+    /// saving keeps all of it, so the run asks Claude about nothing the preview decided.
+    @Test func marksOnAnUnsavedDraftCarryIntoTheSavedRule() async throws {
+        let judge = FakeJudge(matching: ["r0": ["receipt"], "r1": ["receipt"]])
+        let harness = try await Harness(judge: judge)
+        try await harness.store.upsertMessages([
+            mail("seed", from: stripe, subject: "Your receipt from Figma", minutesAgo: 1), mail("sale", from: shop, subject: "Receipt-worthy sale", minutesAgo: 2),
+            mail("apple", from: apple, subject: "Your receipt from Apple", minutesAgo: 3), mail("note", from: ana, subject: "Lunch", minutesAgo: 4),
+        ])
+        var draft = try await draft(harness)
+        try await harness.store.setExample(ruleID: draft.id, messageID: "seed", matches: true, origin: .seed, draft: true)
+        try await harness.store.setExample(ruleID: draft.id, messageID: "sale", matches: false, origin: .preview, draft: true)
+        let marked = latest(await collect(await harness.engine.preview(draft)).rows)
+        #expect(marked.prefix(2).map(\.messageID).sorted() == ["sale", "seed"] && marked.prefix(2).allSatisfy(\.markedByYou))
+        #expect(marked.first { $0.messageID == "sale" }?.outcome == .noMatch)
+
+        // ⌃r snapshots the marks into the draft; marked rows are never sent.
+        draft.promptExampleIDs = ["seed", "sale"]
+        let tested = latest(await collect(await harness.engine.preview(draft, test: .atIssue(limit: 12))).rows)
+        #expect(Set(judge.calls.map(\.messageID)) == ["apple", "note"])
+        #expect(Set(judge.calls.flatMap(\.examples).map(\.verdict)) == [.match, .noMatch])
+        #expect(tested.first { $0.messageID == "apple" }?.outcome == .match && tested.allSatisfy { !$0.judgedBeforeNewestMarks })
+
+        let saved = try await harness.store.createRule(draft)
+        try await harness.engine.rulesChanged(.created(ruleID: saved.id))
+        #expect(saved.id == draft.id && saved.rule.promptExampleIDs == ["seed", "sale"])
+        let estimate = try await harness.engine.estimate(RunPlan(ruleID: saved.id, window: .allCached))
+        #expect(estimate.needClaude == 0 && estimate.counts?.decidedByYou == 2 && estimate.counts?.cachedVerdicts == 2)
+        _ = try await harness.engine.startRun(RunPlan(ruleID: saved.id, window: .allCached))
+        await harness.engine.drain()
+        #expect(judge.calls.count == 2)
+        #expect(try await harness.hasLabel("seed", "receipts"))
+        #expect(try await harness.hasLabel("apple", "receipts"))
+        #expect(try await !harness.hasLabel("sale", "receipts"))
+    }
+
     @Test func savedRulesUseTheirKeyAndTestedExamples() async throws {
         let judge = FakeJudge()
         let harness = try await Harness(rules: [receiptsRule], judge: judge)

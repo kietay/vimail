@@ -18,7 +18,15 @@ extension KeyStroke {
         return false
     }
 
+    /// The character itself, with control held: tells ⌃R (shift) from ⌃r.
+    func isControlExactly(_ character: Character) -> Bool {
+        if case .char(let value) = key { return control && !command && value == character }
+        return false
+    }
+
     var isEscape: Bool { if case .escape = key { true } else { false } }
+    var isTab: Bool { if case .tab = key { true } else { false } }
+    var isSpace: Bool { if case .space = key { true } else { false } }
     var isEnter: Bool { if case .enter = key { true } else { false } }
     var isDown: Bool { if case .down = key { true } else { false } }
     var isUp: Bool { if case .up = key { true } else { false } }
@@ -87,6 +95,15 @@ extension AppModel {
             return handleExplainKey(stroke)
         case .aiConsent:
             return handleConsentKey(stroke, context: context)
+        case .rules:
+            guard let manager = rulesManager else { overlay = nil; return true }
+            return handleRulesManagerKey(stroke, manager: manager)
+        case .ruleEditor:
+            guard let editor = ruleEditor else { overlay = nil; return true }
+            return handleRuleEditorKey(stroke, editor: editor, context: context)
+        case .backfill:
+            guard let sheet = backfill else { overlay = nil; return true }
+            return handleBackfillKey(stroke, sheet: sheet)
         case .help, .settings, .views:
             if stroke.isEscape || (!context.textFocused && (stroke.isChar("q") || (overlay == .help && stroke.isChar("?")))) {
                 overlay = nil
@@ -103,7 +120,7 @@ extension AppModel {
         return handleNormalKey(stroke)
     }
 
-    /// "Why these labels?": j/k move, x a s d u act on the highlighted line.
+    /// "Why these labels?": j/k move, x a s e d u act on the highlighted line.
     private func handleExplainKey(_ stroke: KeyStroke) -> Bool {
         if stroke.isEscape || stroke.isChar("q") || stroke.isChar("?") {
             overlay = nil
@@ -119,8 +136,174 @@ extension AppModel {
             cycleSenderRule()
         } else if stroke.isChar("d") {
             disableExplainedRule()
+        } else if stroke.isChar("e") {
+            editExplainedRule()
         } else if stroke.isChar("u") {
             undoExplainedRun()
+        }
+        return !stroke.command
+    }
+
+    /// The rules manager: j/k move, ↵ edit, n new, x on/off, J/K reorder, B apply to existing mail,
+    /// dd delete, a Activity, r retry failed, p pause all; in Activity ↵ confirm or continue, u undo,
+    /// c cancel. A question takes y, n, ↵ or Esc.
+    private func handleRulesManagerKey(_ stroke: KeyStroke, manager: RulesManagerModel) -> Bool {
+        if let prompt = manager.prompt {
+            switch prompt {
+            case .delete(let ruleID, let name, let count):
+                // With no labels to remove, `n` is no, as in every other question.
+                if stroke.isChar("y") || (count == 0 && stroke.isEnter) {
+                    manager.delete(ruleID, name: name, removingLabels: true)
+                } else if stroke.isChar("n"), count > 0 {
+                    manager.delete(ruleID, name: name, removingLabels: false)
+                } else if stroke.isEscape || stroke.isChar("q") || stroke.isChar("n") {
+                    manager.prompt = nil
+                }
+            case .gap(let runID, _, let needsClaude):
+                if stroke.isEnter || stroke.isChar("y") {
+                    manager.fillGap(runID, needsClaude: needsClaude)
+                } else if stroke.isEscape || stroke.isChar("n") {
+                    manager.skipGap(runID)
+                }
+            case .undo(let runID, _):
+                if stroke.isEnter || stroke.isChar("y") { manager.undo(runID) } else if stroke.isEscape || stroke.isChar("n") { manager.prompt = nil }
+            }
+            return !stroke.command
+        }
+        let deleting = manager.pendingDelete
+        manager.pendingDelete = false
+        if stroke.isEscape || stroke.isChar("q") {
+            overlay = nil
+        } else if stroke.isChar("j") || stroke.isDown || stroke.isControl("n") {
+            manager.move(1)
+        } else if stroke.isChar("k") || stroke.isUp || stroke.isControl("p") {
+            manager.move(-1)
+        } else if stroke.isChar("a") || stroke.isTab {
+            manager.switchFocus()
+        } else if stroke.isChar("r") {
+            manager.retryFailed()
+        } else if stroke.isChar("p") {
+            setRulesPaused(!settings.ai.pauseAll)
+        } else if stroke.isChar("?") {
+            overlay = .help
+        } else if manager.focus == .activity {
+            if stroke.isEnter {
+                manager.confirmOrContinue()
+            } else if stroke.isChar("u") {
+                manager.askUndo()
+            } else if stroke.isChar("c") {
+                manager.cancelRun()
+            }
+        } else if stroke.isEnter {
+            manager.edit()
+        } else if stroke.isChar("n") {
+            newRule()
+        } else if stroke.isChar("x") {
+            manager.toggle()
+        } else if stroke.isChar("J") {
+            manager.reorder(1)
+        } else if stroke.isChar("K") {
+            manager.reorder(-1)
+        } else if stroke.isChar("B") {
+            manager.applyToExisting()
+        } else if stroke.isChar("d") {
+            if deleting { manager.askDelete() } else { manager.pendingDelete = true }
+        }
+        return !stroke.command
+    }
+
+    /// The rule editor. ⌘↵ saves, ⌃r and ⌃R test, Tab and ⇧Tab move between the fields and the
+    /// preview, Esc leaves a field and then the editor. In the preview (NORMAL): j/k, y ✔, n ✖,
+    /// u clear, s sender rule, o peek, + more, L list the matches.
+    private func handleRuleEditorKey(_ stroke: KeyStroke, editor: RuleEditorModel, context: KeyContext) -> Bool {
+        if stroke.command, stroke.isEnter {
+            editor.save()
+            return true
+        }
+        if stroke.isControlExactly("r") || stroke.isControlExactly("R") {
+            editor.test(stroke.isControlExactly("R") ? .all : .atIssue(limit: RuleEditorModel.atIssueLimit))
+            return true
+        }
+        if let prompt = editor.prompt {
+            switch prompt {
+            case .discard:
+                if stroke.isChar("y") { editor.close() } else if stroke.isChar("n") || stroke.isEscape { editor.prompt = nil }
+            case .saveUntested:
+                if stroke.isEnter { editor.save(asTested: true) } else if stroke.isEscape { editor.prompt = nil }
+            case .test(let test, _):
+                if stroke.isEnter || stroke.isChar("y") { editor.test(test, confirmed: true) } else if stroke.isEscape || stroke.isChar("n") { editor.prompt = nil }
+            }
+            return !stroke.command
+        }
+        if stroke.isTab {
+            editor.moveField(stroke.shift ? -1 : 1)
+            return true
+        }
+        if stroke.isEscape {
+            editor.escape()
+            return true
+        }
+        let field = editor.field
+        if field.isText {
+            guard context.textFocused else { return !stroke.command }
+            if field == .then {
+                if stroke.isDown || stroke.isControl("n") { editor.moveLabelSuggestion(1); return true }
+                if stroke.isUp || stroke.isControl("p") { editor.moveLabelSuggestion(-1); return true }
+                if stroke.isEnter {
+                    editor.pickLabelSuggestion()
+                    editor.field = .preview
+                    return true
+                }
+            } else if field != .ask, stroke.isEnter {
+                editor.moveField(1)
+                return true
+            }
+            return false
+        }
+        if field != .preview {
+            if stroke.isSpace || stroke.isEnter || stroke.isChar("x") {
+                editor.toggle(field)
+            } else if stroke.isChar("j") || stroke.isDown {
+                editor.moveField(1)
+            } else if stroke.isChar("k") || stroke.isUp {
+                editor.moveField(-1)
+            }
+            return !stroke.command
+        }
+        if stroke.isChar("j") || stroke.isDown || stroke.isControl("n") {
+            editor.moveHighlight(1)
+        } else if stroke.isChar("k") || stroke.isUp || stroke.isControl("p") {
+            editor.moveHighlight(-1)
+        } else if stroke.isChar("y") {
+            editor.mark(true)
+        } else if stroke.isChar("n") {
+            editor.mark(false)
+        } else if stroke.isChar("u") {
+            editor.clearMark()
+        } else if stroke.isChar("s") {
+            editor.cycleSender()
+        } else if stroke.isChar("o") || stroke.isEnter {
+            editor.togglePeek()
+        } else if stroke.isChar("+") {
+            editor.showMore()
+        } else if stroke.isChar("L") {
+            editor.listMatches()
+        } else if stroke.isChar("i") {
+            editor.field = .ask
+        }
+        return !stroke.command
+    }
+
+    /// "How far back": j/k choose, ↵ apply, Esc back.
+    private func handleBackfillKey(_ stroke: KeyStroke, sheet: BackfillModel) -> Bool {
+        if stroke.isEscape || stroke.isChar("q") {
+            sheet.back()
+        } else if stroke.isChar("j") || stroke.isDown || stroke.isControl("n") {
+            sheet.move(1)
+        } else if stroke.isChar("k") || stroke.isUp || stroke.isControl("p") {
+            sheet.move(-1)
+        } else if stroke.isEnter {
+            sheet.apply()
         }
         return !stroke.command
     }
@@ -329,7 +512,15 @@ extension AppModel {
         case .back:
             if inReader { focus = .list } else if isSearchOpen { closeSearch() } else { clearSelection() }
         case .escape:
-            if !selection.isEmpty || visualAnchorID != nil { clearSelection() } else if inReader { focus = .list } else if isSearchOpen || !searchText.isEmpty { closeSearch() }
+            if !selection.isEmpty || visualAnchorID != nil {
+                clearSelection()
+            } else if inReader {
+                focus = .list
+            } else if isSearchOpen || !searchText.isEmpty {
+                closeSearch()
+            } else if ruleMatches != nil {
+                leaveRuleMatches()
+            }
         case .nextMessage: reader.focusMessage(count)
         case .previousMessage: reader.focusMessage(-count)
         case .expandAll: reader.expandAll()
@@ -374,6 +565,8 @@ extension AppModel {
         case .openAttachments: openFirstAttachment()
         case .explainLabels: openExplain()
         case .runRules: runRulesOnSelection()
+        case .manageRules: manageRules()
+        case .ruleFromThread: newRuleFromThread()
         }
     }
 }

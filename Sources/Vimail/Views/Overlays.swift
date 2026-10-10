@@ -25,7 +25,13 @@ struct OverlayHost: View {
     }
 
     private func dismiss(_ overlay: Overlay) {
-        if case .viewEditor = overlay { model.overlay = .views } else { model.overlay = nil }
+        switch overlay {
+        case .viewEditor: model.overlay = .views
+        case .aiConsent: model.declineConsent()
+        case .ruleEditor: model.ruleEditor?.leaveByClick()
+        case .backfill: model.backfill?.back()
+        default: model.overlay = nil
+        }
     }
 
     @ViewBuilder
@@ -40,6 +46,12 @@ struct OverlayHost: View {
         case .confirm(let confirmation): ConfirmView(confirmation: confirmation)
         case .explain: ExplainView()
         case .aiConsent: ConsentView()
+        case .rules:
+            if let manager = model.rulesManager { RulesManagerView(manager: manager) }
+        case .ruleEditor:
+            if let editor = model.ruleEditor { RuleEditorView(editor: editor) }
+        case .backfill:
+            if let sheet = model.backfill { BackfillView(sheet: sheet) }
         }
     }
 }

@@ -106,6 +106,7 @@ Vim-first. `?` shows everything in the app. The essentials:
 | `gi gs gt gd ga gz g# g! gA` `gl` | Go to Inbox, Starred, Sent, Drafts, Archive, Snoozed, Trash, Spam, All mail, label… |
 | `H` `L` · `⌘⇧[` `⌘⇧]` · `gv` | Cycle Inbox + pinned views · manage views |
 | `/` · `:`/`⌘K` · `^l` | Search (Gmail syntax) · omnibox · refresh + sync |
+| `gr` · `T` | Rules manager · new rule from this conversation (see [Rules](#rules)) |
 | `g?` · `=` | Why these labels? (`x` wrong, `a` should match, `s` sender rule, `d` turn the rule off, `u` undo its run) · run rules on the selection now (`u` undoes) |
 
 **Compose:** you write Markdown. The pane on the right shows the exact HTML recipients get.
@@ -132,6 +133,43 @@ In read-filtered lists (Unread tab, unread views) it stays visible until you ref
 `is:unread|read|starred|list` (`is:list`: has an unsubscribe header) `has:attachment` `before:` `after:` `older_than:`
 `newer_than:` `"phrases"` `-exclude`.
 
+## Rules
+
+A rule labels mail as it arrives. **WHEN** is search syntax tested on each message (`from:@stripe.com
+-sale`); **ASK**, optional, is a sentence Claude decides ("Order confirmations and receipts for
+things I bought. Not store marketing."); **THEN** is the label it adds. Rules run in order on new mail. Mail
+already here gets a rule only when you choose to, after saving it or with `B`, at a price shown first.
+
+| Keys | Action |
+|---|---|
+| `gr` | Rules manager: `↵` edit, `n` new, `x` on/off, `J` `K` order, `B` apply to mail already here, `dd` delete, `r` retry failed, `p` pause all, `a` Activity (`↵` confirm or continue a run, `u` undo it, `c` cancel) |
+| `T` | New rule from this conversation: its newest received message is a ✔ example, THEN takes its label, Claude drafts the ASK. Also in the label picker: "Always label mail like this…" |
+| `:` `rule <sentence>` | Draft a rule from a sentence |
+| `g?` · `=` | Why these labels? · run rules on the selection now |
+| editor | `tab` `⇧tab` fields ↔ preview, `⌃r` test the rows at issue with Claude, `⌃R` test all, `⌘↵` save, `esc` leave the field, then the editor |
+| preview | `y` ✔, `n` ✖, `u` clear, `s` sender always/never, `o` read it, `+` 20 more, `L` every match in the list |
+
+The preview shows what the rule decides on your mail as you type: ✔ match, ✖ no match, ~ unsure (not
+applied), ≠ disagrees with your labels, ◐ judged before your newest marks, ! declined, ◌ not judged yet,
+● your mark. WHEN previews are free; Claude tests show their price and ask first above 5¢.
+
+**What goes to Claude**, only for Claude rules and only for accounts you allowed (Settings → Rules &
+Claude), under your own API key: one email per call, with its sender, subject, date, "me + N others", up to
+4,000 characters of body text (quotes, signatures, links and inline-hidden text removed), attachment names,
+and for replies the previous sender and 400 characters; plus the examples you marked, as sender name,
+domain and subject. Never your addresses, attachments or other mail. Filter rules send nothing.
+Drafting a rule (`T`, `:rule`) sends your sentence and the names of your labels, local ones included, and
+for `T` that email's sender, subject and first 400 characters.
+
+**Defaults:** Haiku 5.5 (Sonnet 5.5 and Opus 5.5 in Settings); $20 a month, $3 a day, previews $0.75 a day.
+Runs over stored mail leave live mail its reserve and stop at 1.5× their estimate. After saving, a Claude rule
+offers the last 14 days when that costs at most $1, else the newest 100 messages needing Claude, else new
+mail only; a filter rule offers all cached mail, free.
+
+**Labels:** a rule may add an existing Gmail label, which syncs to Gmail; a label a rule creates stays on
+this Mac. Removing a label a rule added stops it adding it there again and, unless the rule's EDITS say
+"removing = done", teaches it the message does not match. Any run can be undone from Activity (`gr` `a` `u`).
+
 ## Where state lives
 
 Everything is local:
@@ -154,7 +192,8 @@ Everything is local:
 ```
 
 `<account>` is `dummy` or `gmail-<email>`. Each account has its own cache, drafts and views.
-Drafts, snoozes, saved views and local labels never leave this Mac.
+Drafts, snoozes, saved views and local labels never leave this Mac, except that drafting a rule with
+Claude sends it your label names.
 Only mail actions (archive, read, star, labels, send) go to the provider, through the outbox.
 Mail goes to Claude only for accounts you allowed (Settings → Rules & Claude), and only for Claude rules;
 the key and the budgets are shared by every account.

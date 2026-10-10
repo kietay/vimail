@@ -90,6 +90,8 @@ struct AppCommands: Commands {
             Button("Sync Now") { model.syncNow() }.keyboardShortcut("r", modifiers: [.command, .shift])
             Button("Simulate Incoming Mail") { model.simulateIncomingMail() }
             Divider()
+            Button("Manage Rules…") { model.manageRules() }
+            Button("New Rule…") { model.newRule(returnsToManager: false) }
             Button(model.settings.ai.pauseAll ? "Resume Rules" : "Pause All Rules") { model.setRulesPaused(!model.settings.ai.pauseAll) }
         }
         CommandMenu("Message") {
@@ -108,6 +110,7 @@ struct AppCommands: Commands {
             Divider()
             Button("Why These Labels?") { model.openExplain() }
             Button("Run Rules") { model.runRulesOnSelection() }
+            Button("Create Rule from This…") { model.newRuleFromThread() }
         }
         CommandGroup(after: .sidebar) {
             Button("Toggle Sidebar") { model.session.sidebarCollapsed.toggle() }.keyboardShortcut("s", modifiers: [.command, .control])

@@ -190,6 +190,8 @@ struct ThreadListView: View {
         Button("Snooze…") { model.cursorID = thread.id; model.openPicker(.snooze) }
         Button("Quick Snooze") { model.quickSnooze(on: targets) }
         Divider()
+        Button("Create Rule from This…") { model.newRuleFromThread(thread.id) }
+        Divider()
         Button("Report Spam") { model.perform(.spam, on: targets) }
     }
 

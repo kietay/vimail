@@ -173,6 +173,25 @@ struct SpendGuardTests {
         #expect(await spend.snapshot().spendToday == 0)
     }
 
+    @Test func snapshotShowsWhatRunsMayUseAndWhatStaysForLiveMail() async throws {
+        // 9 October: 23 days left counting today. Live mail is projected at $0.50 a day.
+        let (spend, _) = makeGuard(SpendGuard.Budget(day: 4_000_000, month: 35_000_000, previewDay: 1_000_000), projection: 500_000)
+        try await self.spend(spend, .preview, 220_000)
+        try await self.spend(spend, .live, 300_000)
+        try await self.spend(spend, .run(1), 1_000_000)
+        let snapshot = await spend.snapshot()
+        #expect(snapshot.previewToday == 220_000)
+        // Today $2.48 is left, $1.00 of it kept for live mail; the month keeps $11.50 of its $33.48.
+        #expect(snapshot.liveReserveToday == 1_000_000)
+        #expect(snapshot.runRoomToday == 1_480_000)
+        #expect(snapshot.runRoomMonth == 21_980_000)
+
+        // A reserve larger than what is left today keeps all of it.
+        let (tight, _) = makeGuard(SpendGuard.Budget(day: 1_000_000, month: 35_000_000, previewDay: 250_000), projection: 600_000)
+        let figures = await tight.snapshot()
+        #expect(figures.liveReserveToday == 1_000_000 && figures.runRoomToday == 0 && figures.runRoomMonth == 35_000_000 - 600_000 * 23)
+    }
+
     @Test func snapshotReportsTheBudgets() async {
         let (spend, _) = makeGuard(.debug)
         let snapshot = await spend.snapshot()

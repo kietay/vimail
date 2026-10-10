@@ -137,6 +137,13 @@ extension AppModel {
 
         let paused = settings.ai.pauseAll
         items += [
+            OmniItem(id: "rules-manage", title: "Manage rules", group: "Rules", icon: .views, keywords: "filters claude activity runs", shortcut: "gr") {
+                self.manageRules()
+            },
+            OmniItem(id: "rules-new", title: "New rule", subtitle: "Or type “rule” and a sentence, like “rule receipts for things I buy”", group: "Rules",
+                     icon: .plus, keywords: "create filter claude") { self.newRule(returnsToManager: false) },
+            OmniItem(id: "rules-from-thread", title: "New rule from this conversation", group: "Rules", icon: .tag,
+                     keywords: "create filter always label like this claude", shortcut: "T", disabled: !hasCursor) { self.newRuleFromThread() },
             OmniItem(id: "rules-explain", title: "Why these labels?", group: "Rules", icon: .tag, keywords: "explain rules claude provenance", shortcut: "g?",
                      disabled: !hasCursor) { self.openExplain() },
             OmniItem(id: "rules-run", title: "Run rules on selected messages", group: "Rules", icon: .refresh, keywords: "apply rules filters claude now",
@@ -180,9 +187,22 @@ extension AppModel {
         return items
     }
 
-    /// Commands matching the query (grouped, best group first), then matching messages.
+    /// The sentence after "rule " in the omnibox, which drafts a rule instead of searching.
+    static func ruleSentence(in query: String) -> String? {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard trimmed.lowercased().hasPrefix("rule ") else { return nil }
+        let sentence = trimmed.dropFirst(5).trimmingCharacters(in: .whitespaces)
+        return sentence.isEmpty ? nil : sentence
+    }
+
+    /// Commands matching the query (grouped, best group first), then matching messages. "rule …"
+    /// is one item instead: drafting a rule from the sentence.
     var omniResults: [OmniItem] {
         let query = omniQuery.trimmingCharacters(in: .whitespaces)
+        if let sentence = Self.ruleSentence(in: query) {
+            return [OmniItem(id: "rule-draft", title: "Draft rule: \(sentence)", subtitle: "Claude drafts it when allowed; you review it before it runs",
+                             group: "Rules", icon: .plus) { self.draftRule(from: sentence) }]
+        }
         var results: [OmniItem]
         if query.isEmpty {
             results = omniCommands
@@ -323,6 +343,7 @@ extension AppModel {
                 let state: Bool? = with == 0 ? false : (with == targets.count ? true : nil)
                 return PickerItem(id: label.id, title: label.name, subtitle: label.kind == .local ? "local only" : nil,
                                   colorIndex: label.paletteIndex(count: 7), checked: .some(state)) { keepOpen in
+                    if state != true { self.lastPickedLabel = label }
                     self.toggleLabel(label, on: targets)
                     if !keepOpen { self.overlay = nil }
                 }
@@ -333,6 +354,12 @@ extension AppModel {
                     self.createLabel(named: query, applyTo: targets)
                 })
             }
+            // T with this label: the one just ticked, else what is typed.
+            let ruleLabel = lastPickedLabel?.name ?? (query.isEmpty ? nil : query)
+            items.append(PickerItem(id: "rule", title: "Always label mail like this…", subtitle: ruleLabel.map { "rule · \($0)" }, icon: .tag) { _ in
+                self.overlay = nil
+                self.newRuleFromThread(targets.first, labelName: ruleLabel)
+            })
             return items
         case .move:
             var destinations: [(String, IconName?, Int?, Mailbox)] = [("Inbox", .inbox, nil, .inbox), ("Archive", .archive, nil, .archive)]
@@ -404,8 +431,19 @@ extension AppModel {
         ]),
         ("Select", [("v", "Visual mode (range)"), ("x", "Toggle one"), ("*a / *n", "Select all / none"), ("esc", "Clear selection")]),
         ("Rules", [
+            ("gr", "Rules manager and Activity"), ("T", "New rule from this conversation"), (": rule …", "Draft a rule from a sentence"),
             ("g?", "Why these labels?"), ("x / a", "…the rule was wrong / should have matched (teaches it)"),
-            ("s / d / u", "…sender rule / turn the rule off / undo its run"), ("=", "Run rules on the selection now (u undoes)"),
+            ("s / e / d / u", "…sender rule / edit the rule / turn it off / undo its run"), ("=", "Run rules on the selection now (u undoes)"),
+        ]),
+        ("Rules manager (gr)", [
+            ("↵ / n / x", "Edit / new / turn on or off"), ("J / K", "Run later / earlier"), ("B", "Apply to mail already here"),
+            ("dd", "Delete (asks about its labels)"), ("a", "Activity: ↵ confirm or continue, u undo, c cancel"),
+            ("r / p", "Retry failed / pause all"),
+        ]),
+        ("Rule editor", [
+            ("tab / ⇧tab", "Fields and the preview"), ("⌃r / ⌃R", "Test rows at issue / all with Claude"),
+            ("y / n / u", "Preview: ✔ / ✖ / clear your mark"), ("s / o", "Preview: sender rule / read the message"),
+            ("+ / L", "Preview: 20 more / every match in the list"), ("⌘↵ / esc", "Save / leave the field, then the editor"),
         ]),
         ("Write", [("c", "Compose"), ("r / a / f", "Reply / reply all / forward"), ("^g", "Edit the body in your editor"), ("⌘↵", "Send"), ("esc", "Vim keys, then compose keys, then close")]),
         ("Compose body (esc)", [

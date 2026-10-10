@@ -225,6 +225,27 @@ extension MailStore {
         }
     }
 
+    /// The conversations of the messages in `scope` that pass `filter`: the rule editor lists every
+    /// match. Reads on the background connection.
+    public func ruleMatchThreads(_ filter: RuleFilter, scope: RuleScope.Mailboxes) async throws -> [String] {
+        let query = MessageQuery(search: Self.search(filter, labelTerms: true), mailboxes: scope)
+        let me = selfAddresses
+        return try await readBackground { db in
+            let (sql, args) = try Self.messageQuerySQL(query, me: me, selecting: "DISTINCT m.thread_id", ordered: false)
+            return try db.query(sql, args) { $0.string(0) }
+        }
+    }
+
+    /// The date of the oldest stored message in `scope`, or nil when there is none: how far back
+    /// "all cached" mail goes. Reads on the background connection.
+    public func oldestMessageDate(scope: RuleScope.Mailboxes) async throws -> Date? {
+        let me = selfAddresses
+        return try await readBackground { db in
+            let (sql, args) = try Self.messageQuerySQL(MessageQuery(search: SearchQuery(), mailboxes: scope), me: me, selecting: "MIN(m.date)", ordered: false)
+            return try db.first(sql, args) { $0.isNull(0) ? nil : $0.date(0) } ?? nil
+        }
+    }
+
     /// Messages in `scope` that carry `labelID`, newest first: a rule's preview checks it finds them.
     /// Reads on the background connection.
     public func scopeMessages(carrying labelID: String, scope: RuleScope.Mailboxes, newestFirst limit: Int) async throws -> [String] {
@@ -1102,9 +1123,14 @@ extension MailStore {
     /// Verdicts stay this long after no rule revision uses their judge hash, so restoring an earlier ASK is free.
     static let unusedVerdictRetention: TimeInterval = 30 * 86_400
 
+    /// Examples and sender rules of a rule written in the editor and never saved stay this long, in case
+    /// the app quit before the editor discarded them.
+    static let draftRetention: TimeInterval = 86_400
+
     /// Deletes rule history past its use: finished runs older than 90 days (the undo window) with
-    /// their reverted ledger rows, ledger rows reverted more than 90 days ago, and verdicts at judge
-    /// hashes no current rule revision has used for 30 days. Labels rules still own keep their rows.
+    /// their reverted ledger rows, ledger rows reverted more than 90 days ago, verdicts at judge
+    /// hashes no current rule revision has used for 30 days, and what unsaved drafts were taught a
+    /// day ago or earlier. Labels rules still own keep their rows.
     /// - Parameter judgeHashesInUse: every rule's current judge hash, at the current model.
     public func pruneRuleHistory(now: Date = Date(), judgeHashesInUse: Set<String>) async throws {
         try await write { db, _ in
@@ -1115,6 +1141,9 @@ extension MailStore {
             try db.run("DELETE FROM rule_ledger WHERE reverted_at IS NOT NULL AND (reverted_at < ? OR run_id IN (SELECT value FROM json_each(?)))", [cutoff, old])
             try db.run("DELETE FROM rule_queue WHERE run_id IN (SELECT value FROM json_each(?))", [old])
             try db.run("DELETE FROM rule_runs WHERE id IN (SELECT value FROM json_each(?))", [old])
+            let drafts = now.addingTimeInterval(-Self.draftRetention)
+            try db.run("DELETE FROM rule_examples WHERE created_at < ? AND rule_id NOT IN (SELECT id FROM rules)", [drafts])
+            try db.run("DELETE FROM rule_overrides WHERE created_at < ? AND rule_id NOT IN (SELECT id FROM rules)", [drafts])
 
             // When each judge hash was last in use (meta `rules_judge_hashes`, milliseconds).
             let nowMillis = Int64((now.timeIntervalSince1970 * 1000).rounded())

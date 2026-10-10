@@ -234,6 +234,7 @@ struct SettingsView: View {
             }
             toggle("Pause all rules", detail: "On every account. Arriving mail waits until you resume.", isOn: $model.settings.ai.pauseAll)
             HStack(spacing: 10) {
+                settingsButton("Manage rules", key: "gr") { model.openRules() }
                 settingsButton("Delete Claude results…", key: nil) { model.confirmDeleteClaudeResults() }
             }
         }

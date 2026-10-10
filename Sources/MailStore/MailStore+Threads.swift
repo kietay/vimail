@@ -239,12 +239,10 @@ extension MailStore {
             args.append(likePattern(subject))
         }
         if let ids = query.ids {
-            if ids.isEmpty {
-                conditions.append("0")
-            } else {
-                conditions.append("t.id IN (\(Array(repeating: "?", count: ids.count).joined(separator: ", ")))")
-                args += ids.map { $0 as SQLBindable }
-            }
+            // One argument however many IDs, so a long list (every conversation a rule matches) stays
+            // under SQLite's parameter limit.
+            conditions.append("t.id IN (SELECT value FROM json_each(?))")
+            args.append((try? json(ids)) ?? "[]")
         }
         if let match = ftsExpression(query) {
             conditions.append("t.id IN (SELECT thread_id FROM message_search WHERE message_search MATCH ?)")

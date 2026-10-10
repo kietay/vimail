@@ -18,6 +18,7 @@ enum FocusTarget: Hashable {
     case viewName, viewSender, viewText
     case settingsSignature, settingsEditor
     case consentBudget
+    case ruleName, ruleWhen, ruleAsk, ruleLabel
 }
 
 enum PickerKind: Equatable { case label, move, snooze, goToLabel }
@@ -34,6 +35,12 @@ enum Overlay: Equatable {
     case explain(threadID: String)
     /// May this account's mail go to Claude?
     case aiConsent
+    /// The rules manager and Activity (`gr`).
+    case rules
+    /// Writing or editing a rule (`ruleEditor`).
+    case ruleEditor
+    /// How far back a saved rule applies, or its re-check (`backfill`).
+    case backfill
 }
 
 struct Confirmation: Equatable {
@@ -174,6 +181,13 @@ final class AppModel {
     var consentDraft = AISettings()
     var settingsSection: SettingsSection?
 
+    // Rules: the manager, the rule being written (also while `L` or the omnibox has it put aside),
+    // the "how far back" sheet, and the list of a rule's matches.
+    var rulesManager: RulesManagerModel?
+    var ruleEditor: RuleEditorModel?
+    var backfill: BackfillModel?
+    var ruleMatches: RuleMatches?
+
     // MARK: Internals
 
     @ObservationIgnored var parser = KeySequenceParser()
@@ -201,6 +215,10 @@ final class AppModel {
     @ObservationIgnored var explanationCache: [String: ThreadExplanation] = [:]
     /// Runs once you allow Claude in the consent panel.
     @ObservationIgnored var afterConsent: (() -> Void)?
+    /// The dialog that asked for consent, shown again when the panel closes.
+    @ObservationIgnored var consentReturn: Overlay?
+    /// The label last ticked in the label picker, for its "Always label mail like this…".
+    @ObservationIgnored var lastPickedLabel: MailLabel?
     /// The latest report of a label edit to the rules. Each waits for the one before.
     @ObservationIgnored var ruleReport: Task<LabelEditNote?, Never>?
     static let pageSize = 400
@@ -280,6 +298,12 @@ final class AppModel {
             showToast("Could not open the account: \(error.localizedDescription)", isError: true)
             return
         }
+        ruleEditor?.abandon()
+        ruleEditor = nil
+        backfill = nil
+        rulesManager = nil
+        ruleMatches = nil
+        if [.rules, .ruleEditor, .backfill].contains(overlay) { overlay = nil }
         let old = services
         await old.stop()
         if let storeObserver { old.store.removeObserver(storeObserver) }
@@ -386,6 +410,7 @@ final class AppModel {
         }
         if change.reset { await reloadAccount() }
         if case .explain(let id) = overlay, change.reset || change.rules || change.threadIDs.contains(id) { await loadExplanation(threadID: id) }
+        if overlay == .rules, change.reset || change.rules || change.labels { rulesManager?.reload() }
         let inboxUnread = unreadCounts[SystemLabel.inbox] ?? 0
         NSApp.dockTile.badgeLabel = inboxUnread > 0 ? "\(inboxUnread)" : nil
     }
@@ -431,13 +456,16 @@ final class AppModel {
         return nil
     }
 
+    /// nil while the list shows a rule's matches: they come from any mailbox.
     var currentMailbox: Mailbox? {
+        guard ruleMatches == nil else { return nil }
         if case .mailbox(let mailbox) = destination { return mailbox }
         return currentView?.mailbox
     }
 
     var destinationTitle: String {
-        switch destination {
+        if let ruleMatches { return "\(ruleMatches.title) · matches" }
+        return switch destination {
         case .mailbox(.label(let id)): labels.first { $0.id == id }?.name ?? "Label"
         case .mailbox(let mailbox): mailbox.title
         case .view(let id): views.first { $0.id == id }?.name ?? "View"
@@ -445,7 +473,12 @@ final class AppModel {
     }
 
     var baseQuery: ThreadQuery {
-        switch destination {
+        if let ruleMatches {
+            var query = ThreadQuery(scope: .anywhere)
+            query.ids = ruleMatches.threadIDs
+            return query
+        }
+        return switch destination {
         case .mailbox(let mailbox): .mailbox(mailbox)
         case .view: currentView?.query ?? .mailbox(.inbox)
         }
@@ -459,14 +492,39 @@ final class AppModel {
     }
 
     var isDraftsList: Bool {
-        if case .mailbox(.drafts) = destination { return true }
+        if ruleMatches == nil, case .mailbox(.drafts) = destination { return true }
         return false
     }
 
     func navigate(to destination: Destination) {
-        if let cursorID { session.cursors[self.destination.key] = cursorID }
+        // A rule's matches leave the mailbox's cursor where it was.
+        if ruleMatches == nil, let cursorID { session.cursors[self.destination.key] = cursorID }
+        ruleMatches = nil
         session.destination = destination
         session.filter = .all
+        resetList(preferredCursor: session.cursors[destination.key])
+    }
+
+    /// `L` in the rule editor: the list shows every conversation the rule matches, the editor waits
+    /// (Esc or `gr` returns to it).
+    func showRuleMatches(_ matches: RuleMatches) {
+        overlay = nil
+        if ruleMatches == nil, let cursorID { session.cursors[destination.key] = cursorID }
+        ruleMatches = matches
+        resetList(preferredCursor: nil)
+        let count = matches.threadIDs.count
+        showToast("\(count == 1 ? "1 conversation matches" : "\(count) conversations match") · esc or gr: back to the rule")
+    }
+
+    /// Esc in a rule's matches: the list goes back to where it was, and the rule editor to the screen.
+    func leaveRuleMatches() {
+        ruleMatches = nil
+        resetList(preferredCursor: session.cursors[destination.key])
+        if ruleEditor != nil { overlay = .ruleEditor }
+    }
+
+    /// Empties the list and loads what it shows now from the top, without search or selection.
+    private func resetList(preferredCursor: String?) {
         stickyIDs.removeAll()
         searchText = ""
         isSearchOpen = false
@@ -474,9 +532,8 @@ final class AppModel {
         focus = .list
         listGeneration += 1
         threads = []
-        let remembered = session.cursors[destination.key]
         Task {
-            await reloadList(preferredCursor: remembered)
+            await reloadList(preferredCursor: preferredCursor)
             await reloadCounts()
         }
     }
@@ -646,7 +703,7 @@ final class AppModel {
 
     private func cursorDidChange() {
         markReadTask?.cancel()
-        if let cursorID { session.cursors[destination.key] = cursorID }
+        if ruleMatches == nil, let cursorID { session.cursors[destination.key] = cursorID }
         Task { await loadCurrentThread(refresh: false) }
         scheduleMarkRead()
     }
@@ -883,6 +940,7 @@ final class AppModel {
             Item(title: thread.isUnread ? "Mark as read" : "Mark as unread", icon: "check", key: thread.isUnread ? "I" : "U", action: "toggleRead"),
             Item(title: "Label…", icon: "tag", key: "t", action: "label"),
             Item(title: "Why these labels?", icon: "tag", key: "g?", action: "explain"),
+            Item(title: "Create rule from this…", icon: "tag", key: "T", action: "createRule"),
             Item(title: "Run rules", icon: "check", key: "=", action: "runRules"),
             Item(title: "Move to…", icon: "folder", key: "m", action: "move"),
             Item(title: thread.labelIDs.contains(SystemLabel.spam) ? "Not spam" : "Report spam", icon: "spam", key: "!", action: "spam"),
@@ -931,7 +989,7 @@ final class AppModel {
     private func scheduleOmniSearch() {
         omniTask?.cancel()
         let query = omniQuery.trimmingCharacters(in: .whitespaces)
-        guard query.count >= 2 else {
+        guard query.count >= 2, Self.ruleSentence(in: query) == nil else {
             omniMessages = []
             return
         }
@@ -950,7 +1008,10 @@ final class AppModel {
 
     private func overlayChanged(from old: Overlay?) {
         // Closing the consent panel any way but ↵ drops what waited for it.
-        if old == .aiConsent { afterConsent = nil }
+        if old == .aiConsent {
+            afterConsent = nil
+            consentReturn = nil
+        }
         switch overlay {
         case .omnibox:
             omniQuery = ""
@@ -959,9 +1020,13 @@ final class AppModel {
         case .picker:
             pickerQuery = ""
             pickerHighlighted = 0
+            lastPickedLabel = nil
             focusTarget = .picker
         case .viewEditor:
             focusTarget = .viewName
+        case .ruleEditor:
+            focusTarget = ruleEditor?.field.focusTarget
+            if focusTarget == nil { blurTextInput() }
         case nil:
             if compose != nil { focusTarget = compose?.lastFocus ?? .composeBody } else { focusTarget = nil; blurTextInput() }
         default:
@@ -996,6 +1061,7 @@ final class AppModel {
         case .omnibox: return .command
         case .picker, .viewEditor: return .insert
         case .aiConsent where focusTarget == .consentBudget: return .insert
+        case .ruleEditor where ruleEditor?.field.isText == true: return .insert
         default: break
         }
         if focusTarget == .search { return .search }

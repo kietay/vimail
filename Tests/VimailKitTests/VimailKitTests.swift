@@ -33,6 +33,9 @@ struct KeymapTests {
         #expect(run([.char("=")]) == [.command(.runRules, count: 1)])
         // ? alone is still help.
         #expect(run([.char("?")]) == [.command(.help, count: 1)])
+        #expect(run([.char("g"), .char("r")]) == [.pending, .command(.manageRules, count: 1)])
+        // No sequence starts with T.
+        #expect(run([.char("T")]) == [.command(.ruleFromThread, count: 1)])
     }
 
     @Test func modifiersAndSpecialKeys() {

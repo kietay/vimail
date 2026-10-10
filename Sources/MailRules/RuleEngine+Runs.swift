@@ -102,6 +102,12 @@ extension RuleEngine {
         return Int64((messagesPerDay * days * Double(localCallMicros(prices))).rounded(.up))
     }
 
+    /// What `calls` Claude calls cost at a model's list prices, priced as before any call was made:
+    /// the "how far back" sheet shows the selected run on the other models.
+    public static func listPriceMicros(calls: Int, prices: TokenPrices) -> Int64 {
+        Int64(max(0, calls)) * localCallMicros(prices)
+    }
+
     /// One call's price, and whether it comes from this model's recent calls.
     func callPrice() async throws -> (micros: Int64, fromHistory: Bool) {
         if let mean = try await store.meanCallCostMicros(model: config.model) { return (mean, true) }

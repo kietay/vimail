@@ -78,6 +78,10 @@ public enum KeyCommand: Hashable, Sendable {
     case explainLabels
     /// Every enabled rule on the selection now.
     case runRules
+    /// The rules manager.
+    case manageRules
+    /// A new rule from the conversation under the cursor.
+    case ruleFromThread
 }
 
 public enum Keymap {
@@ -110,7 +114,7 @@ public enum Keymap {
         ("gl", .goLabel), ("gv", .manageViews), ("L", .nextView), ("H", .previousView),
         ("go", .openAttachments),
         // Rules
-        ("g?", .explainLabels), ("=", .runRules),
+        ("g?", .explainLabels), ("=", .runRules), ("gr", .manageRules), ("T", .ruleFromThread),
         // Modes and app
         ("/", .search), (":", .omnibox), ("<D-k>", .omnibox), ("?", .help), ("<C-l>", .sync),
         ("<C-\\>", .toggleSidebar),

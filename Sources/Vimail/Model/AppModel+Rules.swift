@@ -11,7 +11,8 @@ struct RuleTeaching {
     var matches: Bool
 }
 
-/// Rules: their status, `=`, "why these labels?", Claude's key, consent and settings.
+/// Rules: their status, the manager, making and editing rules, `=`, "why these labels?", Claude's
+/// key, consent and settings.
 extension AppModel {
     // MARK: - Status
 
@@ -22,6 +23,8 @@ extension AppModel {
             for await status in updates {
                 guard let self, self.services.rules === rules else { return }
                 self.rulesStatus = status
+                // Activity follows the runs' progress.
+                if self.overlay == .rules { self.rulesManager?.reload() }
             }
         }
     }
@@ -31,10 +34,10 @@ extension AppModel {
         rulesStatus.statusLine(gmailRejected: rulesGmailRejected)
     }
 
-    /// Tapping the rules status: what it reported is seen, and Settings shows the rules section.
+    /// Tapping the rules status: what it reported is seen, and the rules manager opens (`gr`).
     func openRulesStatus() {
         rulesGmailRejected = 0
-        openSettings(at: .rules)
+        openRules(focus: rulesStatus.runs.isEmpty ? .rules : .activity)
     }
 
     func openSettings(at section: SettingsSection) {
@@ -55,6 +58,136 @@ extension AppModel {
         } catch {
             Self.log.error("Could not count received mail: \(String(describing: type(of: error)))")
         }
+    }
+
+    // MARK: - Rules manager (gr)
+
+    /// `gr`: back to the rule being written when one was left open (`L`, the omnibox), else the manager.
+    func manageRules() {
+        if ruleEditor != nil {
+            resumeRuleEditor()
+        } else {
+            openRules()
+        }
+    }
+
+    func openRules(focus: RulesManagerModel.Focus = .rules) {
+        let manager = rulesManager ?? RulesManagerModel(app: self)
+        manager.focus = focus
+        manager.prompt = nil
+        manager.pendingDelete = false
+        rulesManager = manager
+        overlay = .rules
+        manager.reload()
+    }
+
+    /// Shows the rule editor that was left open.
+    func resumeRuleEditor() {
+        guard ruleEditor != nil else { return }
+        if ruleMatches != nil { leaveRuleMatches() }
+        overlay = .ruleEditor
+    }
+
+    // MARK: - Making and editing rules
+
+    /// `T`: a rule from a conversation (the cursor's by default). The newest message you received in
+    /// it becomes the rule's ✔ example; THEN takes the conversation's label when it has one, else
+    /// proposes a new one; WHEN keeps your colleagues' mail out; Claude drafts the ASK when it may.
+    /// - Parameter labelName: THEN, from the label picker's "Always label mail like this…".
+    func newRuleFromThread(_ threadID: String? = nil, labelName: String? = nil) {
+        guard let threadID = threadID ?? cursorID, !threadID.hasPrefix("draft:") else {
+            showToast("Select a conversation first.")
+            return
+        }
+        guard mayStartRule() else { return }
+        let services = services
+        let account = account.email
+        Task {
+            guard let thread = try? await services.store.thread(id: threadID) else { return }
+            let me = services.store.selfAddresses
+            guard let message = thread.messages.last(where: { !me.contains($0.from.normalized) }) else {
+                showToast("This conversation has no mail you received.")
+                return
+            }
+            let threadLabels = labels.filter { $0.kind != .system && thread.labelIDs.contains($0.id) }
+            let label = labelName ?? (threadLabels.count == 1 ? threadLabels[0].name : RuleSuggestion.labelName(for: message.from))
+            let seed = RuleEditorModel.Seed(
+                sender: message.from, automated: RuleSuggestion.isAutomated(message.from, isList: !(message.listUnsubscribe ?? "").isEmpty),
+                account: account
+            )
+            let rule = Rule(key: "", name: label, when: RuleSuggestion.when(account: account, sender: message.from, onlySender: false), then: [])
+            do {
+                try await services.store.setExample(ruleID: rule.id, messageID: message.id, matches: true, origin: .seed, draft: true)
+            } catch {
+                showToast("Could not start the rule: \(error.localizedDescription)", isError: true)
+                return
+            }
+            let editor = RuleEditorModel(draft: rule, labelName: label, saved: nil, seed: seed, returnsToManager: false, field: canDraftRules ? .preview : .ask, app: self)
+            open(editor)
+            editor.startDrafting(
+                description: "Mail like this email.", seed: EmailDigest(message: message, thread: thread.messages, selfAddresses: me),
+                keepsLabel: labelName != nil || threadLabels.count == 1
+            )
+        }
+    }
+
+    /// `:rule <sentence>`: a rule drafted from your description. Without Claude, the sentence is the ASK.
+    func draftRule(from sentence: String) {
+        let sentence = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sentence.isEmpty, mayStartRule() else { return }
+        let rule = Rule(key: "", name: "", ask: sentence, then: [])
+        let editor = RuleEditorModel(draft: rule, labelName: "", saved: nil, seed: nil, returnsToManager: false, field: canDraftRules ? .preview : .then, app: self)
+        open(editor)
+        editor.startDrafting(description: sentence, seed: nil)
+    }
+
+    /// `n` in the manager: an empty rule.
+    func newRule(returnsToManager: Bool = true) {
+        guard mayStartRule() else { return }
+        let editor = RuleEditorModel(draft: Rule(key: "", name: "", then: []), labelName: "", saved: nil, seed: nil, returnsToManager: returnsToManager, field: .name, app: self)
+        open(editor)
+    }
+
+    /// ↵ in the manager, `e` in "why these labels?".
+    func editRule(_ record: RuleRecord, returnsToManager: Bool = true) {
+        guard mayStartRule() else { return }
+        let target = record.rule.labelTargets.first
+        let label = target.map { ref in labels.first { $0.id == ref.id }?.name ?? ref.lastKnownName } ?? ""
+        let editor = RuleEditorModel(draft: record.rule, labelName: label, saved: record, seed: nil, returnsToManager: returnsToManager, field: .preview, app: self)
+        open(editor)
+    }
+
+    /// Claude may draft rules for this account now: a key, a model it knows, and consent.
+    var canDraftRules: Bool {
+        ai.drafter(forAccount: services.accountKey) != nil
+    }
+
+    /// A rule left open with changes comes back instead of a new one; one without changes is dropped.
+    private func mayStartRule() -> Bool {
+        guard let editor = ruleEditor else { return true }
+        if editor.isDirty {
+            resumeRuleEditor()
+            showToast("Finish or discard this rule first (esc, then y).")
+            return false
+        }
+        editor.abandon()
+        ruleEditor = nil
+        return true
+    }
+
+    private func open(_ editor: RuleEditorModel) {
+        backfill = nil
+        ruleEditor = editor
+        overlay = .ruleEditor
+        editor.start()
+    }
+
+    /// "How far back" for a saved rule, or its re-check after an edit.
+    func openBackfill(for rule: Rule, mode: BackfillModel.Mode, editor: RuleEditorModel?, returnsToManager: Bool) {
+        let sheet = BackfillModel(rule: rule, mode: mode, editor: editor, returnsToManager: returnsToManager, app: self)
+        backfill = sheet
+        overlay = .backfill
+        Task { await sheet.load() }
     }
 
     // MARK: - Settings
@@ -139,6 +272,11 @@ extension AppModel {
         }
     }
 
+    /// The model that judges now: "Haiku 5.5", or the offline simulator.
+    var judgeModelName: String {
+        ai.usesSimulator ? "Offline simulator" : Self.modelName(settings.ai.model)
+    }
+
     /// "Haiku 5.5" for "claude-haiku-5-5".
     static func modelName(_ id: String) -> String {
         if let model = ClaudeModel(rawValue: id) { return model.displayName }
@@ -148,20 +286,24 @@ extension AppModel {
     // MARK: - Consent
 
     /// Runs `then` once this account's mail may go to Claude: at once when it may (or the offline
-    /// simulator judges), else after you allow it in the consent panel. "Not now" drops it.
+    /// simulator judges), else after you allow it in the consent panel. "Not now" drops it. Either
+    /// way the dialog that asked (the rule editor, the rules manager) comes back.
     func requireClaudeConsent(then: (() -> Void)? = nil) {
         if ai.usesSimulator || ai.hasConsent(services.accountKey) {
             then?()
             return
         }
+        let asking = overlay
         openConsent()
         afterConsent = then
+        consentReturn = asking
     }
 
     func openConsent() {
         consentDraft = settings.ai
         if consentDraft.claudeModel == nil { consentDraft.model = ClaudeModel.default.rawValue }
         afterConsent = nil
+        consentReturn = nil
         overlay = .aiConsent
         Task { await refreshMailVolume() }
     }
@@ -177,14 +319,18 @@ extension AppModel {
         ai.previewDailyUSD = max(0, consentDraft.previewDailyUSD)
         ai.consents[services.accountKey] = Date()
         settings.ai = ai
-        overlay = nil
+        let returnTo = consentReturn
+        consentReturn = nil
+        overlay = returnTo
         showToast(self.ai.hasKey ? "Claude may judge this account's mail." : "Claude may judge this account's mail once you add an API key in Settings.")
         then?()
     }
 
     func declineConsent() {
+        let returnTo = consentReturn
         afterConsent = nil
-        overlay = nil
+        consentReturn = nil
+        overlay = returnTo
     }
 
     func revokeConsent() {
@@ -362,20 +508,47 @@ extension AppModel {
         Task {
             do {
                 guard let sender = try await store.message(id: rule.messageID)?.from.normalized, !sender.isEmpty else { return }
-                switch try await store.overrides(ruleID: rule.ruleID).first(where: { $0.subject == sender })?.matches {
-                case nil:
-                    try await store.setOverride(ruleID: rule.ruleID, subject: sender, matches: true, origin: .user)
-                    showToast("From now on, mail from \(sender) always matches \(rule.name).")
-                case true?:
-                    try await store.setOverride(ruleID: rule.ruleID, subject: sender, matches: false, origin: .user)
-                    showToast("From now on, mail from \(sender) never matches \(rule.name).")
-                case false?:
-                    try await store.removeOverride(ruleID: rule.ruleID, subject: sender)
-                    showToast("Sender rule removed: \(rule.name) decides mail from \(sender) as before.")
-                }
+                try await cycleSenderRule(ruleID: rule.ruleID, sender: sender, ruleName: rule.name)
             } catch {
                 showToast("Could not change the sender rule: \(error.localizedDescription)", isError: true)
             }
+        }
+    }
+
+    /// Moves a rule's sender rule for `sender` on: always matches, never matches, decided as before.
+    /// "Why these labels?" and the rule editor (`s`) both use it.
+    /// - Parameters:
+    ///   - ruleName: nil for the rule being written ("this rule").
+    ///   - draft: the rule is not saved yet (`MailStore.setOverride`).
+    func cycleSenderRule(ruleID: String, sender: String, ruleName: String?, draft: Bool = false) async throws {
+        let store = services.store
+        let rule = ruleName ?? "this rule"
+        switch try await store.overrides(ruleID: ruleID).first(where: { $0.subject == sender })?.matches {
+        case nil:
+            try await store.setOverride(ruleID: ruleID, subject: sender, matches: true, origin: .user, draft: draft)
+            showToast("From now on, mail from \(sender) always matches \(rule).")
+        case true?:
+            try await store.setOverride(ruleID: ruleID, subject: sender, matches: false, origin: .user, draft: draft)
+            showToast("From now on, mail from \(sender) never matches \(rule).")
+        case false?:
+            try await store.removeOverride(ruleID: ruleID, subject: sender)
+            showToast("Sender rule removed: \(rule) decides mail from \(sender) as before.")
+        }
+    }
+
+    /// e: edits the highlighted line's rule.
+    func editExplainedRule() {
+        guard let rule = explainedRule else {
+            showToast("e is for a rule's line.")
+            return
+        }
+        let store = services.store
+        Task {
+            guard let record = try? await store.rules().first(where: { $0.id == rule.ruleID }), record.state != .needsUpgrade else {
+                showToast("That rule can't be edited here.")
+                return
+            }
+            editRule(record, returnsToManager: false)
         }
     }
 

@@ -28,6 +28,19 @@ public struct RuleRecord: Identifiable, Hashable, Sendable {
     public var id: String { rule.id }
 }
 
+/// What a rule has done, for the rules manager.
+public struct RuleStats: Hashable, Sendable {
+    /// Messages where the rule owns its label now.
+    public var labeled: Int
+    /// Its `unsure` decisions you have not marked ✔ or ✖ yet.
+    public var unsure: Int
+
+    public init(labeled: Int = 0, unsure: Int = 0) {
+        self.labeled = labeled
+        self.unsure = unsure
+    }
+}
+
 /// A ✔ or ✖ you gave one rule for one message. It decides that message for the rule, and its digest
 /// joins the prompt once the rule's tested example set (`Rule.promptExampleIDs`) includes it.
 public struct RuleExample: Hashable, Sendable {
@@ -138,6 +151,26 @@ extension MailStore {
         )
     }
 
+    /// Each rule's labels and unsure decisions, by rule ID. Rules with neither are left out.
+    /// Reads on the background connection.
+    public func ruleStats() async throws -> [String: RuleStats] {
+        try await readBackground { db in
+            var stats: [String: RuleStats] = [:]
+            for (id, count) in try db.query(
+                "SELECT rule_id, COUNT(DISTINCT message_id) FROM rule_ledger WHERE reverted_at IS NULL GROUP BY rule_id", [], { ($0.string(0), $0.int(1)) }
+            ) {
+                stats[id, default: RuleStats()].labeled = count
+            }
+            for (id, count) in try db.query(
+                "SELECT d.rule_id, COUNT(*) FROM rule_decisions d WHERE d.outcome = ? \(Self.notReviewed) GROUP BY d.rule_id",
+                [Verdict.unsure.rawValue], { ($0.string(0), $0.int(1)) }
+            ) {
+                stats[id, default: RuleStats()].unsure = count
+            }
+            return stats
+        }
+    }
+
     /// Enabled rules this build can run, in order.
     static func runnableRules(_ db: SQLiteDatabase) throws -> [Rule] {
         try ruleRecords(db).map(\.rule).filter(\.enabled)
@@ -173,8 +206,10 @@ extension MailStore {
     // MARK: - Changes
 
     /// Adds a rule at the end. The store assigns its key ("r1", "r2", …); the draft's key is ignored.
+    /// Throws `RuleFilter.Problem` for a WHEN rules can't use.
     public func createRule(_ draft: Rule) async throws -> RuleRecord {
-        try await write { db, change in
+        _ = try RuleFilter.parse(draft.when)
+        return try await write { db, change in
             guard try !Self.missingTargets(draft, db) else { throw RuleStoreError.labelMissing }
             var rule = try Self.rule(draft, key: try Self.nextRuleKey(db))
             rule.revision = 1
@@ -197,10 +232,12 @@ extension MailStore {
     /// Saves an edited rule. A change to what it decides (`Rule.changesSemantics(from:)`) makes a new
     /// revision and pauses the runs that apply the old one, or marks them out of date when they are
     /// paused or waiting for confirmation already (`rule_changed`); renaming it or changing its
-    /// switches keeps the revision. Returns the rule as stored.
+    /// switches keeps the revision. Returns the rule as stored. Throws `RuleFilter.Problem` for a WHEN
+    /// rules can't use.
     @discardableResult
     public func saveRule(_ rule: Rule) async throws -> Rule {
-        try await write { db, change in
+        _ = try RuleFilter.parse(rule.when)
+        return try await write { db, change in
             guard let record = try Self.ruleRecord(id: rule.id, db) else { throw RuleStoreError.notFound }
             var saved = rule.key == record.rule.key ? rule : try Self.rule(rule, key: record.rule.key)
             saved.revision = record.rule.revision + (saved.changesSemantics(from: record.rule) ? 1 : 0)
@@ -396,11 +433,15 @@ extension MailStore {
     // MARK: - Examples
 
     /// Adds or replaces the example `ruleID` has for `messageID`. The digest is taken from the message now.
+    /// - Parameter draft: `ruleID` is a rule being written in the editor, not saved yet. Its examples
+    ///   are kept under its ID, which `createRule` keeps; `discardDraft(ruleID:)` deletes them.
     @discardableResult
-    public func setExample(ruleID: String, messageID: String, matches: Bool, origin: RuleExample.Origin, undoKey: String? = nil) async throws -> RuleExample {
+    public func setExample(
+        ruleID: String, messageID: String, matches: Bool, origin: RuleExample.Origin, undoKey: String? = nil, draft: Bool = false
+    ) async throws -> RuleExample {
         let me = selfAddresses
         return try await write { db, change in
-            guard try db.scalar("SELECT COUNT(*) FROM rules WHERE id = ?", [ruleID]) > 0,
+            guard try draft || db.scalar("SELECT COUNT(*) FROM rules WHERE id = ?", [ruleID]) > 0,
                   let message = try db.first("SELECT \(Self.messageColumns) FROM messages m WHERE m.id = ?", [messageID], { try Self.decodeMessage($0, labels: []) })
             else { throw RuleStoreError.notFound }
             let example = RuleExample(
@@ -419,6 +460,17 @@ extension MailStore {
     public func removeExample(ruleID: String, messageID: String) async throws {
         try await write { db, change in
             try db.run("DELETE FROM rule_examples WHERE rule_id = ? AND message_id = ?", [ruleID, messageID])
+            change.rules = true
+        }
+    }
+
+    /// Forgets a rule that was written in the editor and never saved: its examples and sender rules.
+    /// Does nothing for a saved rule.
+    public func discardDraft(ruleID: String) async throws {
+        try await write { db, change in
+            guard try db.scalar("SELECT COUNT(*) FROM rules WHERE id = ?", [ruleID]) == 0 else { return }
+            try db.run("DELETE FROM rule_examples WHERE rule_id = ?", [ruleID])
+            try db.run("DELETE FROM rule_overrides WHERE rule_id = ?", [ruleID])
             change.rules = true
         }
     }
@@ -523,13 +575,16 @@ extension MailStore {
     // MARK: - Sender overrides
 
     /// Sets what `ruleID` decides for mail from `subject`: an address, or "@domain" for a whole domain.
-    public func setOverride(ruleID: String, subject: String, matches: Bool, origin: RuleOverride.Origin, evidence: Int = 0) async throws {
+    /// - Parameter draft: `ruleID` is a rule being written in the editor, not saved yet (`setExample`).
+    public func setOverride(
+        ruleID: String, subject: String, matches: Bool, origin: RuleOverride.Origin, evidence: Int = 0, draft: Bool = false
+    ) async throws {
         let subject = subject.trimmingCharacters(in: .whitespaces).lowercased()
         // "local@domain" or "@domain": one "@", a domain, no spaces.
         let parts = subject.split(separator: "@", omittingEmptySubsequences: false)
         guard parts.count == 2, !parts[1].isEmpty, !subject.contains(where: \.isWhitespace) else { throw RuleStoreError.invalidSender }
         try await write { db, change in
-            guard try db.scalar("SELECT COUNT(*) FROM rules WHERE id = ?", [ruleID]) > 0 else { throw RuleStoreError.notFound }
+            guard try draft || db.scalar("SELECT COUNT(*) FROM rules WHERE id = ?", [ruleID]) > 0 else { throw RuleStoreError.notFound }
             try db.run(
                 "INSERT OR REPLACE INTO rule_overrides(rule_id, subject, verdict, origin, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 [ruleID, subject, matches, origin.rawValue, evidence, Date()]

@@ -61,8 +61,14 @@ public actor SpendGuard {
         public var budgetMonth: Int64
         /// What runs may still spend today, after live mail's reserve.
         public var runRoomToday: Int64
+        /// What runs may still spend this month, after live mail's reserve for the days left.
+        public var runRoomMonth: Int64
+        /// What today's budget keeps for live mail: 2 × the live daily average, or what is left today.
+        public var liveReserveToday: Int64
         /// What previews may still spend today.
         public var previewLeft: Int64
+        /// What previews and drafting spent today.
+        public var previewToday: Int64
         public var liveDailyAverage: Int64
         public var fallbacksUnavailable: Bool
     }
@@ -172,10 +178,12 @@ public actor SpendGuard {
         let state = state()
         let dayLeft = budget.day - state.today
         let monthLeft = budget.month - state.month
-        let runRoom = max(0, min(dayLeft - state.dayReserve, monthLeft - state.monthReserve))
+        let runRoomMonth = max(0, monthLeft - state.monthReserve)
+        let runRoom = max(0, min(dayLeft - state.dayReserve, runRoomMonth))
         return Snapshot(
             spendToday: state.settledToday, spendMonth: state.settledMonth, budgetDay: budget.day, budgetMonth: budget.month,
-            runRoomToday: runRoom, previewLeft: max(0, min(runRoom, budget.previewDay - state.previewToday)),
+            runRoomToday: runRoom, runRoomMonth: runRoomMonth, liveReserveToday: max(0, min(state.dayReserve, dayLeft)),
+            previewLeft: max(0, min(runRoom, budget.previewDay - state.previewToday)), previewToday: state.previewToday,
             liveDailyAverage: state.liveAverage, fallbacksUnavailable: ledger.fallbacksUnavailable
         )
     }

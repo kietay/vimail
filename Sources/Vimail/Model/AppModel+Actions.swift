@@ -425,6 +425,7 @@ extension AppModel {
         case "label": openPicker(.label)
         case "explain": openExplain()
         case "runRules": runRulesOnSelection()
+        case "createRule": newRuleFromThread()
         case "move": openPicker(.move)
         case "spam": spam()
         case "previous": moveCursor(by: -1)

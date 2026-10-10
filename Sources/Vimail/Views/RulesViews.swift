@@ -16,7 +16,7 @@ struct ExplainView: View {
         let highlighted = model.explainHighlighted
         DialogShell(
             title: "Why these labels?", width: 720,
-            footer: "x wrong: remove + teach · a should match: add + teach · s sender rule · d disable rule · u undo run · esc",
+            footer: "x wrong: remove + teach · a should match: add + teach · s sender rule · e edit rule · d disable rule · u undo run · esc",
             onClose: { model.overlay = nil }
         ) {
             ScrollViewReader { proxy in

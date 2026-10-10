@@ -109,7 +109,7 @@ struct StatusBar: View {
     }
 
     /// What rules are doing, after the sync state; hidden when there is nothing to say. Tapping it
-    /// opens Settings at the rules.
+    /// opens the rules manager (`gr`).
     private func rulesText(_ line: RulesStatusLine) -> some View {
         let color = switch line.tone {
         case .normal: theme.statusText
@@ -119,7 +119,7 @@ struct StatusBar: View {
         }
         return Text(verbatim: line.text)
             .foregroundStyle(color)
-            .help("Rules and Claude · click for settings")
+            .help("Rules and Claude · click for the rules manager (gr)")
             .onTapGesture { model.openRulesStatus() }
     }
 
