@@ -103,10 +103,10 @@ them with one key, and you create events from one typed line. Everything works o
   day once the series is answered (the first answer, from the waiting group or the mail, answers the series).
   A rule the words cannot say ("monthly on the second Tuesday") shows in *Repeats* but changes only in Google Calendar.
 - **This and following** splits the series as Google Calendar does: it ends the day before, and a new series starts
-  that day with what you typed (*When* is its first event, on that day or another) and the same repeat, its count less
-  the events before, or *Repeats* as you changed it. Skipped and added days go with their half; the old series' changed
-  days from that day on are dropped, with changes to them that had not left yet. `⌘↵` tells the guests of both after
-  the undo window, and one `u` takes it all back.
+  that day with what you typed (*When* is its first event, on that day or another; left as it was, the series' own
+  time that day) and the same repeat, its count less the events before, or *Repeats* as you changed it. Skipped and
+  added days go with their half; the old series' changed days from that day on are dropped, with changes to them that
+  had not left yet. `⌘↵` tells the guests of both after the undo window, and one `u` takes it all back.
   With `⌘⇧⌫` the series only ends. On a series' first day it is the same as *All events*. A count only Google can work
   out (the shapes below that vimail leaves to Google) is split in Google Calendar.
 - **Creating events.** `C` opens one line: `lunch with jamie fri 12:30 1h @ Tartine`, `standup every weekday 9:30 15m`,

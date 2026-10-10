@@ -927,6 +927,27 @@ struct RecurrenceSplitTests {
         #expect(allDay.start == .allDay(day("2027-02-01")) && allDay.end == .allDay(day("2027-02-02")))
     }
 
+    @Test func aDayAtTheSeriesOwnTime() {
+        // A 15-minute standup at 09:30: Oct 14 is at 09:30 again, however it was moved on its own.
+        let standup = (EventTime.timed(at(2026, 10, 5, 9, 30), timeZone: laID), EventTime.timed(at(2026, 10, 5, 9, 45), timeZone: laID))
+        let wednesday = Recurrence.times(on: .timed(at(2026, 10, 14, 9, 30), timeZone: laID), seriesStart: standup.0, seriesEnd: standup.1, calendar: la)
+        #expect(wednesday.start == .timed(at(2026, 10, 14, 9, 30), timeZone: laID))
+        #expect(wednesday.end == .timed(at(2026, 10, 14, 9, 45), timeZone: laID))
+        // After the clocks went back: 09:00 is 17:00 UTC, and the hour still ends at 10:00.
+        let review = (EventTime.timed(at(2026, 10, 26, 9), timeZone: laID), EventTime.timed(at(2026, 10, 26, 10), timeZone: laID))
+        let november = Recurrence.times(on: .timed(utc("2026-11-05T17:00:00Z"), timeZone: laID), seriesStart: review.0, seriesEnd: review.1, calendar: la)
+        #expect(november.start == .timed(utc("2026-11-05T17:00:00Z"), timeZone: laID))
+        #expect(november.end == .timed(utc("2026-11-05T18:00:00Z"), timeZone: laID))
+        // A London series seen from here keeps its zone; an original start Google wrote without one gets it.
+        let london = (EventTime.timed(at(2026, 10, 5, 9, zone: "Europe/London"), timeZone: "Europe/London"), EventTime.timed(at(2026, 10, 5, 10, zone: "Europe/London"), timeZone: "Europe/London"))
+        let thursday = Recurrence.times(on: .timed(at(2026, 10, 8, 9, zone: "Europe/London"), timeZone: nil), seriesStart: london.0, seriesEnd: london.1, calendar: la)
+        #expect(thursday.start == .timed(at(2026, 10, 8, 9, zone: "Europe/London"), timeZone: "Europe/London"))
+        #expect(thursday.end == .timed(at(2026, 10, 8, 10, zone: "Europe/London"), timeZone: "Europe/London"))
+        // Two whole days stay two whole days.
+        let visit = Recurrence.times(on: .allDay(day("2026-10-23")), seriesStart: .allDay(day("2026-10-02")), seriesEnd: .allDay(day("2026-10-04")), calendar: la)
+        #expect(visit.start == .allDay(day("2026-10-23")) && visit.end == .allDay(day("2026-10-25")))
+    }
+
     @Test func aCountThatCannotBeCountedHereIsRefused() {
         // The last weekday of each month: only Google expands it.
         let lastWeekday = "RRULE:FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1"

@@ -118,6 +118,14 @@ extension Recurrence {
         return .split(before: before, after: after)
     }
 
+    /// One day of a series at the series' own time: `day` is that day's start in the rule, and it lasts as long as the
+    /// series' first event, as the series repeats it. A day moved on its own comes back to the series' time.
+    public static func times(on day: EventTime, seriesStart: EventTime, seriesEnd: EventTime, calendar viewer: Calendar) -> (start: EventTime, end: EventTime) {
+        let series = Series(start: seriesStart, end: seriesEnd, viewer: viewer)
+        let occurrence = series.occurrence(at: series.isAllDay ? day.dayDate(in: viewer).start(in: series.calendar) : day.instant(in: viewer))
+        return (occurrence.start, occurrence.end)
+    }
+
     /// The first event of the series that takes over ("this and following"): the times as typed, kept on the old series'
     /// clock (its zone), so the new series repeats at the same time as the old one did. All-day times stay as they are.
     public static func followingTimes(start: EventTime, end: EventTime, seriesStart: EventTime, seriesEnd: EventTime) -> (start: EventTime, end: EventTime) {
