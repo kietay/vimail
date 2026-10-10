@@ -142,6 +142,88 @@ enum Schema {
         """,
         // 2: RFC 8058 one-click unsubscribe. NULL: cached before vimail checked.
         "ALTER TABLE messages ADD COLUMN one_click_unsubscribe INTEGER;",
+        // 3: calendar.
+        """
+        CREATE TABLE calendars (
+            id TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            sync_token TEXT                       -- events.list token for this calendar
+        );
+
+        -- Events as the provider stores them: single events, series and changed occurrences (exceptions).
+        CREATE TABLE events (
+            calendar_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            ical_uid TEXT,
+            recurring_event_id TEXT,
+            status TEXT NOT NULL,
+            self_response TEXT,                   -- the account's answer when it is a guest
+            payload TEXT NOT NULL,
+            PRIMARY KEY (calendar_id, id)
+        ) WITHOUT ROWID;
+        CREATE INDEX events_uid ON events(ical_uid);
+        CREATE INDEX events_series ON events(calendar_id, recurring_event_id);
+
+        -- What the agenda and the day column read: one row per occurrence inside the stored window.
+        -- Timed occurrences use start_ms/end_ms; all-day ones also have start_day/end_day (end exclusive).
+        CREATE TABLE occurrences (
+            calendar_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,               -- the events row with the details
+            series_id TEXT,                       -- the series this occurrence belongs to, if any
+            original_start TEXT NOT NULL DEFAULT '',
+            start_ms INTEGER NOT NULL,
+            end_ms INTEGER NOT NULL,
+            start_day TEXT,
+            end_day TEXT,
+            PRIMARY KEY (calendar_id, event_id, original_start)
+        ) WITHOUT ROWID;
+        CREATE INDEX occurrences_start ON occurrences(start_ms);
+        CREATE INDEX occurrences_series ON occurrences(calendar_id, series_id);
+
+        -- Invitations found in mail (parsed text/calendar parts). payload is NULL when the file could not be read.
+        CREATE TABLE invitations (
+            message_id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            uid TEXT,
+            method TEXT,
+            sequence INTEGER NOT NULL DEFAULT 0,
+            recurrence_id TEXT,                   -- the occurrence key when the file is about one occurrence only
+            payload TEXT,
+            error TEXT,
+            parsed_at INTEGER NOT NULL
+        );
+        CREATE INDEX invitations_uid ON invitations(uid);
+        CREATE INDEX invitations_thread ON invitations(thread_id);
+
+        -- Calendar changes waiting to be pushed. Separate from the mail outbox, so a calendar
+        -- failure never holds back mail and each sync engine resets only its own in-flight work.
+        CREATE TABLE calendar_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target TEXT NOT NULL DEFAULT '',          -- calendar|event (a series for its occurrences): one queue per event
+            payload TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',   -- pending | inflight
+            not_before INTEGER NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX calendar_outbox_target ON calendar_outbox(target, id);
+
+        -- Events the sync removed (the organizer deleted them, or took you off), by iCalendar UID: their
+        -- invitation mail stops waiting for an answer, unless a newer invitation (higher SEQUENCE) comes.
+        CREATE TABLE removed_events (
+            uid TEXT PRIMARY KEY,
+            sequence INTEGER NOT NULL DEFAULT 0
+        );
+
+        -- Local-only event drafts (the event editor).
+        CREATE TABLE event_drafts (
+            id TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        """,
     ]
 
     static func migrate(_ db: SQLiteDatabase) throws {

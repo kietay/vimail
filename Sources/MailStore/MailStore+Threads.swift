@@ -173,6 +173,37 @@ extension MailStore {
         }
         if query.starredOnly { conditions.append("t.starred = 1") }
         if query.hasAttachment == true { conditions.append("t.has_attachments = 1") }
+        if let invitation = query.invitation {
+            let file = "SELECT 1 FROM invitations i WHERE i.thread_id = t.id AND i.payload IS NOT NULL"
+            switch invitation {
+            case .any: conditions.append("EXISTS (\(file))")
+            case .request: conditions.append("EXISTS (\(file) AND i.method = 'REQUEST' AND i.sequence = 0)")
+            case .update: conditions.append("EXISTS (\(file) AND i.method = 'REQUEST' AND i.sequence > 0)")
+            case .cancel: conditions.append("EXISTS (\(file) AND i.method = 'CANCEL')")
+            case .reply: conditions.append("EXISTS (\(file) AND i.method = 'REPLY')")
+            case .pending:
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM invitations i JOIN events e ON e.ical_uid = i.uid WHERE i.thread_id = t.id"
+                        + " AND i.method = 'REQUEST' AND e.self_response = 'needsAction' AND e.status != 'cancelled')")
+            case .conflict:
+                // An occurrence of the invitation's event in the next 60 days that overlaps a busy event you have not declined.
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM invitations i JOIN events e ON e.ical_uid = i.uid"
+                        + " JOIN occurrences o ON o.calendar_id = e.calendar_id AND (o.event_id = e.id OR o.series_id = e.id)"
+                        + " JOIN occurrences o2 ON o2.start_ms > o.start_ms - 86400000 AND o2.start_ms < o.end_ms AND o2.end_ms > o.start_ms"
+                        + " JOIN events e2 ON e2.calendar_id = o2.calendar_id AND e2.id = o2.event_id"
+                        + " JOIN calendars c2 ON c2.id = o2.calendar_id"
+                        + " WHERE i.thread_id = t.id AND i.method = 'REQUEST' AND e.status != 'cancelled' AND COALESCE(e.self_response, '') != 'declined'"
+                        + " AND o.start_day IS NULL AND o.end_ms > ? AND o.start_ms < ? AND o2.start_day IS NULL"
+                        + " AND COALESCE(o2.series_id, o2.event_id) != COALESCE(o.series_id, o.event_id)"
+                        + " AND (e2.ical_uid IS NULL OR e2.ical_uid != i.uid) AND e2.status != 'cancelled'"
+                        + " AND COALESCE(e2.self_response, '') != 'declined' AND COALESCE(json_extract(e2.payload, '$.isBusy'), 1) = 1"
+                        + " AND COALESCE(json_extract(c2.payload, '$.isSelected'), 1) = 1)")
+                let now = Date()
+                args.append(now)
+                args.append(now.addingTimeInterval(60 * 86_400))
+            }
+        }
         if let before = query.before {
             conditions.append("t.last_date < ?")
             args.append(before)

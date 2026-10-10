@@ -9,13 +9,15 @@ public struct StoreChange: Hashable, Sendable {
     public var outbox = false
     public var views = false
     public var snoozes = false
+    /// Calendars, events, occurrences or invitations changed.
+    public var calendar = false
     /// Large or unspecific change (initial sync, reset): reload everything.
     public var reset = false
 
     public init() {}
 
     public var isEmpty: Bool {
-        threadIDs.isEmpty && !labels && !drafts && !outbox && !views && !snoozes && !reset
+        threadIDs.isEmpty && !labels && !drafts && !outbox && !views && !snoozes && !calendar && !reset
     }
 
     public mutating func formUnion(_ other: StoreChange) {
@@ -25,6 +27,7 @@ public struct StoreChange: Hashable, Sendable {
         outbox = outbox || other.outbox
         views = views || other.views
         snoozes = snoozes || other.snoozes
+        calendar = calendar || other.calendar
         reset = reset || other.reset
     }
 }
@@ -219,9 +222,11 @@ public final class MailStore: @unchecked Sendable {
                 DELETE FROM contacts; DELETE FROM snoozes;
                 DELETE FROM meta WHERE key IN ('cursor', 'initial_sync_done', 'initial_cursor', 'resync', 'backfill_done',
                     'backfill_token', 'backfill_count', 'account_email', 'account_name', 'account_signature_html');
+                DELETE FROM calendars; DELETE FROM events; DELETE FROM occurrences; DELETE FROM invitations;
+                DELETE FROM calendar_outbox; DELETE FROM meta WHERE key LIKE 'calendar_%';
                 """)
             if everything {
-                try db.execute("DELETE FROM drafts; DELETE FROM saved_views; DELETE FROM meta;")
+                try db.execute("DELETE FROM drafts; DELETE FROM saved_views; DELETE FROM event_drafts; DELETE FROM meta;")
             }
             change.reset = true
         }
