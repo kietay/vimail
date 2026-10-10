@@ -15,7 +15,9 @@ enum FocusTarget: Hashable {
     case composeTo, composeCc, composeBcc, composeSubject, composeBody
     case viewName, viewSender, viewText
     case settingsSignature, settingsEditor
-    case quickAdd, eventEditor
+    case quickAdd
+    /// The event editor's fields.
+    case eventTitle, eventWhen, eventGuests, eventWhere, eventRepeats, eventNotes
 }
 
 enum PickerKind: Equatable { case label, move, snooze, goToLabel, answerNote }
@@ -1055,7 +1057,8 @@ final class AppModel {
         case .quickAdd:
             focusTarget = .quickAdd
         case .eventEditor:
-            focusTarget = .eventEditor
+            // The editor puts the cursor in Title or When itself.
+            focusTarget = nil
         case nil:
             if compose != nil { focusTarget = compose?.lastFocus ?? .composeBody } else { focusTarget = nil; blurTextInput() }
         default:

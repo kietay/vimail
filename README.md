@@ -130,6 +130,10 @@ them with one key, and you create events from one typed line. Everything works o
   the editor are told with `⌘↵`. Removing an event before its invitations leave sends nothing.
   A weekly repeat that names its days starts on one of them: `standup fri 9:00 every mon` starts on Monday.
   On a conversation, `C` starts with its subject and its people.
+- **The editor.** *Guests* works like compose's To: each guest is a pill, the contacts matching what you type show
+  under it (`↑` `↓` move, `↵` or `tab` takes one), a comma or `↵` after an address makes it a pill, and `⌫` in the
+  empty field removes the last one. A name left typed is looked up in your contacts when you save; one that matches
+  nobody stops the save. You and rooms are not shown, and stay on the event. Names quick add did not find stay typed.
 - **Find a time.** The editor shows the event's day with a strip for you and one per guest: busy times in grey,
   the event green where that person is free and red where they are busy. `⌘]` and `⌘[` move the event to the
   next or previous time where everyone who shares busy times is free, inside working hours. Busy times come from

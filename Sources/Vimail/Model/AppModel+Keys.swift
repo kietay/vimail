@@ -96,16 +96,7 @@ extension AppModel {
             if case .up = stroke.key, quickAddDraft != nil { continueDraft(); return true }
             return false
         case .eventEditor:
-            if stroke.isEscape { closeEditor(); return true }
-            if stroke.command, stroke.isEnter { saveEditor(notify: !stroke.shift); return true }
-            if stroke.command, stroke.shift, case .backspace = stroke.key { removeFromEditor(); return true }
-            if stroke.isCommand("]") { findTime(forward: true); return true }
-            if stroke.isCommand("[") { findTime(forward: false); return true }
-            if stroke.isCommand("e"), let editor = eventEditor, editor.occurrence != nil {
-                editor.cycleScope()
-                return true
-            }
-            return false
+            return handleEditorKey(stroke, context: context)
         case .help, .settings, .views:
             if stroke.isEscape || (!context.textFocused && (stroke.isChar("q") || (overlay == .help && stroke.isChar("?")))) {
                 overlay = nil
@@ -215,6 +206,27 @@ extension AppModel {
         if stroke.isChar("t") { focusTarget = .composeTo; return true }
         if stroke.isChar("s") { focusTarget = .composeSubject; return true }
         return !stroke.command
+    }
+
+    /// The event editor: its shortcuts, then Guests' suggestions and pills. Esc closes it and keeps a draft.
+    private func handleEditorKey(_ stroke: KeyStroke, context: KeyContext) -> Bool {
+        if stroke.command, stroke.isEnter { saveEditor(notify: !stroke.shift); return true }
+        if stroke.command, stroke.shift, case .backspace = stroke.key { removeFromEditor(); return true }
+        if stroke.isCommand("]") { findTime(forward: true); return true }
+        if stroke.isCommand("[") { findTime(forward: false); return true }
+        if let editor = eventEditor {
+            if stroke.isCommand("e"), editor.occurrence != nil {
+                editor.cycleScope()
+                return true
+            }
+            if context.textFocused, focusTarget == .eventGuests,
+               handleRecipientKey(stroke, suggestions: editor.suggestions, take: { editor.acceptSuggestion() },
+                                  finish: { editor.finishGuests() }, removeLast: { editor.removeLastGuest() }) {
+                return true
+            }
+        }
+        if stroke.isEscape { closeEditor(); return true }
+        return false
     }
 
     /// To, Cc, Bcc and the event editor's Guests: the suggestion list, Enter and Tab finish an address

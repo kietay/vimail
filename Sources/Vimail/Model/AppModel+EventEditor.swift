@@ -4,11 +4,15 @@ import MailStore
 import MailSync
 import Observation
 
-/// What the editor holds, kept when esc closes it with changes (like a mail draft).
+/// What the editor holds, kept when esc closes it with changes (like a mail draft). A draft kept by an older vimail that
+/// no longer decodes is ignored.
 struct EventDraft: Codable, Equatable {
     var title: String
     var when: String
-    var guests: String
+    /// The guests' pills.
+    var guests: [EmailAddress]
+    /// What is typed after them.
+    var guestInput: String
     var location: String
     var calendarID: String
     var repeats: String
@@ -34,8 +38,16 @@ final class EventEditorModel {
     var title: String
     /// Typed like quick add: "fri 12:30-13:30", "oct 16 all day".
     var when: String
-    /// Names or addresses, separated by commas.
-    var guests: String
+    /// Finished guests, shown as pills. Rooms and your own addresses are never among them: they stay on the event.
+    var guests: [EmailAddress]
+    /// What is typed after the pills: an address being typed, or names looked up in the contacts when saving.
+    var guestInput: String {
+        didSet { if guestInput != oldValue { guestInputChanged() } }
+    }
+    /// Contacts matching the guest being typed.
+    let suggestions: ContactSuggestions
+    /// Your addresses, which are never guests.
+    let me: Set<String>
     var location: String
     var calendarID: String
     /// "weekly", "every tue", "daily until dec 18"; empty for a single event.
@@ -59,6 +71,7 @@ final class EventEditorModel {
     let originalDetails: String?
     /// The fields as they were opened, to tell whether esc keeps a draft and which fields changed.
     @ObservationIgnored private var opened: EventDraft?
+    @ObservationIgnored private var guestsFocused = false
 
     /// Find a time: guests' busy times by address. People who do not share theirs are missing.
     var guestBusy: [String: [DateInterval]] = [:]
@@ -71,8 +84,9 @@ final class EventEditorModel {
     @ObservationIgnored var busyKey = ""
 
     init(original: CalendarEvent?, occurrence: CalendarEvent? = nil, title: String, when: String, shownStart: EventTime? = nil,
-         shownEnd: EventTime? = nil, guests: String, location: String, calendarID: String, repeats: String, recurrence: [String],
-         repeatsEditable: Bool = true, addConference: Bool, details: String, originalDetails: String? = nil) {
+         shownEnd: EventTime? = nil, guests: [EmailAddress], guestInput: String = "", location: String, calendarID: String, repeats: String,
+         recurrence: [String], repeatsEditable: Bool = true, addConference: Bool, details: String, originalDetails: String? = nil,
+         me: Set<String>, store: MailStore) {
         self.original = original
         self.occurrence = occurrence
         self.title = title
@@ -80,7 +94,10 @@ final class EventEditorModel {
         self.shownStart = shownStart
         self.shownEnd = shownEnd
         openedWhen = when
-        self.guests = guests
+        self.me = me
+        suggestions = ContactSuggestions(store: store)
+        self.guests = EventGuests.adding(guests, to: [], me: me)
+        self.guestInput = guestInput
         self.location = location
         self.calendarID = calendarID
         self.repeats = repeats
@@ -111,8 +128,8 @@ final class EventEditorModel {
 
     var draft: EventDraft {
         EventDraft(
-            title: title, when: when, guests: guests, location: location, calendarID: calendarID, repeats: repeats,
-            addConference: addConference, details: details, scope: scope
+            title: title, when: when, guests: guests, guestInput: guestInput, location: location, calendarID: calendarID,
+            repeats: repeats, addConference: addConference, details: details, scope: scope
         )
     }
 
@@ -123,9 +140,15 @@ final class EventEditorModel {
         opened.map { $0[keyPath: field] != draft[keyPath: field] } ?? true
     }
 
+    /// Guests differ from how the editor opened: other pills (in any order), or something typed after them.
+    var guestsChanged: Bool {
+        guard let opened else { return true }
+        return !EventGuests.same(guests, opened.guests) || guestInput.trimmingCharacters(in: .whitespaces) != opened.guestInput.trimmingCharacters(in: .whitespaces)
+    }
+
     /// Something was typed in a field (the scope alone is no change).
     var fieldsChanged: Bool {
-        [\EventDraft.title, \.when, \.guests, \.location, \.repeats, \.details].contains { changed($0) }
+        guestsChanged || [\EventDraft.title, \.when, \.location, \.repeats, \.details].contains { changed($0) }
     }
     /// The times as opened, while When is unchanged: they may say more than When can (seconds, a zone, a long event).
     var keptTimes: (start: EventTime, end: EventTime)? {
@@ -135,7 +158,7 @@ final class EventEditorModel {
     /// Esc keeps a draft: a new event with anything typed, or an event with changes.
     var keepsDraft: Bool {
         guard isNew else { return hasChanges }
-        return ![title, when, guests, location, details].allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return !guests.isEmpty || ![title, when, guestInput, location, details].allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
     /// ⌘E: this event, this and following, all events, in turn.
@@ -151,12 +174,71 @@ final class EventEditorModel {
         if occurrence != nil { scope = draft.scope }
         title = draft.title
         when = draft.when
-        guests = draft.guests
+        guests = EventGuests.adding(draft.guests, to: [], me: me)
+        guestInput = draft.guestInput
         location = draft.location
         calendarID = draft.calendarID
         repeats = draft.repeats
         addConference = draft.addConference
         details = draft.details
+    }
+
+    // MARK: - Guests
+
+    /// A comma after a full address (or the ">" closing "Name <address>") makes it a pill. Names stay typed: the
+    /// suggestions show the contacts matching the one being typed.
+    private func guestInputChanged() {
+        let typed = guestInput
+        let (finished, typing) = EventGuests.split(typed)
+        if !finished.isEmpty {
+            guests = EventGuests.adding(finished, to: guests, me: me)
+            // A text field ignores changes made while it reports its own edit, so this waits a turn.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.guestInput == typed else { return }
+                self.guestInput = typing
+            }
+            return
+        }
+        guard guestsFocused else { return }
+        suggestions.update(for: EventGuests.token(typed)) { [weak self] in
+            guard let self else { return [] }
+            return self.me.union(self.guests.map(\.normalized))
+        }
+    }
+
+    /// ↵, tab, or the cursor leaving Guests: a full address typed last becomes a pill too. Names stay typed.
+    func finishGuests() {
+        let (finished, typing) = EventGuests.split(guestInput, finishing: true)
+        guests = EventGuests.adding(finished, to: guests, me: me)
+        if typing != guestInput { guestInput = typing }
+    }
+
+    /// ↵ or tab on a suggestion (or a click): it replaces the name being typed.
+    func acceptSuggestion(at index: Int? = nil) {
+        guard let chosen = suggestions.take(at: index) else { return }
+        guests = EventGuests.adding([chosen], to: guests, me: me)
+        guestInput = EventGuests.droppingToken(guestInput)
+    }
+
+    func removeGuest(_ address: EmailAddress) {
+        guests.removeAll { $0.normalized == address.normalized }
+    }
+
+    /// ⌫ in an empty Guests field removes the last pill.
+    func removeLastGuest() -> Bool {
+        guard guestInput.isEmpty, !guests.isEmpty else { return false }
+        guests.removeLast()
+        return true
+    }
+
+    /// The cursor moved to another field (or none). Leaving Guests finishes a full address typed there.
+    func focusChanged(to field: FocusTarget?) {
+        let leftGuests = guestsFocused && field != .eventGuests
+        guestsFocused = field == .eventGuests
+        if leftGuests {
+            suggestions.close()
+            finishGuests()
+        }
     }
 }
 
@@ -343,26 +425,32 @@ extension AppModel {
     func continueDraft() {
         guard let draft = quickAddDraft else { return }
         let editor = EventEditorModel(
-            original: nil, title: "", when: "", guests: "", location: "", calendarID: calendarID(hint: nil), repeats: "",
-            recurrence: [], addConference: false, details: ""
+            original: nil, title: "", when: "", guests: [], location: "", calendarID: calendarID(hint: nil), repeats: "",
+            recurrence: [], addConference: false, details: "", me: editorSelfAddresses, store: services.store
         )
         editor.restore(draft)
         eventEditor = editor
         overlay = .eventEditor
     }
 
-    /// Tab in quick add: the editor with what the line said so far.
+    /// Tab in quick add: the editor with what the line said so far. Names no contact matched stay typed in Guests.
     func openEditor(from result: QuickAdd.Result?) {
         let when = result?.start.map { start in QuickAdd.text(start: start, end: result?.end ?? start, now: Date(), calendar: .current) } ?? ""
         eventEditor = EventEditorModel(
             original: nil, title: result?.title == "(no title)" ? "" : (result?.title ?? ""), when: when,
             shownStart: result?.start, shownEnd: result?.end,
-            guests: (result?.guests ?? []).map(\.formatted).joined(separator: ", "), location: result?.location ?? "",
+            guests: result?.guests ?? [], guestInput: (result?.unknownGuests ?? []).joined(separator: ", "), location: result?.location ?? "",
             calendarID: calendarID(hint: result?.calendarHint), repeats: Self.repeatText(result?.recurrence ?? [], start: result?.start ?? .timed(Date(), timeZone: nil)).text,
             // Events with guests get a Meet link, as when ↵ creates them.
-            recurrence: result?.recurrence ?? [], addConference: (result?.addConference ?? false) || !(result?.guests.isEmpty ?? true), details: ""
+            recurrence: result?.recurrence ?? [], addConference: (result?.addConference ?? false) || !(result?.guests.isEmpty ?? true), details: "",
+            me: editorSelfAddresses, store: services.store
         )
         overlay = .eventEditor
+    }
+
+    /// Your addresses, which the editor never shows or adds as guests.
+    var editorSelfAddresses: Set<String> {
+        services.store.selfAddresses.union(account.email.isEmpty ? [] : [account.normalized])
     }
 
     /// Enter on your own event in the calendar view. For a repeating event, changes go to this occurrence unless the
@@ -372,15 +460,15 @@ extension AppModel {
             let series = (try? await services.store.event(calendarID: item.calendarID, id: item.seriesID ?? item.event.id)) ?? item.event
             let occurrence = item.seriesID == nil ? nil : await occurrenceEvent(for: item)
             let shown = occurrence ?? series
-            let me = services.store.selfAddresses
+            let me = editorSelfAddresses
             let rule = Self.repeatText(series.recurrence, start: series.start)
             let editor = EventEditorModel(
                 original: series, occurrence: occurrence, title: shown.summary,
                 when: QuickAdd.text(start: shown.start, end: shown.end, now: Date(), calendar: .current), shownStart: shown.start, shownEnd: shown.end,
-                guests: shown.attendees.filter { !$0.isSelf && !me.contains($0.normalized) && !$0.isResource }.map(\.address.formatted).joined(separator: ", "),
+                guests: EventGuests.pills(of: shown.attendees, me: me),
                 location: shown.location ?? "", calendarID: series.calendarID, repeats: rule.text,
                 recurrence: series.recurrence, repeatsEditable: rule.exact, addConference: false,
-                details: Self.notesText(shown.details), originalDetails: shown.details
+                details: Self.notesText(shown.details), originalDetails: shown.details, me: me, store: services.store
             )
             if let saved = await loadDraft(id: editor.draftID) {
                 editor.restore(saved)
@@ -406,18 +494,12 @@ extension AppModel {
         details.map(HTMLText.editableText) ?? ""
     }
 
-    /// Names in Guests that are not addresses: they are looked up in the contacts. Commas inside quotes
-    /// ("Chen, Jamie" <jamie@studio.co>) do not split.
-    static func guestNames(_ text: String) -> [String] {
-        EmailAddress.parseList(text).filter { !$0.isValid }.map(\.email).filter { !$0.isEmpty }
-    }
-
     /// ⌘↵ (notify guests) or ⌘⇧↵ (no email) in the editor.
     func saveEditor(notify: Bool) {
         guard let editor = eventEditor else { return }
-        // Names in Guests are looked up in the contacts first. One that matches nobody stops the save: it is never dropped quietly.
-        let names = Self.guestNames(editor.guests)
-        let unknown = names.filter { quickAddContacts[$0.lowercased()] == nil }
+        // Names still typed in Guests are looked up in the contacts first. One that matches nobody stops the save: it is
+        // never dropped quietly.
+        let unknown = EventGuests.names(editor.guestInput).filter { quickAddContacts[$0.lowercased()] == nil }
         if !unknown.isEmpty {
             let store = services.store
             Task {
@@ -427,7 +509,8 @@ extension AppModel {
             }
             return
         }
-        if let missing = names.first(where: { quickAddContacts[$0.lowercased()]?.first == nil }) {
+        let typedGuests = EventGuests.resolve(editor.guests, typed: editor.guestInput, me: editor.me) { quickAddContacts[$0.lowercased()] ?? [] }
+        if let missing = typedGuests.unknown.first {
             showToast("No contact matches “\(missing)”. Type an address, or take the name out.", isError: true)
             return
         }
@@ -490,8 +573,8 @@ extension AppModel {
         func edited(_ field: KeyPath<EventDraft, String>) -> Bool { !seriesFromOneDay || editor.changed(field) }
         let title = edited(\.title) ? editor.title : (series?.summary ?? editor.title)
         let location = edited(\.location) ? editor.location : (series?.location ?? "")
-        let guests = edited(\.guests)
-            ? parsedGuests(editor.guests)
+        let guests = !seriesFromOneDay || editor.guestsChanged
+            ? typedGuests.guests
             : (series?.attendees ?? []).filter { !$0.isSelf && !$0.isResource }.map(\.address)
         // Notes left alone keep the description exactly as it was: Google's formatting and links stay.
         let details: String?
@@ -609,13 +692,6 @@ extension AppModel {
         await reloadAgenda()
     }
 
-    /// Guests typed in the editor: addresses, or names matched in the contacts.
-    func parsedGuests(_ text: String) -> [EmailAddress] {
-        EmailAddress.parseList(text).compactMap { entry in
-            entry.isValid ? entry : quickAddContacts[entry.email.lowercased()]?.first
-        }
-    }
-
     /// Esc in the editor: closes it. Unsaved changes stay as a draft: C then tab (a new event), or ↵ on the event.
     func closeEditor() {
         overlay = nil
@@ -696,8 +772,8 @@ extension AppModel {
                 && !excluded.contains(item.event.id) && !excluded.contains(item.seriesID ?? "")
         }.map { DateInterval(start: $0.start.instant(), end: max($0.start.instant(), $0.end.instant())) }
 
-        let me = services.store.selfAddresses
-        let emails = Array(Set(parsedGuests(editor.guests).map(\.normalized).filter { !me.contains($0) && $0 != account.normalized })).sorted()
+        let me = editor.me
+        let emails = Array(Set(editor.guests.map(\.normalized).filter { !me.contains($0) })).sorted()
         let key = emails.joined(separator: ",") + "|\(DayDate(from, in: calendar))|\(DayDate(to, in: calendar))"
         guard key != editor.busyKey else { return }
         guard !emails.isEmpty else {
@@ -721,7 +797,7 @@ extension AppModel {
                 (key, attending.contains(key) ? FreeTime.subtracting(ownTimes, from: value) : value)
             })
             editor.busyKey = key
-            let hidden = parsedGuests(editor.guests).filter { emails.contains($0.normalized) && busy[$0.normalized] == nil }
+            let hidden = editor.guests.filter { emails.contains($0.normalized) && busy[$0.normalized] == nil }
             editor.busyNote = hidden.isEmpty ? nil : "\(hidden.map(\.shortName).joined(separator: ", ")) \(hidden.count == 1 ? "does" : "do") not share busy times with you."
         } catch CalendarProviderError.notConnected {
             editor.busyNote = "Guests' busy times need calendar access again: press : and choose “Connect Google Calendar”."

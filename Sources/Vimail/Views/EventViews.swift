@@ -134,10 +134,8 @@ struct QuickAddView: View {
 struct EventEditorView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.theme) private var theme
-    @FocusState private var field: Field?
+    @FocusState private var field: FocusTarget?
     @State private var note: String?
-
-    enum Field: Hashable { case title, when, guests, location, repeats, details }
 
     var body: some View {
         if let editor = model.eventEditor {
@@ -153,11 +151,17 @@ struct EventEditorView: View {
                 }
             }
             .onAppear {
-                DispatchQueue.main.async { field = editor.title.isEmpty ? .title : .when }
+                DispatchQueue.main.async { field = editor.title.isEmpty ? .eventTitle : .eventWhen }
                 updateNote(editor)
             }
             .onChange(of: editor.when) { _, _ in updateNote(editor) }
-            .task(id: editor.guests + "|" + editor.when) {
+            // The model routes keys by the field the cursor is in (Guests' suggestions), as compose does.
+            .onChange(of: field) { _, value in
+                if model.focusTarget != value { model.focusTarget = value }
+                editor.focusChanged(to: value)
+            }
+            .onChange(of: model.focusTarget) { _, target in if field != target { field = target } }
+            .task(id: editor.guests.map(\.normalized).joined(separator: ",") + "|" + editor.when) {
                 try? await Task.sleep(for: .milliseconds(300))
                 guard !Task.isCancelled else { return }
                 await model.refreshEditorBusy()
@@ -177,7 +181,7 @@ struct EventEditorView: View {
                 .textFieldStyle(.plain)
                 .font(AppFonts.sans(18, .semibold))
                 .foregroundStyle(theme.foreground)
-                .focused($field, equals: .title)
+                .focused($field, equals: .eventTitle)
             if editor.occurrence != nil {
                 row("Change") {
                     Picker("", selection: $editor.scope) {
@@ -193,20 +197,18 @@ struct EventEditorView: View {
                 }
             }
             row("When") {
-                TextField("tue 14:00-15:00, oct 16 all day", text: $editor.when).fieldStyle().focused($field, equals: .when)
+                TextField("tue 14:00-15:00, oct 16 all day", text: $editor.when).fieldStyle().focused($field, equals: .eventWhen)
             }
             if let note {
                 Text(note).font(AppFonts.mono(10)).foregroundStyle(note.hasPrefix("Overlaps") || note.hasPrefix("Type") ? theme.yellow : theme.green)
                     .padding(.leading, 86)
             }
-            row("Guests") {
-                TextField("names or addresses, separated by commas", text: $editor.guests).fieldStyle().focused($field, equals: .guests)
-            }
+            guestsRow(editor)
             row("Where") {
-                TextField("a place or a link", text: $editor.location).fieldStyle().focused($field, equals: .location)
+                TextField("a place or a link", text: $editor.location).fieldStyle().focused($field, equals: .eventWhere)
             }
             row("Repeats") {
-                TextField("daily, every tue, every weekday, monthly…", text: $editor.repeats).fieldStyle().focused($field, equals: .repeats)
+                TextField("daily, every tue, every weekday, monthly…", text: $editor.repeats).fieldStyle().focused($field, equals: .eventRepeats)
                     .disabled(editor.changesOneOccurrence || !editor.repeatsEditable)
                     .opacity(editor.changesOneOccurrence || !editor.repeatsEditable ? 0.5 : 1)
             }
@@ -240,8 +242,33 @@ struct EventEditorView: View {
                 .frame(height: 110)
                 .background(theme.background.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.border.opacity(0.6), lineWidth: 1))
-                .focused($field, equals: .details)
+                .focused($field, equals: .eventNotes)
         }
+    }
+
+    /// Guests as compose's To: pills, the one being typed, and the contacts matching it under the row.
+    private func guestsRow(_ editor: EventEditorModel) -> some View {
+        @Bindable var editor = editor
+        return row("Guests", alignment: .top) {
+            RecipientInput(addresses: editor.guests, text: $editor.guestInput, prompt: "names or addresses", field: .eventGuests,
+                           focus: $field, fontSize: 12) { editor.removeGuest($0) }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(theme.background, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.border, lineWidth: 1))
+        }
+        .overlay(alignment: .bottomLeading) {
+            if field == .eventGuests, !editor.suggestions.isEmpty {
+                // Hangs from the row's bottom edge over the rows below, as in compose.
+                RecipientSuggestions(suggestions: editor.suggestions.items, highlighted: editor.suggestions.index) { index in
+                    editor.acceptSuggestion(at: index)
+                }
+                .padding(.top, 4)
+                .frame(height: 0, alignment: .top)
+                .offset(x: 86)
+            }
+        }
+        .zIndex(field == .eventGuests ? 3 : 1)
     }
 
     /// The line under Repeats: what saving changes.
@@ -277,13 +304,15 @@ struct EventEditorView: View {
         }
     }
 
-    private func row<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack(alignment: .center, spacing: 14) {
+    private func row<Content: View>(_ label: String, alignment: VerticalAlignment = .center, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: alignment, spacing: 14) {
             Text(label.uppercased())
                 .font(AppFonts.mono(9))
                 .tracking(1)
                 .foregroundStyle(theme.mutedForeground)
                 .frame(width: 72, alignment: .leading)
+                // Level with the first line of a field that wraps (Guests).
+                .padding(.top, alignment == .top ? 12 : 0)
             content()
         }
     }
@@ -337,10 +366,9 @@ private struct AvailabilityView: View {
     }
 
     private func strips() -> [Strip] {
-        let me = model.services.store.selfAddresses
         var result = [Strip(id: "you", name: "you", busy: editor.ownBusy)]
         var seen = Set<String>()
-        for guest in model.parsedGuests(editor.guests) where !me.contains(guest.normalized) && seen.insert(guest.normalized).inserted {
+        for guest in editor.guests where !editor.me.contains(guest.normalized) && seen.insert(guest.normalized).inserted {
             result.append(Strip(id: guest.normalized, name: guest.shortName, busy: editor.guestBusy[guest.normalized]))
         }
         return Array(result.prefix(6))
