@@ -125,6 +125,8 @@ final class ReaderController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private var queued: [String] = []
     var onAction: ((String) -> Void)?
     var onAttachment: ((String, String) -> Void)?
+    /// Tab marked this message read.
+    var onMessageRead: ((String) -> Void)?
     var onMailto: ((URL) -> Void)?
     /// Images a message embeds by Content-ID (`cid:`), as bytes and MIME type.
     var onInlineImage: ((_ messageID: String, _ contentID: String) async -> (Data, String)?)? {
@@ -170,6 +172,8 @@ final class ReaderController: NSObject, WKNavigationDelegate, WKUIDelegate {
             if let messageID = message["messageID"] as? String, let attachmentID = message["attachmentID"] as? String {
                 onAttachment?(messageID, attachmentID)
             }
+        case "read":
+            if let messageID = message["messageID"] as? String { onMessageRead?(messageID) }
         default:
             break
         }
@@ -193,6 +197,7 @@ final class ReaderController: NSObject, WKNavigationDelegate, WKUIDelegate {
     func scrollTo(top: Bool) { run("vimail.scrollTo('\(top ? "top" : "bottom")')") }
     func focusMessage(_ delta: Int) { run("vimail.focusMessage(\(delta))") }
     func toggleFocusedMessage() { run("vimail.toggleFocused()") }
+    func readAndNext() { run("vimail.readAndNext()") }
     func expandAll() { run("vimail.expandAll()") }
     func closeMenu() { run("vimail.closeMenu()") }
 

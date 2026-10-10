@@ -3,7 +3,8 @@ import Foundation
 /// A rule's WHEN: search syntax tested against one message as it arrives.
 ///
 /// Allowed: words, `"phrases"`, `-word`, `from:`, `-from:`, `to:`, `subject:`, `label:`, `-label:`,
-/// `has:attachment`, `is:list`, `before:` and `after:`. Operators that change after mail arrives
+/// `list:`, `-list:`, `has:attachment`, `is:list`, `before:` and `after:`. `list:` is tested when the
+/// rule looks at the message, against the people on the list at that time. Operators that change after mail arrives
 /// (`in:`, `is:read`, `is:unread`, `is:starred`) or with the clock (`newer_than:`, `older_than:`)
 /// are rejected, because a rule decides once per message. So is calendar search (`has:invite`,
 /// `invite:`, `organizer:me`).
@@ -55,7 +56,7 @@ public struct RuleFilter: Hashable, Sendable {
         let negated = key.hasPrefix("-")
         if negated { key.removeFirst() }
         switch key {
-        case "from", "label":
+        case "from", "label", "list":
             return value.isEmpty ? "\(key): needs a value" : nil
         case "to", "cc", "subject":
             if negated { return "-\(key): is not supported in rules" }
@@ -89,5 +90,28 @@ public struct RuleFilter: Hashable, Sendable {
             // Not an operator (for example "re:" or a URL): searched as text, as in search.
             return nil
         }
+    }
+
+    /// The lists of people a WHEN names with `list:` or `-list:`, as `ContactList.key`s.
+    public static func lists(in when: String) -> Set<String> {
+        let query = SearchQuery.parse(when)
+        return Set((query.lists + query.excludedLists).map(ContactList.key))
+    }
+
+    /// `when` with its `list:` and `-list:` terms for the list `old` naming `new` instead, or nil
+    /// when it has none. The other terms keep their text; spacing becomes single spaces.
+    public static func renamingList(in when: String, from old: String, to new: String) -> String? {
+        let oldKey = ContactList.key(old)
+        var changed = false
+        let terms = SearchQuery.tokenize(when).map { raw, quoted -> String in
+            if quoted { return "\"\(raw)\"" }
+            guard let colon = raw.firstIndex(of: ":") else { return raw }
+            let key = raw[..<colon].lowercased()
+            let value = String(raw[raw.index(after: colon)...]).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            guard key == "list" || key == "-list", ContactList.key(value) == oldKey else { return raw }
+            changed = true
+            return (key == "list" ? "" : "-") + ContactList.term(new)
+        }
+        return changed ? terms.joined(separator: " ") : nil
     }
 }

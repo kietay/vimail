@@ -19,6 +19,28 @@ func setCallCost(_ harness: Harness, _ micros: Int64) async throws {
 
 @Suite("Rule engine: runs over stored mail", .serialized)
 struct RuleEngineRunTests {
+    // MARK: - Lists of people
+
+    @Test func rulesReadListsOfPeopleWhenMailArrives() async throws {
+        let harness = try await Harness(rules: [RuleSpec(name: "VIPs", label: "vip", when: "list:vip"), deploysRule])
+        let vip = try await harness.store.createContactList(name: "VIP")
+        try await harness.store.addToContactList(vip.id, [ContactListMember(ana)])
+        _ = try await harness.deliver(mail("a1", from: ana, subject: "Lunch?"), mail("a2", from: shop, subject: "Sale"))
+        await harness.engine.drain()
+        #expect(try await harness.hasLabel("a1", "vip"))
+        #expect(try await !harness.hasLabel("a2", "vip"))
+        #expect(harness.calls().isEmpty)
+
+        // Someone joins the list: only the rules that name it run on their stored mail.
+        try await harness.store.upsertMessages([mail("s1", from: shop, subject: "Deploy your order")])
+        try await harness.store.addToContactList(vip.id, [ContactListMember(address: "@allbirds.com")])
+        let run = try await harness.engine.runRules(on: ["s1"], only: [harness.rule("VIPs").id])
+        await harness.engine.drain()
+        #expect(run.runID != nil)
+        #expect(try await harness.hasLabel("s1", "vip"))
+        #expect(try await !harness.hasLabel("s1", "deploys"))
+    }
+
     // MARK: - Estimates
 
     @Test func estimatesUseLocalPricesBeforeAnyCall() async throws {

@@ -83,6 +83,16 @@ enum ReaderHTML {
     .unread-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); flex-shrink: 0; }
     .sending { font: 9px 'IBM Plex Mono', monospace; color: var(--orange); }
 
+    /* The conversation as a line of ticks, one for each message: new ones colored, the focused one wide. */
+    .rail { position: fixed; right: 6px; top: 50%; transform: translateY(-50%); z-index: 10; display: flex; flex-direction: column;
+      gap: 4px; height: 60vh; justify-content: center; }
+    .tick { flex: 0 1 20px; min-height: 2px; width: 14px; display: flex; justify-content: flex-end; }
+    .tick::after { content: ''; width: 3px; border-radius: 2px; background: var(--border); transition: width .12s, background-color .12s; }
+    .tick:hover::after { background: var(--muted-foreground); }
+    .tick.new::after { background: var(--primary); }
+    .tick.focused::after { width: 8px; background: var(--muted-foreground); }
+    .tick.focused.new::after { background: var(--primary); }
+
     article.text { max-width: 680px; font-size: 15px; line-height: 1.85; color: var(--body); overflow-wrap: anywhere; }
     article.text p { margin: 0 0 20px 0; }
     article.text strong, article.text b { color: var(--foreground); font-weight: 500; }
@@ -355,6 +365,17 @@ enum ReaderHTML {
           </div>`;
       }
 
+      function countText() {
+        const fresh = state.messages.filter((m) => m.isNew).length;
+        return `${state.messages.length === 1 ? '1 message' : state.messages.length + ' messages'}${fresh ? ` · ${fresh} new` : ''}`;
+      }
+
+      function railHTML() {
+        if (state.messages.length < 2) return '';
+        return `<nav class="rail">${state.messages.map((m, i) =>
+          `<button class="tick ${m.isNew ? 'new' : ''}" data-go-message="${i}" title="${esc(m.fromName)} · ${esc(m.time)}"></button>`).join('')}</nav>`;
+      }
+
       function menuHTML() {
         return `<div class="menu">${state.menu.map((item) => item.separator ? '<hr>' : `
           <button data-action="${esc(item.action)}">${icon(item.icon, 14)}<span class="label">${esc(item.title)}</span>${item.key ? `<kbd>${esc(item.key)}</kbd>` : ''}</button>`).join('')}</div>`;
@@ -449,7 +470,6 @@ enum ReaderHTML {
         }
         const multi = payload.messages.length > 1 || !!payload.event;
         const first = payload.messages[0];
-        const newCount = payload.messages.filter((m) => m.isNew).length;
         let html = `
           <header class="thread">
             <div class="subject-row">
@@ -461,7 +481,7 @@ enum ReaderHTML {
             </div>
             ${multi ? `<div class="meta-row">
                 ${state.labels.map(chipHTML).join('')}
-                <span class="time">${payload.messages.length === 1 ? '1 message' : payload.messages.length + ' messages'}${newCount ? ` · ${newCount} new` : ''}</span>
+                <span class="time thread-count">${countText()}</span>
                 <div class="position"><span class="count">${esc(state.position)}</span>
                   <button class="nav-button" data-action="previous" ${state.hasPrevious ? '' : 'disabled'}>${icon('chevronLeft', 12)}</button>
                   <button class="nav-button" data-action="next" ${state.hasNext ? '' : 'disabled'}>${icon('chevron', 12)}</button></div>
@@ -494,7 +514,7 @@ enum ReaderHTML {
           html = html.replace('</header>', `</header><div class="images-banner"><span>Remote images are hidden to protect your privacy.</span><button data-action="loadImages">Show images</button></div>`);
         }
         // Reply/Forward live in a native bar pinned to the bottom of the pane, so they never move.
-        root.innerHTML = html;
+        root.innerHTML = html + railHTML();
         if (payload.showHints) document.body.classList.add('show-hints'); else document.body.classList.remove('show-hints');
         const keptFocus = kept ? payload.messages.findIndex((m) => m.id === kept.focusedID) : -1;
         focused = keptFocus >= 0 ? keptFocus : Math.max(0, payload.messages.findIndex((m) => m.focus));
@@ -531,6 +551,7 @@ enum ReaderHTML {
 
       function markFocused(scroll) {
         document.querySelectorAll('.message.multi').forEach((node) => node.classList.toggle('focused', Number(node.dataset.index) === focused));
+        document.querySelectorAll('.tick').forEach((node) => node.classList.toggle('focused', Number(node.dataset.goMessage) === focused));
         if (scroll) {
           const node = document.querySelector(`.message[data-index="${focused}"]`);
           if (node) node.scrollIntoView({ block: 'nearest' });
@@ -551,6 +572,8 @@ enum ReaderHTML {
         if (action) { menu && menu.classList.remove('open'); post({ type: 'action', name: action.dataset.action }); return; }
         const attachment = event.target.closest('[data-attachment]');
         if (attachment) { post({ type: 'attachment', messageID: attachment.dataset.message, attachmentID: attachment.dataset.attachment }); return; }
+        const tick = event.target.closest('[data-go-message]');
+        if (tick) { goToMessage(Number(tick.dataset.goMessage)); return; }
         const toggle = event.target.closest('[data-toggle-message]');
         if (toggle) { toggleMessage(Number(toggle.dataset.toggleMessage)); return; }
         const details = event.target.closest('[data-toggle-details]');
@@ -566,6 +589,17 @@ enum ReaderHTML {
         node.classList.toggle('collapsed');
         focused = index;
         markFocused(false);
+        wireFrames();
+      }
+
+      // Opens a message and puts its top in view.
+      function goToMessage(index) {
+        const node = document.querySelector(`.message[data-index="${index}"]`);
+        if (!node) return;
+        focused = index;
+        node.classList.remove('collapsed');
+        markFocused(false);
+        window.scrollTo(0, index === 0 ? 0 : Math.max(0, node.offsetTop - 80));
         wireFrames();
       }
 
@@ -588,6 +622,24 @@ enum ReaderHTML {
           wireFrames();
         },
         toggleFocused() { toggleMessage(focused); },
+        // The focused message is read. Goes to the next new one: after it, or else the first one before it.
+        readAndNext() {
+          if (!state || !state.messages || !state.messages.length) return;
+          const message = state.messages[focused];
+          if (message && message.isNew) {
+            message.isNew = false;
+            const node = document.querySelector(`.message[data-index="${focused}"]`);
+            if (node) node.querySelectorAll('.unread-dot').forEach((dot) => dot.remove());
+            const tick = document.querySelector(`.tick[data-go-message="${focused}"]`);
+            if (tick) tick.classList.remove('new');
+            const count = document.querySelector('.thread-count');
+            if (count) count.textContent = countText();
+            post({ type: 'read', messageID: message.id });
+          }
+          let next = state.messages.findIndex((m, i) => i > focused && m.isNew);
+          if (next < 0) next = state.messages.findIndex((m) => m.isNew);
+          if (next >= 0) goToMessage(next);
+        },
         expandAll() {
           const nodes = document.querySelectorAll('.message.multi');
           const anyCollapsed = Array.from(nodes).some((n) => n.classList.contains('collapsed'));

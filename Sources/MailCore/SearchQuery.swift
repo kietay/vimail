@@ -3,7 +3,8 @@ import Foundation
 /// Gmail-style search syntax, parsed for the local full-text index.
 ///
 /// Supported: free words (prefix match), `"exact phrase"`, `-excluded`, `from:`, `-from:`, `to:`, `subject:`,
-/// `label:`, `-label:`, `in:inbox|sent|trash|spam|starred|snoozed|drafts|archive|anywhere`,
+/// `label:`, `-label:`, `list:`, `-list:` (the sender is on a list of people),
+/// `in:inbox|sent|trash|spam|starred|snoozed|drafts|archive|anywhere`,
 /// `is:unread|read|starred|list`, `has:attachment`, `before:YYYY-MM-DD`, `after:YYYY-MM-DD`,
 /// `older_than:3d|2w|1m|1y`, `newer_than:...`, and for calendar mail `has:invite`,
 /// `invite:request|update|cancel|reply|pending|conflict` and `organizer:me`.
@@ -23,6 +24,10 @@ public struct SearchQuery: Hashable, Sendable {
     public var from: [String] = []
     /// `-from:` values: the sender must not match.
     public var excludedFrom: [String] = []
+    /// `list:` names: the sender is on the list of people (`ContactList`).
+    public var lists: [String] = []
+    /// `-list:` names: the sender is not on the list.
+    public var excludedLists: [String] = []
     public var to: [String] = []
     public var subject: [String] = []
     public var labelNames: [String] = []
@@ -67,6 +72,8 @@ public struct SearchQuery: Hashable, Sendable {
             case "from": query.from.append(value)
             case "-from": query.excludedFrom.append(value)
             case "-label": query.excludedLabelNames.append(value)
+            case "list": query.lists.append(value)
+            case "-list": query.excludedLists.append(value)
             case "to", "cc": query.to.append(value)
             case "subject": query.subject.append(value)
             case "label": query.labelNames.append(value)

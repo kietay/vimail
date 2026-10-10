@@ -56,6 +56,8 @@ public struct UndoRecord: Sendable {
     public let action: ThreadAction
     public let threadIDs: [String]
     let applied: AppliedMutation
+    /// Set when the action changed one message only, not its conversation.
+    public var messageID: String?
 
     /// The messages the action added `labelID` to (or removed it from): only those that changed, not
     /// those that already had it (or never had it). Your label edits are reported to rules with them.
@@ -92,6 +94,17 @@ public final class MailActions: Sendable {
         outboxChanged()
         guard applied.isUndoable else { return nil }
         return UndoRecord(summary: action.summary(count: threadIDs.count, labelName: labelName), action: action, threadIDs: threadIDs, applied: applied)
+    }
+
+    /// Marks one message read and leaves the rest of its conversation as it is.
+    @discardableResult
+    public func markRead(message messageID: String, inThread threadID: String) async throws -> UndoRecord? {
+        let states = try await store.messageLabels(inThreads: [threadID])
+        guard let state = states.first(where: { $0.messageID == messageID }), state.labels.contains(SystemLabel.unread) else { return nil }
+        let delta = PlannedDelta(LabelDelta(messageIDs: [messageID], remove: [SystemLabel.unread]), syncs: !state.isLocal)
+        let applied = try await store.apply(LocalMutation(deltas: [delta]))
+        outboxChanged()
+        return UndoRecord(summary: "Marked the message as read.", action: .markRead, threadIDs: [threadID], applied: applied, messageID: messageID)
     }
 
     public func undo(_ record: UndoRecord) async throws {

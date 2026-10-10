@@ -765,6 +765,18 @@ struct ViewEditorView: View {
                     }
                     .labelsHidden()
                 }
+                if !model.contactLists.isEmpty || draft.senderList != nil {
+                    field("Sender is on list") {
+                        Picker("", selection: $draft.senderList) {
+                            Text("Anyone").tag(String?.none)
+                            ForEach(model.contactLists) { Text($0.name).tag(String?.some($0.name)) }
+                            if let name = draft.senderList, !model.contactLists.contains(where: { $0.key == ContactList.key(name) }) {
+                                Text("\(name) (deleted)").tag(String?.some(name))
+                            }
+                        }
+                        .labelsHidden()
+                    }
+                }
                 HStack(spacing: 16) {
                     field("Sender contains") {
                         TextField("Anyone", text: $draft.sender).fieldStyle().focused($focus, equals: .viewSender)

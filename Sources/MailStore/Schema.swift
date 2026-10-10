@@ -309,6 +309,16 @@ enum Schema {
             updated_at INTEGER NOT NULL
         );
         """,
+        // 6: lists of people. `list:` in search and rules tests a message's sender against them.
+        """
+        CREATE TABLE contact_lists (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+          key TEXT NOT NULL UNIQUE,                  -- the name lowercased: what list: compares
+          position INTEGER NOT NULL, created_at INTEGER NOT NULL);
+        CREATE TABLE contact_list_members (list_id TEXT NOT NULL,
+          address TEXT NOT NULL,                     -- "a@b.com" | "@b.com", lowercased
+          name TEXT, added_at INTEGER NOT NULL, PRIMARY KEY (list_id, address)) WITHOUT ROWID;
+        CREATE INDEX contact_list_members_address ON contact_list_members(address);
+        """,
     ]
 
     static func migrate(_ db: SQLiteDatabase) throws {

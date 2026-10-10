@@ -67,6 +67,8 @@ public enum KeyCommand: Hashable, Sendable {
     case down, up, top, bottom, halfPageDown, halfPageUp, pageDown, pageUp
     case focusList, focusReader, open, back, escape
     case nextMessage, previousMessage, expandAll
+    /// The focused message is read: on to the next new one in the conversation.
+    case readAndNext
     case nextThread, previousThread
     case readerPageDown, readerPageUp
     case visual, toggleSelection, selectAll, clearSelection
@@ -84,6 +86,12 @@ public enum KeyCommand: Hashable, Sendable {
     case manageRules
     /// A new rule from the conversation under the cursor.
     case ruleFromThread
+    /// The sender on or off the quick list of people (the first list).
+    case quickList
+    /// Lists of people: tick the ones the sender is on.
+    case listPicker
+    /// The people manager.
+    case managePeople
     // Calendar: answer an invitation (Y M N, R with a note), the calendar view, joining, moving by day and week.
     case answer(ResponseStatus), answerWithNote
     case calendar, joinMeeting, openInvitationMail, newEvent
@@ -102,7 +110,7 @@ public enum Keymap {
         ("h", .focusList), ("<Left>", .focusList), ("l", .focusReader), ("<Right>", .focusReader),
         ("<CR>", .open), ("o", .open), ("q", .back), ("<Esc>", .escape),
         // Reader
-        ("n", .nextMessage), ("p", .previousMessage), ("O", .expandAll),
+        ("n", .nextMessage), ("p", .previousMessage), ("O", .expandAll), ("<Tab>", .readAndNext),
         ("J", .nextThread), ("K", .previousThread),
         ("<Space>", .readerPageDown), ("<S-Space>", .readerPageUp),
         ("ga", .go(.archive)),
@@ -123,6 +131,8 @@ public enum Keymap {
         ("go", .openAttachments),
         // Rules
         ("g?", .explainLabels), ("=", .runRules), ("gr", .manageRules), ("T", .ruleFromThread),
+        // People
+        ("i", .quickList), ("P", .listPicker), ("gp", .managePeople),
         // Calendar
         ("Y", .answer(.accepted)), ("M", .answer(.tentative)), ("N", .answer(.declined)), ("R", .answerWithNote),
         ("gc", .calendar), ("gj", .joinMeeting), ("gm", .openInvitationMail), ("C", .newEvent),

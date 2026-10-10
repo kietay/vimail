@@ -38,6 +38,13 @@ struct KeymapTests {
         #expect(run([.char("T")]) == [.command(.ruleFromThread, count: 1)])
     }
 
+    @Test func peopleKeys() {
+        // No sequence starts with i or P, so neither waits for a second key.
+        #expect(run([.char("i")]) == [.command(.quickList, count: 1)])
+        #expect(run([.char("P")]) == [.command(.listPicker, count: 1)])
+        #expect(run([.char("g"), .char("p")]) == [.pending, .command(.managePeople, count: 1)])
+    }
+
     @Test func modifiersAndSpecialKeys() {
         #expect(run([KeyStroke(.char("d"), control: true)]) == [.command(.halfPageDown, count: 1)])
         #expect(run([KeyStroke(.char("k"), command: true)]) == [.command(.omnibox, count: 1)])

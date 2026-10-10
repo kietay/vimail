@@ -90,12 +90,15 @@ public struct SavedView: Identifiable, Hashable, Codable, Sendable {
     public var sender: String
     /// Case-insensitive "text contains" (subject, sender, body).
     public var text: String
+    /// Name of a list of people: only mail from them. nil for anyone.
+    public var senderList: String?
     public var position: Int
 
     public init(
         id: String = "view-\(UUID().uuidString.prefix(8).lowercased())",
         name: String, pinned: Bool = true, status: ReadFilter = .any, starredOnly: Bool = false,
-        labelID: String? = nil, mailbox: Mailbox? = nil, sender: String = "", text: String = "", position: Int = 0
+        labelID: String? = nil, mailbox: Mailbox? = nil, sender: String = "", text: String = "", senderList: String? = nil,
+        position: Int = 0
     ) {
         self.id = id
         self.name = name
@@ -106,6 +109,7 @@ public struct SavedView: Identifiable, Hashable, Codable, Sendable {
         self.mailbox = mailbox
         self.sender = sender
         self.text = text
+        self.senderList = senderList
         self.position = position
     }
 
@@ -117,6 +121,7 @@ public struct SavedView: Identifiable, Hashable, Codable, Sendable {
         if let labelID { query.labelIDs = [labelID] }
         if !sender.trimmingCharacters(in: .whitespaces).isEmpty { query.senders = [sender] }
         if !text.trimmingCharacters(in: .whitespaces).isEmpty { query.containsText = [text] }
+        if let senderList, !senderList.trimmingCharacters(in: .whitespaces).isEmpty { query.senderLists = [senderList] }
         return query
     }
 }
@@ -159,6 +164,10 @@ public struct ThreadQuery: Hashable, Sendable {
     public var senders: [String] = []
     /// No message may be from a matching sender (name or address substring).
     public var excludedSenders: [String] = []
+    /// Some message is from a person on the list with this name (`list:`).
+    public var senderLists: [String] = []
+    /// No message is from a person on the list with this name (`-list:`).
+    public var excludedSenderLists: [String] = []
     /// Substring match on recipient name or address.
     public var recipients: [String] = []
     /// Substring match on the subject.
@@ -218,6 +227,8 @@ public struct ThreadQuery: Hashable, Sendable {
         copy.excludedLabelNames += search.excludedLabelNames
         copy.senders += search.from
         copy.excludedSenders += search.excludedFrom
+        copy.senderLists += search.lists
+        copy.excludedSenderLists += search.excludedLists
         copy.recipients += search.to
         copy.subjects += search.subject
         copy.terms += search.terms
