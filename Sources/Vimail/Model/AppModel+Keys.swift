@@ -228,8 +228,8 @@ extension AppModel {
                 editor.cycleScope()
                 return true
             }
-            // p outside a field: what guests see, or find a time again, as p shows compose's preview.
-            if !context.textFocused, stroke.isChar("p") {
+            // ⌘P anywhere, or p outside a field (as p shows compose's preview): what guests see, or find a time again.
+            if stroke.isCommand("p") || (!context.textFocused && stroke.isChar("p")) {
                 editor.showsPreview.toggle()
                 return true
             }

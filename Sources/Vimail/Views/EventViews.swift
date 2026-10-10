@@ -178,18 +178,18 @@ struct EventEditorView: View {
         switch model.focusTarget {
         case .eventNotes:
             return editor.notesMode == .normal
-                ? "vim keys · i insert · esc close, keeping a draft · ^g your editor · ⌘↵ save and email guests"
-                : "esc vim keys · ^g your editor · ⌘↵ save and email guests · ⌘⇧↵ save without email"
+                ? "vim keys · i insert · esc close, keeping a draft · ^g your editor · ⌘P \(editor.showsPreview ? "find a time" : "preview") · ⌘↵ save and email guests"
+                : "esc vim keys · ^g your editor · ⌘P \(editor.showsPreview ? "find a time" : "preview") · ⌘↵ save and email guests · ⌘⇧↵ save without email"
         case nil:
             return "p \(editor.showsPreview ? "find a time" : "preview") · ⌘↵ save and email guests · ⌘⇧↵ save without email · "
                 + "^g notes in your editor · ⌘⇧⌫ \(editor.isNew ? "discard" : "remove") · esc keep as draft"
         default:
-            return "⌘↵ save and email guests · ⌘⇧↵ save without email · ⌘[ ⌘] find a time · ^g notes in your editor · "
-                + "⌘⇧⌫ \(editor.isNew ? "discard" : "remove") · esc keep as draft"
+            return "⌘↵ save and email guests · ⌘⇧↵ save without email · ⌘[ ⌘] find a time · ⌘P \(editor.showsPreview ? "find a time" : "preview") · "
+                + "^g notes in your editor · ⌘⇧⌫ \(editor.isNew ? "discard" : "remove") · esc keep as draft"
         }
     }
 
-    /// The right pane: who is free when (find a time), or what guests see. p outside a field switches, as in compose.
+    /// The right pane: who is free when (find a time), or what guests see. ⌘P, or p outside a field (as in compose), switches.
     private func sidePane(_ editor: EventEditorModel) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
@@ -204,7 +204,7 @@ struct EventEditorView: View {
                 }
                 .buttonStyle(.plain)
                 .padding(.leading, 6)
-                .help(editor.showsPreview ? "Show who is free (p outside a field)" : "Show what guests see (p outside a field)")
+                .help(editor.showsPreview ? "Show who is free (⌘P)" : "Show what guests see (⌘P)")
             }
             if editor.showsPreview {
                 PreviewWebView(html: model.eventPreview(editor), policy: .strict)
