@@ -106,9 +106,14 @@ public enum Dollars {
         return String(format: "$%.2f", Double(micros) / 1_000_000)
     }
 
+    /// An estimate: "≈ $0.23", "< $0.01" (never "≈ < $0.01"), "$0.00".
+    public static func estimate(_ micros: Int64) -> String {
+        micros < 5_000 ? text(micros) : "≈ \(text(micros))"
+    }
+
     /// A monthly estimate: "≈ $0.23/mo", "< $0.01/mo", "$0.00/mo".
     public static func monthly(_ micros: Int64) -> String {
-        micros < 5_000 ? "\(text(micros))/mo" : "≈ \(text(micros))/mo"
+        "\(estimate(micros))/mo"
     }
 }
 

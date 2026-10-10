@@ -211,3 +211,95 @@ func matchesFixture(_ actual: Data, _ name: String) -> Bool {
     print("Fixture \(name) differs. Actual output: \(url.path)")
     return false
 }
+
+/// JSON with every object's keys in the order they were written: `JSONSerialization` loses it, and
+/// output schemas depend on it.
+indirect enum OrderedJSON {
+    case object(keys: [String], values: [String: OrderedJSON])
+    case array([OrderedJSON])
+    /// A string, number, boolean or null, as `JSONSerialization` reads it.
+    case scalar(Any)
+
+    struct Malformed: Error {}
+
+    init(_ data: Data) throws {
+        var parser = Parser(bytes: Array(data))
+        self = try parser.value()
+    }
+
+    subscript(key: String) -> OrderedJSON? {
+        if case .object(_, let values) = self { values[key] } else { nil }
+    }
+
+    var keys: [String] {
+        if case .object(let keys, _) = self { keys } else { [] }
+    }
+
+    var strings: [String]? {
+        guard case .array(let items) = self else { return nil }
+        return items.compactMap { if case .scalar(let value as String) = $0 { value } else { nil } }
+    }
+
+    private struct Parser {
+        static let space = Array(" \n\r\t".utf8)
+        let bytes: [UInt8]
+        var index = 0
+
+        mutating func value() throws -> OrderedJSON {
+            skipSpace()
+            guard index < bytes.count else { throw Malformed() }
+            switch bytes[index] {
+            case UInt8(ascii: "{"):
+                index += 1
+                var keys: [String] = []
+                var values: [String: OrderedJSON] = [:]
+                while try !closes("}") {
+                    guard case .scalar(let key as String) = try value() else { throw Malformed() }
+                    try expect(":")
+                    keys.append(key)
+                    values[key] = try value()
+                }
+                return .object(keys: keys, values: values)
+            case UInt8(ascii: "["):
+                index += 1
+                var items: [OrderedJSON] = []
+                while try !closes("]") { items.append(try value()) }
+                return .array(items)
+            default:
+                // Find where the scalar ends, then let Foundation read it.
+                let start = index
+                if bytes[index] == UInt8(ascii: "\"") {
+                    index += 1
+                    while index < bytes.count, bytes[index] != UInt8(ascii: "\"") { index += bytes[index] == UInt8(ascii: "\\") ? 2 : 1 }
+                    index += 1
+                } else {
+                    while index < bytes.count, !(Self.space + Array(",]}".utf8)).contains(bytes[index]) { index += 1 }
+                }
+                guard index <= bytes.count else { throw Malformed() }
+                return .scalar(try JSONSerialization.jsonObject(with: Data(bytes[start..<index]), options: .fragmentsAllowed))
+            }
+        }
+
+        /// Steps over the closing bracket (true) or the "," before the next member (false).
+        mutating func closes(_ bracket: Unicode.Scalar) throws -> Bool {
+            skipSpace()
+            guard index < bytes.count else { throw Malformed() }
+            if bytes[index] == UInt8(ascii: bracket) {
+                index += 1
+                return true
+            }
+            if bytes[index] == UInt8(ascii: ",") { index += 1 }
+            return false
+        }
+
+        mutating func expect(_ character: Unicode.Scalar) throws {
+            skipSpace()
+            guard index < bytes.count, bytes[index] == UInt8(ascii: character) else { throw Malformed() }
+            index += 1
+        }
+
+        mutating func skipSpace() {
+            while index < bytes.count, Self.space.contains(bytes[index]) { index += 1 }
+        }
+    }
+}

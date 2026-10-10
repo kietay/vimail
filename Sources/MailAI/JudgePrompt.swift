@@ -7,12 +7,13 @@ import MailCore
 ///
 /// Everything before the email is the same for every email until the rules or the examples change,
 /// so it is cached: the rules block and the examples block carry `cache_control`. Its bytes are
-/// stable: rules sorted by key, examples in the order given, no timestamps, sorted JSON keys.
+/// stable: rules sorted by key, examples in the order given, no timestamps, JSON keys in a fixed order.
 public struct JudgePrompt: Sendable {
     /// Part of each verdict's judge hash. Bump it when the instructions, the email format or the
-    /// schema change, so cached verdicts are judged again.
-    public static let versionNumber = 1
-    /// "v1".
+    /// schema change, so cached verdicts are judged again. v2: the schema's properties in the order
+    /// Claude should write them (v1 sent them sorted, and Claude wrote an empty reason first).
+    public static let versionNumber = 2
+    /// "v2".
     public static let version = "v\(versionNumber)"
     /// Fixed: changing it invalidates the prompt cache.
     public static let effort = MessagesRequest.effort
@@ -135,7 +136,8 @@ public struct JudgePrompt: Sendable {
     }
 
     /// The output schema (design §4.3). Every catalog key is in the enum, so the compiled grammar
-    /// changes only with the rule set. `reason` comes before `verdict`, so evidence precedes the decision.
+    /// changes only with the rule set. Claude writes the properties in this order: the rule, then the
+    /// evidence in `reason`, then the verdict it supports.
     static func schema(keys: [String]) -> JSONValue {
         .strictObject([
             "verdicts": [

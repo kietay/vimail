@@ -21,6 +21,7 @@ struct RequestTests {
         #expect(call.headers["anthropic-beta"] == nil)
         #expect(call.json["fallbacks"] == nil)
         #expect(call.json["max_tokens"] as? Int == 2048)
+        #expect(try OrderedJSON(call.body).keys == ["model", "max_tokens", "system", "messages", "output_config"])
         #expect(matchesFixture(call.body, "judge-request-haiku.json"))
     }
 
@@ -29,6 +30,7 @@ struct RequestTests {
         #expect(call.headers["anthropic-beta"] == "server-side-fallback-2026-07-01")
         #expect(call.json["fallbacks"] as? String == "default")
         #expect(call.json["max_tokens"] as? Int == 4096)
+        #expect(try OrderedJSON(call.body).keys == ["model", "max_tokens", "system", "messages", "output_config", "fallbacks"])
         #expect(matchesFixture(call.body, "judge-request-opus.json"))
     }
 
@@ -89,11 +91,55 @@ struct RequestTests {
         #expect((item["properties"] as? [String: [String: Any]])?["rule"]?["enum"] as? [String] == ["r1", "r3"])
         #expect((item["properties"] as? [String: [String: Any]])?["verdict"]?["enum"] as? [String] == ["match", "no_match", "unsure"])
         #expect(item["required"] as? [String] == ["rule", "reason", "verdict"])
-        // Sorted keys put "reason" before "verdict": the evidence comes first.
-        let text = String(decoding: call.body, as: UTF8.self)
-        let reason = try #require(text.range(of: #""reason":"#))
-        let verdict = try #require(text.range(of: #""verdict":"#))
-        #expect(reason.lowerBound < verdict.lowerBound)
+    }
+
+    /// Structured output writes properties in the order the schema lists them, so each one can draw
+    /// on those before it: the verdict on the reason, the ASK on the name and label.
+    @Test func everyOutputSchemaListsItsPropertiesInWritingOrder() async throws {
+        let judged = try await send(Sample.request())
+        let drafts = FakeTransport([.ok(RuleDrafterTests.answer(ask: "Receipts."))])
+        _ = try await RuleDrafter(judge: makeJudge(drafts)).draft("receipts", labelNames: [])
+        let drafted = try #require(drafts.calls.first)
+
+        for (call, expected) in [(judged, [["verdicts"], ["rule", "reason", "verdict"]]), (drafted, [["name", "label", "ask", "when"]])] {
+            let schema = try #require(try OrderedJSON(call.body)["output_config"]?["format"]?["schema"])
+            var orders: [[String]] = []
+            func walk(_ value: OrderedJSON) {
+                switch value {
+                case .object(let keys, let values):
+                    if let properties = values["properties"] {
+                        orders.append(properties.keys)
+                        #expect(values["required"]?.strings == properties.keys, "required lists the properties in their order")
+                    }
+                    for key in keys { walk(values[key]!) }
+                case .array(let items):
+                    items.forEach(walk)
+                case .scalar:
+                    break
+                }
+            }
+            walk(schema)
+            #expect(orders == expected)
+        }
+    }
+
+    @Test func theSameRequestIsAlwaysTheSameBytes() {
+        // Built from scratch each time, so no hash order (a Dictionary's) can decide the bytes.
+        let judged = (0..<20).map { _ in
+            JudgePrompt(Sample.request(), timeZone: .gmt).body(model: .opus, maxTokens: 4096, evaluate: ["r1", "r3"], fallbacks: true).encoded()
+        }
+        #expect(Set(judged).count == 1)
+        let drafted = (0..<20).map { _ in RuleDrafter.request("receipts", seed: nil, labelNames: ["receipts"], model: .haiku).encoded() }
+        #expect(Set(drafted).count == 1)
+    }
+
+    @Test func jsonKeepsMembersInOrderAndEscapesStringsLikeJSONEncoder() throws {
+        let text = "a\"b\\c/d\n\r\t\u{8}\u{C}\u{0}\u{1F}\u{7F}\u{2028} é · 😀"
+        let value: JSONValue = ["z": .string(text), "a": [true, .int(-3)], "m": nil, "b": ["y": "1", "x": "2"]]
+        #expect(String(decoding: value.encoded(), as: UTF8.self) == #"{"z":"a\"b\\c/d\n\r\t\b\f\u0000\u001f\#u{7F}\#u{2028} é · 😀","a":[true,-3],"b":{"y":"1","x":"2"}}"#)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        #expect(JSONValue.string(text).encoded() == (try encoder.encode(text)))
     }
 
     @Test func prefixIsByteIdenticalAcrossEmails() async throws {
@@ -103,19 +149,21 @@ struct RequestTests {
         _ = try await judge.judge(Sample.request(Sample.receipt))
         _ = try await judge.judge(Sample.request(Sample.newsletter, evaluate: ["r3"]))
         _ = try await judge.judge(Sample.request(reply.message, thread: reply.thread))
-        let bodies = transport.calls.map(\.json)
-        func encoded(_ value: Any?) throws -> Data {
-            try JSONSerialization.data(withJSONObject: try #require(value), options: [.sortedKeys])
+        // Every byte before the email's block (model, system, examples) and after it (the schema) is the same.
+        var parts: [(before: Substring, email: Substring, after: Substring)] = []
+        for call in transport.calls {
+            let text = call.text
+            let start = try #require(text.range(of: #"{"type":"text","text":"<evaluate>"#))
+            let end = try #require(text.range(of: #"</email>"}"#))
+            parts.append((text[..<start.lowerBound], text[start.lowerBound..<end.upperBound], text[end.upperBound...]))
         }
-        func content(_ body: [String: Any]) -> [[String: Any]] {
-            ((body["messages"] as? [[String: Any]])?.first?["content"] as? [[String: Any]]) ?? []
+        #expect(parts.count == 3)
+        for part in parts.dropFirst() {
+            #expect(part.before == parts[0].before)
+            #expect(part.after == parts[0].after)
         }
-        for body in bodies.dropFirst() {
-            #expect(try encoded(body["system"]) == encoded(bodies[0]["system"]))
-            #expect(try encoded(content(body)[0]) == encoded(content(bodies[0])[0]))
-            #expect(try encoded(body["output_config"]) == encoded(bodies[0]["output_config"]))
-        }
-        #expect(content(bodies[0])[1]["text"] as? String != content(bodies[1])[1]["text"] as? String)
+        #expect(parts[0].before.contains("<rules>") && parts[0].before.contains("<examples>") && parts[0].after.contains("json_schema"))
+        #expect(parts[0].email != parts[1].email)
         // The same prompt prefix, so the limiter treats them as one cache entry.
         let prefixes = [Sample.request(Sample.receipt), Sample.request(Sample.newsletter, evaluate: ["r3"])].map { JudgePrompt($0).prefix(model: .haiku) }
         #expect(prefixes[0] == prefixes[1])

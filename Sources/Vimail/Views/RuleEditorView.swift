@@ -366,10 +366,10 @@ struct RuleEditorView: View {
         case .discard:
             (editor.isNew ? "Discard this rule? Its marks go too." : "Discard your changes to this rule?", "y discard · n keep editing")
         case .saveUntested(let marks):
-            ("\(marks == 1 ? "1 mark" : "\(marks) marks") not tested" + (editor.costs.map { " · ⌃r test ≈ \(Dollars.text($0.atIssue.micros))" } ?? ""),
+            ("\(marks == 1 ? "1 mark" : "\(marks) marks") not tested" + (editor.costs.map { " · ⌃r test \(Dollars.estimate($0.atIssue.micros))" } ?? ""),
              "↵ save as tested · ⌃r test · esc")
         case .test(let test, let cost):
-            ("Test \(cost.calls) \(cost.calls == 1 ? "row" : "rows")\(test == .all ? "" : " at issue") with Claude ≈ \(Dollars.text(cost.micros))?", "↵ test · esc cancel")
+            ("Test \(cost.calls) \(cost.calls == 1 ? "row" : "rows")\(test == .all ? "" : " at issue") with Claude \(Dollars.estimate(cost.micros))?", "↵ test · esc cancel")
         }
         return HStack(spacing: 12) {
             Text(verbatim: text).foregroundStyle(theme.foreground)

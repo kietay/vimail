@@ -100,6 +100,6 @@ struct AISettingsTests {
     }
 
     @Test func promptVersionNumber() {
-        #expect(JudgePrompt.version == "v1" && JudgePrompt.versionNumber == 1)
+        #expect(JudgePrompt.version == "v2" && JudgePrompt.versionNumber == 2)
     }
 }

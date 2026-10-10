@@ -188,8 +188,8 @@ public enum RuleEditorText {
     public static func testPrices(atIssue: PreviewCost, all: PreviewCost) -> String {
         guard all.calls > 0 else { return "nothing to test: your marks and Claude decide every row" }
         var parts: [String] = []
-        if atIssue.calls > 0 { parts.append("⌃r test \(atIssue.calls) ≈ \(Dollars.text(atIssue.micros))") }
-        parts.append("⌃R all \(all.calls) ≈ \(Dollars.text(all.micros))")
+        if atIssue.calls > 0 { parts.append("⌃r test \(atIssue.calls) \(Dollars.estimate(atIssue.micros))") }
+        parts.append("⌃R all \(all.calls) \(Dollars.estimate(all.micros))")
         return parts.joined(separator: " · ")
     }
 

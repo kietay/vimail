@@ -5,7 +5,11 @@ import MailCore
 ///
 /// There is deliberately no field for `temperature`, `top_p`, `top_k`, `thinking`, `tool_choice`,
 /// tools or an assistant turn: the 5.5 models reject most of them, and an assistant prefill is a 400.
-struct MessagesRequest: Encodable, Sendable, Hashable {
+///
+/// It is written as a `JSONValue`, not with `JSONEncoder`: that orders keys by hash unless it sorts
+/// them, and sorting would also reorder the output schema's properties, which Claude writes in the
+/// order the schema lists them.
+struct MessagesRequest: Sendable, Hashable {
     var model: String
     var maxTokens: Int
     var system: [TextBlock]
@@ -25,13 +29,19 @@ struct MessagesRequest: Encodable, Sendable, Hashable {
         self.fallbacks = fallbacks ? "default" : nil
     }
 
-    enum CodingKeys: String, CodingKey {
-        case model, system, messages, fallbacks
-        case maxTokens = "max_tokens"
-        case outputConfig = "output_config"
+    /// The body: keys in this order, `fallbacks` only when set.
+    var json: JSONValue {
+        [
+            "model": .string(model),
+            "max_tokens": .int(maxTokens),
+            "system": .array(system.map(\.json)),
+            "messages": .array(messages.map(\.json)),
+            "output_config": outputConfig.json,
+            "fallbacks": fallbacks.map(JSONValue.string),
+        ]
     }
 
-    struct TextBlock: Encodable, Sendable, Hashable {
+    struct TextBlock: Sendable, Hashable {
         var type = "text"
         var text: String
         var cacheControl: CacheControl?
@@ -41,39 +51,43 @@ struct MessagesRequest: Encodable, Sendable, Hashable {
             cacheControl = cacheTTL.map { CacheControl(ttl: $0.rawValue) }
         }
 
-        enum CodingKeys: String, CodingKey {
-            case type, text
-            case cacheControl = "cache_control"
+        var json: JSONValue {
+            ["type": .string(type), "text": .string(text), "cache_control": cacheControl?.json]
         }
     }
 
-    struct CacheControl: Encodable, Sendable, Hashable {
+    struct CacheControl: Sendable, Hashable {
         var type = "ephemeral"
         var ttl: String
+
+        var json: JSONValue { ["type": .string(type), "ttl": .string(ttl)] }
     }
 
     /// The only turn: rules never send an assistant message.
-    struct UserMessage: Encodable, Sendable, Hashable {
+    struct UserMessage: Sendable, Hashable {
         var role = "user"
         var content: [TextBlock]
+
+        var json: JSONValue { ["role": .string(role), "content": .array(content.map(\.json))] }
     }
 
-    struct OutputConfig: Encodable, Sendable, Hashable {
+    struct OutputConfig: Sendable, Hashable {
         var effort = MessagesRequest.effort
         var format: OutputFormat
+
+        var json: JSONValue { ["effort": .string(effort), "format": format.json] }
     }
 
-    struct OutputFormat: Encodable, Sendable, Hashable {
+    struct OutputFormat: Sendable, Hashable {
         var type = "json_schema"
         var schema: JSONValue
+
+        var json: JSONValue { ["type": .string(type), "schema": schema] }
     }
 
-    /// Sorted keys and unescaped slashes, so the same request is always the same bytes.
+    /// Keys in the order written above, so the same request is always the same bytes.
     func encoded() -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        // Strings, integers and booleans only: encoding cannot fail.
-        return try! encoder.encode(self)
+        json.encoded()
     }
 
     /// Characters of prompt text, for the token estimate.
@@ -82,36 +96,91 @@ struct MessagesRequest: Encodable, Sendable, Hashable {
     }
 }
 
-/// A JSON value, for output schemas.
-indirect enum JSONValue: Encodable, Sendable, Hashable, ExpressibleByStringLiteral, ExpressibleByBooleanLiteral,
+/// A JSON value, for request bodies and output schemas. An object keeps its members in the order
+/// written, and `encoded()` writes them in that order.
+indirect enum JSONValue: Sendable, Hashable, ExpressibleByStringLiteral, ExpressibleByBooleanLiteral,
     ExpressibleByArrayLiteral, ExpressibleByDictionaryLiteral {
     case bool(Bool)
+    case int(Int)
     case string(String)
     case array([JSONValue])
-    case object([String: JSONValue])
+    case object([Member])
+
+    struct Member: Sendable, Hashable {
+        var key: String
+        var value: JSONValue
+    }
 
     init(stringLiteral value: String) { self = .string(value) }
     init(booleanLiteral value: Bool) { self = .bool(value) }
     init(arrayLiteral elements: JSONValue...) { self = .array(elements) }
-    init(dictionaryLiteral elements: (String, JSONValue)...) { self = .object(Dictionary(uniqueKeysWithValues: elements)) }
 
-    func encode(to encoder: any Encoder) throws {
-        var container = encoder.singleValueContainer()
+    /// Members in the order written. A nil value leaves its key out.
+    init(dictionaryLiteral elements: (String, JSONValue?)...) {
+        self = .object(elements.compactMap { key, value in value.map { Member(key: key, value: $0) } })
+    }
+
+    /// Compact JSON: members in order, slashes and non-ASCII characters as they are.
+    func encoded() -> Data {
+        var text = ""
+        write(to: &text)
+        return Data(text.utf8)
+    }
+
+    private func write(to text: inout String) {
         switch self {
-        case .bool(let value): try container.encode(value)
-        case .string(let value): try container.encode(value)
-        case .array(let value): try container.encode(value)
-        case .object(let value): try container.encode(value)
+        case .bool(let value):
+            text += value ? "true" : "false"
+        case .int(let value):
+            text += String(value)
+        case .string(let value):
+            Self.write(value, to: &text)
+        case .array(let values):
+            text += "["
+            for (index, value) in values.enumerated() {
+                if index > 0 { text += "," }
+                value.write(to: &text)
+            }
+            text += "]"
+        case .object(let members):
+            text += "{"
+            for (index, member) in members.enumerated() {
+                if index > 0 { text += "," }
+                Self.write(member.key, to: &text)
+                text += ":"
+                member.value.write(to: &text)
+            }
+            text += "}"
         }
     }
 
-    /// An object that allows only `properties`, all of them required in the order given.
+    /// A JSON string, escaped as `JSONEncoder` escapes it with `.withoutEscapingSlashes`.
+    private static func write(_ string: String, to text: inout String) {
+        text += "\""
+        for scalar in string.unicodeScalars {
+            switch scalar {
+            case "\"": text += "\\\""
+            case "\\": text += "\\\\"
+            case "\n": text += "\\n"
+            case "\r": text += "\\r"
+            case "\t": text += "\\t"
+            case "\u{8}": text += "\\b"
+            case "\u{C}": text += "\\f"
+            case "\u{0}"..."\u{1F}": text += String(format: "\\u%04x", scalar.value)
+            default: text.unicodeScalars.append(scalar)
+            }
+        }
+        text += "\""
+    }
+
+    /// An object that allows only `properties`, all of them required. Structured output writes them
+    /// in the order given, so a property can draw on the ones before it.
     static func strictObject(_ properties: KeyValuePairs<String, JSONValue>) -> JSONValue {
         [
             "type": "object",
-            "additionalProperties": false,
+            "properties": .object(properties.map { Member(key: $0.key, value: $0.value) }),
             "required": .array(properties.map { .string($0.key) }),
-            "properties": .object(Dictionary(uniqueKeysWithValues: properties.map { ($0.key, $0.value) })),
+            "additionalProperties": false,
         ]
     }
 

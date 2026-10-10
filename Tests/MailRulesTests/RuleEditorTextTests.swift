@@ -150,7 +150,7 @@ struct RuleEditorTextTests {
         #expect(RuleEditorText.freeCount(passing: 1_940, inScope: 2_310, days: 90) == "1,940 of 2,310 (90 d) pass · free")
         #expect(RuleEditorText.testPrices(atIssue: PreviewCost(calls: 12, micros: 150_000), all: PreviewCost(calls: 27, micros: 340_000))
             == "⌃r test 12 ≈ $0.15 · ⌃R all 27 ≈ $0.34")
-        #expect(RuleEditorText.testPrices(atIssue: PreviewCost(calls: 0, micros: 0), all: PreviewCost(calls: 3, micros: 400)) == "⌃R all 3 ≈ < $0.01")
+        #expect(RuleEditorText.testPrices(atIssue: PreviewCost(calls: 0, micros: 0), all: PreviewCost(calls: 3, micros: 400)) == "⌃R all 3 < $0.01")
         #expect(RuleEditorText.testPrices(atIssue: PreviewCost(calls: 0, micros: 0), all: PreviewCost(calls: 0, micros: 0))
             == "nothing to test: your marks and Claude decide every row")
         #expect(RuleEditorText.previewSpend(today: 220_000, allowance: 1_000_000) == "preview today $0.22 of $1.00")

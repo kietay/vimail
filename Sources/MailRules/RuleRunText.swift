@@ -104,7 +104,7 @@ public enum BackfillText {
     /// - Parameter room: what runs may spend; nil when the app reports no spend figures.
     public static func cost(_ estimate: RunEstimate, asksClaude: Bool, room: RunRoom?) -> String {
         guard asksClaude, estimate.needClaude > 0 else { return "free" }
-        let price = "≈ \(Dollars.text(estimate.micros))"
+        let price = Dollars.estimate(estimate.micros)
         if let room, estimate.micros > room.month { return "\(price) · over month room" }
         if let room, estimate.micros > room.today { return "\(price) · over today's room" }
         return duration(calls: estimate.needClaude).map { "\(price) · \($0)" } ?? price
@@ -145,13 +145,13 @@ public enum BackfillText {
     /// - Parameter others: the other models' names with what the run would cost on each.
     public static func otherModels(_ others: [(name: String, micros: Int64)]) -> String? {
         guard !others.isEmpty else { return nil }
-        return "Selected on " + others.map { "\($0.name) ≈ \(Dollars.text($0.micros))" }.joined(separator: " · ") + " (change in Settings)"
+        return "Selected on " + others.map { "\($0.name) \(Dollars.estimate($0.micros))" }.joined(separator: " · ") + " (change in Settings)"
     }
 
     /// The rules manager's offer when a rule comes back on: "off 9–14 Oct · 37 messages · ≈ $0.47".
     public static func gap(_ interval: DateInterval, estimate: RunEstimate, asksClaude: Bool) -> String {
         let messages = estimate.messages == 1 ? "1 message" : "\(RuleText.count(estimate.messages)) messages"
-        let price = asksClaude && estimate.needClaude > 0 ? "≈ \(Dollars.text(estimate.micros))" : "free"
+        let price = asksClaude && estimate.needClaude > 0 ? Dollars.estimate(estimate.micros) : "free"
         return "off \(RuleText.days(interval)) · \(messages) · \(price)"
     }
 }
@@ -205,7 +205,7 @@ extension RunRecord {
                 detail = "+\(plus) −\(minus) · ↵ apply"
             } else {
                 let micros = estimate?.micros ?? estimateMicros
-                let price = micros.map { $0 > 0 ? "≈ \(Dollars.text($0))" : "free" }
+                let price = micros.map { $0 > 0 ? Dollars.estimate($0) : "free" }
                 let messages = total == 1 ? "1 message" : "\(RuleText.count(total)) messages"
                 detail = ([messages] + (price.map { [$0] } ?? [])).joined(separator: " · ") + " · ↵ confirm"
             }
@@ -263,7 +263,7 @@ extension RunRecord {
     func continueText(_ rules: [String: Rule], estimate: RunEstimate?) -> String {
         var text = "continue"
         if pauseReason == .ruleChanged, self.rules.count == 1, let rule = rules[self.rules[0].id] { text += " with v\(rule.revision)" }
-        if let estimate, estimate.needClaude > 0 { text += " ≈ \(Dollars.text(estimate.micros))" }
+        if let estimate, estimate.needClaude > 0 { text += " \(Dollars.estimate(estimate.micros))" }
         return text
     }
 }

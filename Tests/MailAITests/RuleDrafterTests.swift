@@ -34,6 +34,13 @@ struct RuleDrafterTests {
         #expect(schema["required"] as? [String] == ["name", "label", "ask", "when"])
     }
 
+    @Test func requestMatchesTheGolden() async throws {
+        let transport = FakeTransport([.ok(Self.answer(ask: "Receipts from Stripe for software I subscribe to."))])
+        let seed = EmailDigest(message: Sample.receipt, thread: [], selfAddresses: Sample.me)
+        _ = try await drafter(transport).draft("receipts for stuff I buy", seed: seed, labelNames: ["receipts", "Needs reply"])
+        #expect(matchesFixture(try #require(transport.calls.first).body, "drafter-request.json"))
+    }
+
     @Test func aSeedEmailIsMarkedAsDataAndCut() async throws {
         let transport = FakeTransport([.ok(Self.answer(ask: "Receipts from Stripe for software I subscribe to."))])
         var message = Sample.receipt

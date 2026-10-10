@@ -98,6 +98,8 @@ struct RuleStatusTextTests {
     @Test func dollars() {
         #expect(Dollars.text(0) == "$0.00" && Dollars.text(3_000) == "< $0.01" && Dollars.text(5_000) == "$0.01" && Dollars.text(1_060_000) == "$1.06")
         #expect(Dollars.monthly(0) == "$0.00/mo" && Dollars.monthly(3_000) == "< $0.01/mo" && Dollars.monthly(230_000) == "≈ $0.23/mo")
+        // Never "≈ < $0.01".
+        #expect(Dollars.estimate(0) == "$0.00" && Dollars.estimate(400) == "< $0.01" && Dollars.estimate(150_000) == "≈ $0.15")
         // The status bar reads like Settings and confirmations.
         #expect(line { $0.runs = [run(1, done: 1, total: 2, cost: 3_000)] }?.text == "rules 1/2 · < $0.01")
     }
