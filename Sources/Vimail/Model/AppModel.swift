@@ -15,9 +15,10 @@ enum FocusTarget: Hashable {
     case composeTo, composeCc, composeBcc, composeSubject, composeBody
     case viewName, viewSender, viewText
     case settingsSignature, settingsEditor
+    case quickAdd, eventEditor
 }
 
-enum PickerKind: Equatable { case label, move, snooze, goToLabel }
+enum PickerKind: Equatable { case label, move, snooze, goToLabel, answerNote }
 
 enum Overlay: Equatable {
     case omnibox
@@ -27,6 +28,10 @@ enum Overlay: Equatable {
     case viewEditor(SavedView)
     case picker(PickerKind)
     case confirm(Confirmation)
+    /// C: one line that becomes an event.
+    case quickAdd
+    /// The event editor (Tab from quick add, Enter on your own event).
+    case eventEditor
 }
 
 struct Confirmation: Equatable {
@@ -58,6 +63,10 @@ enum UndoEntry {
     case send(outboxID: Int64, draft: Draft, localMessageID: String, archived: UndoRecord?)
     /// Unsubscribes waiting in the outbox, and the archive that went with them.
     case unsubscribe(outboxIDs: [Int64], lists: [String], archive: UndoRecord?)
+    /// Answers to invitations, and the archive that came with them: one u takes back both.
+    case answer([CalendarActions.AnswerRecord], archive: UndoRecord?)
+    /// A calendar event created, edited or removed.
+    case eventChange(CalendarActions.ChangeRecord)
 }
 
 /// A ⌘U still checking how to unsubscribe. `u` cancels it then, before it has done anything.
@@ -113,6 +122,52 @@ final class AppModel {
     var accountSignatureHTML: String?
     /// True while Google sign-in is open in the browser.
     var signingIn = false
+
+    // MARK: Calendar
+
+    var calendarStatus = CalendarSyncEngine.Status()
+    var calendars: [CalendarInfo] = []
+    /// The calendar view's rows: invitations waiting for an answer, then two weeks of days.
+    var agendaSections: [AgendaSection] = []
+    /// Invitations waiting for your answer, for the sidebar (kept current outside the calendar view too).
+    var waitingInvitationCount = 0
+    var agendaCursorID: String?
+    /// Agenda rows that overlap another event you go to.
+    var agendaOverlaps: Set<String> = []
+    /// The first day the calendar view shows.
+    var agendaStart = Calendar.current.startOfDay(for: Date())
+    /// The day the minute timer last saw, to notice midnight.
+    @ObservationIgnored var timerDay = Calendar.current.startOfDay(for: Date())
+    /// The next meeting today or tomorrow, for the status bar and gj.
+    var nextMeeting: AgendaItem?
+    /// Invitation chips for the mail list, by conversation.
+    var invitationChips: [String: InvitationChip] = [:]
+    /// Event pages of conversations with an invitation, by conversation.
+    @ObservationIgnored var eventPages: [String: ReaderPayload.EventPage] = [:]
+    /// { and }: days the day column is shifted from the invitation's day.
+    @ObservationIgnored var peekDays = 0
+    /// The last answer, for . on the next invitation.
+    @ObservationIgnored var lastAnswer: ResponseStatus?
+    /// gc from an invitation: the event the calendar view should select once loaded.
+    @ObservationIgnored var pendingAgendaEventID: String?
+    /// The day the calendar view was opened for: of several rows of one series, the one on this day is selected.
+    @ObservationIgnored var pendingAgendaDay: Date?
+    /// Quick add (C): the typed line and how it reads.
+    var quickAddText = "" {
+        didSet { if quickAddText != oldValue { updateQuickAdd() } }
+    }
+    var quickAddResult: QuickAdd.Result?
+    var quickAddDayNote: String?
+    /// The day quick add starts from (the calendar view's selected day), when not today.
+    @ObservationIgnored var quickAddDay: Date?
+    /// Contact matches for names typed after "with", by lowercased name.
+    @ObservationIgnored var quickAddContacts: [String: [EmailAddress]] = [:]
+    var eventEditor: EventEditorModel?
+    /// A new event closed with esc, offered again in quick add (tab).
+    var quickAddDraft: EventDraft?
+    /// The next meeting with each person, by address, for the reader's "Next with" line.
+    @ObservationIgnored var nextMeetingByPerson: [String: AgendaItem] = [:]
+    @ObservationIgnored var minuteTimer: Timer?
 
     // MARK: UI state
 
@@ -221,7 +276,28 @@ final class AppModel {
         await reloadList()
         await reloadCounts()
         listenToSync()
+        listenToCalendar()
         await services.start()
+        await calendarChanged()
+        startMinuteTimer()
+    }
+
+    /// Keeps the next meeting and the calendar view current as time passes.
+    private func startMinuteTimer() {
+        guard minuteTimer == nil else { return }
+        minuteTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                await self.reloadNextMeeting()
+                await self.reloadWaitingCount()
+                // A new day: "Today" moves on, in the calendar view and on event pages. Once, not every minute.
+                let today = Calendar.current.startOfDay(for: Date())
+                if today != self.timerDay {
+                    self.timerDay = today
+                    await self.calendarChanged()
+                }
+            }
+        }
     }
 
     private func reloadAccount() async {
@@ -266,6 +342,13 @@ final class AppModel {
         threadCache.removeAll()
         renderedThreadID = nil
         syncStatus = SyncEngine.Status()
+        calendarStatus = CalendarSyncEngine.Status()
+        calendars = []
+        agendaSections = []
+        agendaCursorID = nil
+        nextMeeting = nil
+        invitationChips = [:]
+        eventPages = [:]
         // Saved views belong to an account; another account may not have the one that was open.
         if case .view = session.destination { session.destination = .mailbox(.inbox) }
         cursorID = nil
@@ -353,6 +436,13 @@ final class AppModel {
             await loadCurrentThread(refresh: true)
         }
         if change.reset { await reloadAccount() }
+        if change.calendar || change.reset {
+            await calendarChanged()
+        } else if !change.threadIDs.isEmpty {
+            await reloadInvitationChips()
+            // Mail moved to or from Trash or Spam changes which invitations wait for an answer.
+            await reloadWaitingCount()
+        }
         let inboxUnread = unreadCounts[SystemLabel.inbox] ?? 0
         NSApp.dockTile.badgeLabel = inboxUnread > 0 ? "\(inboxUnread)" : nil
     }
@@ -408,6 +498,7 @@ final class AppModel {
         case .mailbox(.label(let id)): labels.first { $0.id == id }?.name ?? "Label"
         case .mailbox(let mailbox): mailbox.title
         case .view(let id): views.first { $0.id == id }?.name ?? "View"
+        case .calendar: "Calendar"
         }
     }
 
@@ -415,6 +506,7 @@ final class AppModel {
         switch destination {
         case .mailbox(let mailbox): .mailbox(mailbox)
         case .view: currentView?.query ?? .mailbox(.inbox)
+        case .calendar: .mailbox(.inbox)
         }
     }
 
@@ -441,6 +533,14 @@ final class AppModel {
         focus = .list
         listGeneration += 1
         threads = []
+        if destination == .calendar {
+            cursorID = nil
+            Task {
+                await reloadAgenda()
+                await reloadCounts()
+            }
+            return
+        }
         let remembered = session.cursors[destination.key]
         Task {
             await reloadList(preferredCursor: remembered)
@@ -462,6 +562,10 @@ final class AppModel {
     }
 
     func reloadList(preferredCursor: String? = nil) async {
+        if destination == .calendar {
+            await reloadAgenda()
+            return
+        }
         let generation = listGeneration
         var pagedQuery = currentQuery
         pagedQuery.limit = max(Self.pageSize, threads.count)
@@ -494,6 +598,7 @@ final class AppModel {
         hasMore = loaded.count < count && !isDraftsList
         selection.formIntersection(Set(loaded.map(\.id)))
         reconcileCursor(preferred: preferredCursor, previousIndex: previousIndex)
+        await reloadInvitationChips()
     }
 
     /// Merges two lists in the list's sort order.
@@ -612,6 +717,7 @@ final class AppModel {
     }
 
     private func cursorDidChange() {
+        peekDays = 0
         markReadTask?.cancel()
         if let cursorID { session.cursors[destination.key] = cursorID }
         Task { await loadCurrentThread(refresh: false) }
@@ -640,7 +746,12 @@ final class AppModel {
             guard let thread = try? await services.store.thread(id: id), !Task.isCancelled, cursorID == id else { return }
             threadCache[id] = thread
             if threadCache.count > 60 { threadCache.removeAll() }
-            if thread != currentThread || renderedThreadID != id || refresh {
+            let page = await loadEventPage(for: thread)
+            guard !Task.isCancelled, cursorID == id else { return }
+            let pageChanged = page != eventPages[id]
+            eventPages[id] = page
+            if eventPages.count > 120 { eventPages = [id: page].compactMapValues { $0 } }
+            if thread != currentThread || renderedThreadID != id || refresh || pageChanged {
                 currentThread = thread
                 render(thread)
             }
@@ -733,7 +844,12 @@ final class AppModel {
         // New messages open, and the reader starts at the first one. The latest message is always open.
         let firstNew = thread.messages.firstIndex { newMessageIDs.contains($0.id) }
         let focusIndex = firstNew ?? (thread.messages.count - 1)
+        payload.event = eventPages[thread.id]
+        if payload.event == nil { payload.nextWith = nextWith(thread)?.text }
+        // With an event page, invitation mail collapses to one line and its calendar files are not listed.
+        let showsPage = payload.event != nil
         payload.messages = thread.messages.enumerated().map { index, message in
+            let isInvitation = showsPage && message.attachments.contains { $0.mimeType.lowercased() == "text/calendar" || $0.filename.lowercased().hasSuffix(".ics") }
             let kind: String
             if let html = message.htmlBody, !html.isEmpty {
                 kind = ReaderPayload.isRich(html) ? "rich" : "html"
@@ -759,10 +875,11 @@ final class AppModel {
                 kind: kind,
                 text: kind == "text" ? message.plainText : nil,
                 html: kind == "text" ? nil : Self.resolvingInlineImages(in: message),
-                attachments: message.fileAttachments.map {
+                attachments: message.fileAttachments.filter { !(isInvitation && $0.filename.lowercased().hasSuffix(".ics")) }.map {
                     .init(id: $0.id, name: $0.filename, kind: $0.kindLabel, size: Formatting.fileSize($0.size))
                 },
-                sending: message.id.hasPrefix("local-")
+                sending: message.id.hasPrefix("local-"),
+                invitation: isInvitation
             )
         }
         return payload
@@ -909,6 +1026,10 @@ final class AppModel {
             focusTarget = .picker
         case .viewEditor:
             focusTarget = .viewName
+        case .quickAdd:
+            focusTarget = .quickAdd
+        case .eventEditor:
+            focusTarget = .eventEditor
         case nil:
             if compose != nil { focusTarget = compose?.lastFocus ?? .composeBody } else { focusTarget = nil; blurTextInput() }
         default:
@@ -941,7 +1062,7 @@ final class AppModel {
         }
         switch overlay {
         case .omnibox: return .command
-        case .picker, .viewEditor: return .insert
+        case .picker, .viewEditor, .quickAdd, .eventEditor: return .insert
         default: break
         }
         if focusTarget == .search { return .search }

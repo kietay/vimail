@@ -10,7 +10,7 @@ struct RootView: View {
                 HeaderBar()
                 HStack(spacing: 0) {
                     SidebarView()
-                    ThreadListView()
+                    if model.destination == .calendar { AgendaListView() } else { ThreadListView() }
                     ReaderPane()
                 }
                 .frame(maxHeight: .infinity)

@@ -65,10 +65,73 @@ in your browser; vimail receives the answer on `http://127.0.0.1:<random port>` 
 - they only ever ask Google for `gmail.readonly`, so Google rejects any change;
 - every change, send and unsubscribe goes to a dry-run log instead of Gmail or the list
   (`accounts/<key>/dry-run/changes.log`, sent messages as `.eml` files);
-- they keep their data in `~/Library/Application Support/vimail-debug`, apart from the installed app.
+- they keep their data in `~/Library/Application Support/vimail-debug`, apart from the installed app;
+- calendar access is read-only too, and answers, creates, edits and removals go to `dry-run/calendar.log`.
 
 `VIMAIL_GMAIL_TOKEN_FILE=/path/to/token.json` makes a debug build use a token file from Google's own
 libraries (for example the read-only `token.json` of `read_inbox.py`) instead of signing in.
+
+## Calendar
+
+vimail syncs your Google Calendar into the same local store as your mail. Invitations open as events, you answer
+them with one key, and you create events from one typed line. Everything works offline and syncs later.
+
+- **Connect.** Calendar access is part of the Gmail sign-in, and optional: clear it on Google's consent screen and
+  mail still works. In your Google Cloud project, enable the **Google Calendar API** next to the Gmail API. Accounts
+  signed in before the calendar existed choose `:` → "Connect Google Calendar". vimail asks for
+  `calendar.events`, `calendar.calendarlist.readonly` and `calendar.events.freebusy` (guests' busy times for
+  "find a time"; debug builds ask for `calendar.events.readonly` instead of `calendar.events`).
+- **Invitations.** When the cursor reaches an invitation, the reader shows the event instead of the email: time,
+  join link, organizer, every guest's answer, the agenda, and your day beside it with the invitation dashed and
+  overlaps in red. `{` `}` show the day before or after. A repeating invitation also says how many of its next
+  8 dates overlap. `Y` `M` `N` answer yes, maybe or no; `R` adds a note. An invitation to one changed date of a
+  series answers only that date. An invitation Google keeps off your calendar until you answer (from someone it
+  does not know) is looked up when you answer it. A join link is used only when it is a web link (`https://`).
+  With *Archive invitations after answering* on (Settings → Calendar), the mail is archived and the cursor moves on,
+  and one `u` takes back both. The answer leaves after the undo-send window. `O` shows the original email.
+- **Calendar view.** `gc` (from an invitation: at its event). Invitations waiting for your answer come first, then
+  two weeks of days. `j` `k` move, `{` `}` `[` `]` change the day or week, `t` is today, `↵` edits your own event,
+  `r` `a` email the organizer or the guests, `#` cancels your event or declines an invitation, `gm` opens the
+  invitation mail, `gj` joins the meeting. The status bar shows your next meeting; `gj` joins it from the list or the reader too.
+- **Repeating events, one day at a time.** On a day of a series, `#` removes or declines only that day (the editor's
+  *All events* and `⌘⇧⌫` remove the series), and `↵` edits only that
+  day until you switch the editor to *All events* (`⌘E`). *When* shows that day either way; for all events, a new
+  time moves every event by the same change and their days stay (change *Repeats*, like `every thu`, to move the
+  days). Answers in the day list change only that day once the
+  series is answered (the first answer, from the waiting group or the mail, answers the series).
+  A rule the words cannot say ("monthly on the second Tuesday") shows in *Repeats* but changes only in Google
+  Calendar. "This and following" is not supported yet.
+- **Creating events.** `C` opens one line: `lunch with jamie fri 12:30 1h @ Tartine`, `standup every weekday 9:30 15m`,
+  `q4 planning oct 16-18`. It is read as you type (days, times, lengths, guests from your contacts, places, repeats,
+  `#calendar`), with your day shown. `↵` creates it; with guests, the invitations leave after the undo window and
+  get a Meet link. `tab` opens the editor for the rest; there `⌘↵` saves and emails guests, `⌘⇧↵` saves quietly,
+  `⌘⇧⌫` removes the event, and `esc` keeps unsaved changes as a draft (`C` then `↑` continues a new one).
+  *When* uses the same words (`oct 12 14:00-14:45`, `oct 16-18`, `oct 9-11 09:00-17:00`, `oct 12 10:00 48h`), with
+  the year when the date alone would mean another year; left unchanged, it keeps the event's exact times. Notes left
+  unchanged keep the description as Google has it (formatting and links), and rooms stay booked. Guests removed in
+  the editor are told with `⌘↵`. Removing an event before its invitations leave sends nothing.
+  A weekly repeat that names its days starts on one of them: `standup fri 9:00 every mon` starts on Monday.
+  On a conversation, `C` starts with its subject and its people.
+- **Find a time.** The editor shows the event's day with a strip for you and one per guest: busy times in grey,
+  the event green where that person is free and red where they are busy. `⌘]` and `⌘[` move the event to the
+  next or previous time where everyone who shares busy times is free, inside working hours. Busy times come from
+  Google's free/busy (colleagues in your Workspace); people who do not share theirs are marked.
+- **Next with.** Under a conversation's header, the reader names your next meeting with the person writing, for
+  example "Next with Alex Morgan: Mon Oct 12 13:00 · 1:1 with Alex". Click it to see the event in the calendar.
+- **Free times.** `⌘⇧A` in compose inserts your free times for the next five working days (Settings → Calendar →
+  Working hours), from the local calendar.
+- **Repeating events** are expanded on the Mac: daily, weekly, monthly and yearly rules with days of the week,
+  numbered weekdays (`2TU`, `-1FR`), month days, months, `INTERVAL`, `COUNT`, `UNTIL`, `EXDATE` and `RDATE`.
+  Foundation's `Calendar.RecurrenceRule` steps through the periods and every date it yields is checked against
+  RFC 5545; numbered weekdays never reach it (it gets them wrong unless the week starts on Sunday). Other shapes
+  (`BYSETPOS`, plain weekdays in a monthly rule, `BYWEEKNO`, hourly rules) come from Google's own expansion. Occurrences are kept from one year back to 400 days ahead.
+- **Retries never duplicate.** vimail chooses each new event's ID, so a create that is sent twice is still one event.
+  Changes to one event leave in the order you made them. An edit sends only the fields you changed, so Google keeps
+  reminders, colors, visibility and other apps' data. It carries the event's etag; when someone changed the event
+  meanwhile, vimail merges changes to different fields (guests by address) and otherwise keeps Google's version and
+  says so.
+- **Your own time.** A colleague's calendar shown beside yours lists their events, but your next meeting, overlaps,
+  free times, find a time and the invitations waiting for you count only your own calendars.
 
 ## Logs
 
@@ -100,6 +163,7 @@ Vim-first. `?` shows everything in the app. The essentials:
 | `gi gs gt gd ga gz g# g! gA` `gl` | Go to Inbox, Starred, Sent, Drafts, Archive, Snoozed, Trash, Spam, All mail, label… |
 | `H` `L` · `⌘⇧[` `⌘⇧]` · `gv` | Cycle Inbox + pinned views · manage views |
 | `/` · `:`/`⌘K` · `^l` | Search (Gmail syntax) · omnibox · refresh + sync |
+| `Y` `M` `N` `R` · `C` · `gc` `gj` | Answer an invitation (R: with a note) · new event · calendar, join meeting |
 
 **Compose:** you write Markdown. The pane on the right shows the exact HTML recipients get.
 `⌘↵` sends (with a 5s undo window, `u`). In To, Cc and Bcc, an address becomes a pill when you type `,` `;` or
@@ -122,7 +186,9 @@ compose panel, with your normal config. `:w` updates the preview, `:wq` returns 
 In read-filtered lists (Unread tab, unread views) it stays visible until you refresh (`^l`, switch tab/view).
 
 **Search:** `from:` `to:` `subject:` `label:` `in:inbox|sent|trash|spam|snoozed|archive|anywhere`
-`is:unread|read|starred` `has:attachment` `before:` `after:` `older_than:` `newer_than:` `"phrases"` `-exclude`.
+`is:unread|read|starred` `has:attachment` `before:` `after:` `older_than:` `newer_than:` `"phrases"` `-exclude`,
+and for calendar mail `has:invite` `invite:request|update|cancel|reply|pending|conflict` (pending: not answered yet;
+conflict: overlaps an event you go to in the next 60 days).
 
 **Unsubscribe (`⌘U`)** uses the fastest way the sender offers, from its `List-Unsubscribe` header:
 
@@ -147,10 +213,12 @@ Everything is local:
     session.json                  last mailbox/view, filter, cursor per mailbox, sidebar
     google-oauth-client.json      your Google Cloud OAuth client (mode 600)
     accounts/<account>/mail.sqlite   mail cache + full-text index, outbox, drafts, snoozes,
-                                  saved views, local labels, processor results, contacts
+                                  saved views, local labels, processor results, contacts,
+                                  calendars, events, invitations, calendar outbox
     accounts/<account>/drafts/    draft attachments and vim buffers
     accounts/gmail-<email>/google-credential.json   Gmail refresh token (mode 600)
     dummy/server.json             the fake Gmail server's state
+    dummy/calendar.json           the fake Google Calendar's state
 ~/Library/Caches/vimail/attachments/   opened attachments (safe to delete)
 ~/Library/Caches/vimail/inline/        images embedded in messages (safe to delete)
 ~/Library/Logs/vimail/vimail.log        the log (no mail content)
@@ -167,11 +235,15 @@ the Keychain once the app has a stable signing identity (ad-hoc signatures chang
 
 ```
 Sources/
-  MailCore       Models, MailProvider protocol, search parser, reply rules, MessageProcessor API
+  MailCore       Models, MailProvider protocol, search parser, reply rules, MessageProcessor API;
+                 Calendar/: event models, CalendarProvider protocol, iCalendar parser, recurrence, quick add
   MailStore      SQLite (WAL, separate reader/writer queues), FTS5 search, outbox, local-only state
-  MailSync       MailActions (optimistic, undoable), SyncEngine (push outbox, pull changes), ProcessingCoordinator
-  DummyProvider  Fake Gmail: labels, threads, history cursors, latency/failure simulation, incoming mail
-  GmailProvider  Gmail REST API: OAuth (loopback + PKCE), threads, history, batchModify, MIME send, dry-run wrapper
+  MailSync       MailActions (optimistic, undoable), SyncEngine (push outbox, pull changes), ProcessingCoordinator;
+                 CalendarSyncEngine, CalendarActions, InvitationIndexer
+  DummyProvider  Fake Gmail: labels, threads, history cursors, latency/failure simulation, incoming mail;
+                 fake Google Calendar with sync tokens, invitations that match the dummy mail
+  GmailProvider  Gmail REST API: OAuth (loopback + PKCE), threads, history, batchModify, MIME send, dry-run wrapper;
+                 Google Calendar API v3 client and its dry-run wrapper
   VimailKit      Vim key-sequence parser, Markdown → email HTML, fuzzy matcher
   Vimail         SwiftUI app: model, key router, views, reader (WKWebView), compose, embedded vim (SwiftTerm)
 Vendor/SwiftTerm Terminal emulator for the embedded editor (MIT, trimmed, see Vendor/README.md)

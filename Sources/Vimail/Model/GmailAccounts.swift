@@ -22,6 +22,16 @@ enum GmailAccounts {
         #endif
     }
 
+    /// Calendar access, asked for in the same sign-in but optional: when you clear it on Google's
+    /// consent screen, mail still works and the calendar stays off. Debug builds ask for read-only access.
+    static var calendarScopes: [String] {
+        #if DEBUG
+        [CalendarScope.eventsReadonly, CalendarScope.calendarListReadonly, CalendarScope.freeBusy]
+        #else
+        [CalendarScope.events, CalendarScope.calendarListReadonly, CalendarScope.freeBusy]
+        #endif
+    }
+
     static func accountKey(email: String) -> String {
         "gmail-" + email.lowercased().filter { $0.isLetter || $0.isNumber || "@._+-".contains($0) }
     }
@@ -87,8 +97,9 @@ enum GmailAccounts {
         let receiver = try LoopbackReceiver()
         try await receiver.start()
         defer { receiver.stop() }
-        let request = GoogleAuthorizationRequest(client: client, scopes: scopes, redirectURI: receiver.redirectURI, loginHint: loginHint)
-        log.info("Step 1/4: waiting for Google on \(receiver.redirectURI), opening the browser (scopes: \(scopes.map { $0.components(separatedBy: "/").last ?? $0 }.joined(separator: " ")))")
+        let requested = scopes + calendarScopes
+        let request = GoogleAuthorizationRequest(client: client, scopes: requested, redirectURI: receiver.redirectURI, loginHint: loginHint)
+        log.info("Step 1/4: waiting for Google on \(receiver.redirectURI), opening the browser (scopes: \(requested.map { $0.components(separatedBy: "/").last ?? $0 }.joined(separator: " ")))")
         NSWorkspace.shared.open(request.url)
 
         let query: [String: String]
@@ -106,11 +117,12 @@ enum GmailAccounts {
             log.error("Google returned no refresh token")
             throw GoogleOAuthError.missingRefreshToken
         }
-        // With granular consent people can untick Gmail access.
+        // With granular consent people can untick Gmail access. Calendar access is optional.
         if let missing = scopes.first(where: { !tokens.scopes.contains($0) }) {
             log.error("Gmail access was not granted (missing \(missing))")
             throw GoogleOAuthError.missingScope(missing)
         }
+        if !CalendarScope.allowsReading(tokens.scopes) { log.notice("Calendar access was not granted: the calendar stays off") }
         log.info("Step 3/4: tokens received after \(clock.text). Reading the Gmail profile")
 
         var credential = GoogleCredential(email: "", refreshToken: refreshToken, scopes: tokens.scopes, client: client)

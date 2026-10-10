@@ -102,6 +102,7 @@ struct Palette: Equatable {
             "--purple": purple, "--purple-soft": purpleSoft, "--yellow": yellow, "--yellow-soft": yellowSoft,
             "--body": body, "--button": button, "--button-text": buttonText, "--selection": selection,
             "--status": status,
+            "--blue": blue, "--blue-soft": blueSoft, "--red": red, "--red-soft": redSoft, "--aqua": aqua, "--aqua-soft": aquaSoft,
         ]
     }
 }
@@ -149,6 +150,7 @@ struct Theme: Equatable {
     var yellow: Color { Color(hex: palette.yellow) }
     var yellowSoft: Color { Color(hex: palette.yellowSoft) }
     var red: Color { Color(hex: palette.red) }
+    var blue: Color { Color(hex: palette.blue) }
     var redSoft: Color { Color(hex: palette.redSoft) }
     var body: Color { Color(hex: palette.body) }
     var button: Color { Color(hex: palette.button) }

@@ -1,4 +1,5 @@
 import Foundation
+import MailCore
 
 /// One key press, normalized: shifted characters are folded into the character ("G", "#").
 public struct KeyStroke: Hashable, Sendable, CustomStringConvertible {
@@ -75,6 +76,10 @@ public enum KeyCommand: Hashable, Sendable {
     case compose, reply, replyAll, forward
     case go(GoTarget), goLabel, manageViews, nextView, previousView
     case search, omnibox, help, sync, toggleSidebar, openAttachments
+    // Calendar: answer an invitation (Y M N, R with a note), the calendar view, joining, moving by day and week.
+    case answer(ResponseStatus), answerWithNote
+    case calendar, joinMeeting, openInvitationMail, newEvent
+    case previousDay, nextDay, previousWeek, nextWeek
 }
 
 public enum Keymap {
@@ -108,6 +113,10 @@ public enum Keymap {
         ("gz", .go(.snoozed)), ("g!", .go(.spam)), ("g#", .go(.trash)), ("gA", .go(.allMail)),
         ("gl", .goLabel), ("gv", .manageViews), ("L", .nextView), ("H", .previousView),
         ("go", .openAttachments),
+        // Calendar
+        ("Y", .answer(.accepted)), ("M", .answer(.tentative)), ("N", .answer(.declined)), ("R", .answerWithNote),
+        ("gc", .calendar), ("gj", .joinMeeting), ("gm", .openInvitationMail), ("C", .newEvent),
+        ("{", .previousDay), ("}", .nextDay), ("[", .previousWeek), ("]", .nextWeek),
         // Modes and app
         ("/", .search), (":", .omnibox), ("<D-k>", .omnibox), ("?", .help), ("<C-l>", .sync),
         ("<C-\\>", .toggleSidebar),

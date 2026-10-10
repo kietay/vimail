@@ -25,7 +25,7 @@ struct OverlayHost: View {
     }
 
     private func dismiss(_ overlay: Overlay) {
-        if case .viewEditor = overlay { model.overlay = .views } else { model.overlay = nil }
+        if case .viewEditor = overlay { model.overlay = .views } else if overlay == .eventEditor { model.closeEditor() } else { model.overlay = nil }
     }
 
     @ViewBuilder
@@ -38,6 +38,8 @@ struct OverlayHost: View {
         case .viewEditor(let view): ViewEditorView(original: view)
         case .picker(let kind): PickerView(kind: kind)
         case .confirm(let confirmation): ConfirmView(confirmation: confirmation)
+        case .quickAdd: QuickAddView()
+        case .eventEditor: EventEditorView()
         }
     }
 }
@@ -203,6 +205,7 @@ struct PickerView: View {
         switch kind {
         case .label: "↵ toggle and close · tab toggle and stay · esc close"
         case .snooze: "press a letter for a preset · ↵ choose · esc close"
+        case .answerNote: "type a note · ↵ yes · ↓ maybe or no · esc close"
         default: "↵ choose · esc close"
         }
     }

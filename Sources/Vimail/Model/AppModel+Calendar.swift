@@ -1,0 +1,1182 @@
+import AppKit
+import MailCore
+import MailStore
+import MailSync
+import VimailKit
+
+/// A group of agenda rows: invitations waiting for an answer, or one day.
+struct AgendaSection: Identifiable, Equatable {
+    var id: String
+    var title: String
+    var isWaiting: Bool
+    var items: [AgendaItem]
+}
+
+/// What an invitation row in the mail list shows next to its labels.
+struct InvitationChip: Equatable {
+    var text: String
+    var colorIndex: Int
+}
+
+/// The calendar: invitations in mail (the event page and Y M N R), the calendar view (gc), joining meetings.
+extension AppModel {
+    // MARK: - Loading
+
+    func listenToCalendar() {
+        guard let engine = services.calendarEngine else { return }
+        let statusUpdates = engine.statusUpdates
+        let events = engine.events
+        Task { [weak self] in
+            for await status in statusUpdates {
+                guard let self, self.services.calendarEngine === engine else { return }
+                self.calendarStatus = status
+            }
+        }
+        Task { [weak self] in
+            for await event in events {
+                guard let self, self.services.calendarEngine === engine else { return }
+                switch event {
+                case .operationFailed(let reason): self.showToast(reason, isError: true)
+                }
+            }
+        }
+    }
+
+    /// Everything that reads the calendar: after a calendar change, a new day, or an account switch.
+    func calendarChanged() async {
+        calendars = (try? await services.store.calendars()) ?? calendars
+        await reloadInvitationChips()
+        await reloadNextMeeting()
+        await reloadWaitingCount()
+        if destination == .calendar { await reloadAgenda() }
+        await refreshEventPage()
+    }
+
+    var shownCalendarIDs: Set<String> { Set(calendars.filter(\.isSelected).map(\.id)) }
+
+    /// Rows the calendar view lists: shown calendars, and invitations that are only in mail.
+    func isShown(_ item: AgendaItem) -> Bool {
+        item.calendarID == Self.mailOnlyCalendarID || calendars.isEmpty || shownCalendarIDs.contains(item.calendarID)
+    }
+
+    /// Your own time: shown calendars you own (a colleague's calendar shown beside yours has their meetings, not yours).
+    /// Overlaps, the next meeting, free times and find a time count only these.
+    func isYourTime(_ item: AgendaItem) -> Bool {
+        guard item.calendarID != Self.mailOnlyCalendarID else { return false }
+        guard !calendars.isEmpty else { return true }
+        guard let info = calendars.first(where: { $0.id == item.calendarID }), info.isSelected else { return false }
+        return info.isPrimary || info.accessRole == .owner
+    }
+
+    /// A calendar of yours (primary or owned). On a colleague's calendar shown beside yours, invitations are theirs.
+    func isYourCalendar(_ id: String) -> Bool {
+        guard !calendars.isEmpty else { return true }
+        guard let info = calendars.first(where: { $0.id == id }) else { return false }
+        return info.isPrimary || info.accessRole == .owner
+    }
+
+    /// Invitations waiting for your answer: on your own shown calendars, and those only in mail (any date ahead).
+    /// The sidebar count and the calendar view's first group are both this list.
+    func waitingItems() async -> [AgendaItem] {
+        let now = Date()
+        let stored = ((try? await services.store.waitingForAnswer()) ?? []).filter { isShown($0) && isYourCalendar($0.calendarID) }
+        return stored + (await invitationRows(from: now, to: now.addingTimeInterval(400 * 86_400)))
+    }
+
+    /// The sidebar's count of invitations waiting for an answer.
+    func reloadWaitingCount() async {
+        let count = await waitingItems().count
+        if count != waitingInvitationCount { waitingInvitationCount = count }
+    }
+
+    func reloadNextMeeting() async {
+        let now = Date()
+        let items = ((try? await services.store.agenda(from: now, to: now.addingTimeInterval(30 * 86_400))) ?? []).filter { item in
+            !item.start.isAllDay && item.end.instant() > now && isYourTime(item)
+                && item.event.selfResponse != .declined && item.event.status != .cancelled
+        }
+        // A meeting about to start comes before one still running.
+        let starting = items.first { $0.start.instant() >= now && $0.start.instant() < now.addingTimeInterval(5 * 60) }
+        let next = starting ?? items.first { $0.start.instant() < now.addingTimeInterval(36 * 3600) }
+        if next != nextMeeting { nextMeeting = next }
+        // The next meeting with each person, for "Next with" in the reader. Large meetings say little about one person.
+        let me = services.store.selfAddresses
+        var byPerson: [String: AgendaItem] = [:]
+        for item in items where item.event.attendees.count <= 10 {
+            let people = item.event.attendees.filter { !$0.isResource }.map(\.normalized) + [item.event.organizer?.normalized].compactMap { $0 }
+            for person in people where !me.contains(person) && person != account.normalized && byPerson[person] == nil {
+                byPerson[person] = item
+            }
+        }
+        nextMeetingByPerson = byPerson
+    }
+
+    /// "Next with Alex Morgan: Mon Oct 12 13:00 · 1:1 with Alex", for the people writing in a conversation, latest first.
+    func nextWith(_ thread: MailThread) -> (text: String, item: AgendaItem)? {
+        let me = services.store.selfAddresses
+        var seen = Set<String>()
+        for message in thread.messages.reversed() {
+            let person = message.from
+            guard !me.contains(person.normalized), seen.insert(person.normalized).inserted else { continue }
+            if let item = nextMeetingByPerson[person.normalized], item.end.instant() > Date() {
+                return ("Next with \(person.shortName): \(Formatting.eventShort(item.start)) · \(item.event.summary)", item)
+            }
+        }
+        return nil
+    }
+
+    /// Clicking "Next with" in the reader: that event in the calendar.
+    func openNextWith() {
+        guard let thread = currentThread, let item = nextWith(thread)?.item else { return }
+        showCalendar(at: Calendar.current.startOfDay(for: item.start.instant()), eventID: item.event.id)
+    }
+
+    // MARK: - Invitations in the mail list
+
+    func reloadInvitationChips() async {
+        let ids = threads.map(\.id)
+        guard !ids.isEmpty, let stored = try? await services.store.latestInvitations(threadIDs: ids) else {
+            if !invitationChips.isEmpty { invitationChips = [:] }
+            return
+        }
+        var chips: [String: InvitationChip] = [:]
+        for (threadID, file) in stored {
+            guard let invitation = file.main else { continue }
+            chips[threadID] = await chip(for: invitation)
+        }
+        if chips != invitationChips { invitationChips = chips }
+    }
+
+    private func chip(for invitation: Invitation) async -> InvitationChip {
+        let time = Formatting.eventShort(invitation.start)
+        switch invitation.method {
+        case .cancel: return InvitationChip(text: "\(time) · cancelled", colorIndex: 6)
+        case .reply:
+            let guest = invitation.attendees.first
+            return InvitationChip(text: "\(guest?.address.shortName ?? "guest") said \(guest?.response.word ?? "?")", colorIndex: 5)
+        default:
+            if invitation.isCancellation { return InvitationChip(text: "\(time) · cancelled", colorIndex: 6) }
+            let event = try? await services.calendarActions.event(for: invitation)
+            switch event?.selfResponse {
+            case .accepted?: return InvitationChip(text: "\(time) · yes", colorIndex: 0)
+            case .tentative?: return InvitationChip(text: "\(time) · maybe", colorIndex: 3)
+            case .declined?: return InvitationChip(text: "\(time) · no", colorIndex: 6)
+            default: return InvitationChip(text: "\(time) · needs answer", colorIndex: 3)
+            }
+        }
+    }
+
+    // MARK: - The event page
+
+    /// Builds the event page of a conversation with an invitation (nil when it has none).
+    func loadEventPage(for thread: MailThread) async -> ReaderPayload.EventPage? {
+        guard let files = try? await services.store.invitations(threadID: thread.id), let file = files.last, let invitation = file.main else {
+            return nil
+        }
+        let event = try? await services.calendarActions.event(for: invitation)
+        let message = thread.messages.first { $0.id == file.messageID }
+        let earlier = (try? await services.store.invitations(uid: invitation.uid)) ?? []
+        let previous = earlier.last { $0.messageID != file.messageID && $0.date < file.date && ($0.main?.sequence ?? 0) <= invitation.sequence }?.main
+        return await eventPage(event: event, invitation: invitation, previous: previous, mail: message)
+    }
+
+    /// The page for an agenda row in the calendar view. Of the invitation mail, only what is about this row counts:
+    /// the whole event, or this occurrence (a cancelled Tuesday does not cancel the other days).
+    func loadEventPage(for item: AgendaItem) async -> ReaderPayload.EventPage {
+        let uid = item.event.iCalUID
+        let files = uid == nil ? [] : ((try? await services.store.invitations(uid: uid!)) ?? [])
+        let key = Self.occurrenceKey(of: item)
+        let invitation = files.reversed().lazy.compactMap { file in
+            file.invitations.first { !key.isEmpty && $0.recurrenceID?.occurrenceKey == key } ?? file.invitations.first { $0.recurrenceID == nil }
+        }.first
+        return await eventPage(event: item.event, invitation: invitation, previous: nil, mail: nil, occurrence: (item.start, item.end), hasMail: !files.isEmpty)
+    }
+
+    func eventPage(
+        event: CalendarEvent?, invitation: Invitation?, previous: Invitation?, mail: MailMessage?,
+        occurrence: (start: EventTime, end: EventTime)? = nil, hasMail: Bool = false
+    ) async -> ReaderPayload.EventPage {
+        let now = Date()
+        let me = services.store.selfAddresses
+        // Times: the occurrence shown, else the next one of a series, else the invitation's.
+        var start = occurrence?.start ?? invitation?.start ?? event?.start ?? .timed(now, timeZone: nil)
+        var end = occurrence?.end ?? invitation?.effectiveEnd ?? event?.end ?? start
+        if occurrence == nil, let event, event.isSeries || invitation?.recurrence.isEmpty == false,
+           let next = try? await services.store.nextOccurrence(calendarID: event.calendarID, eventID: event.recurringEventID ?? event.id, now: now) {
+            start = next.start
+            end = next.end
+        }
+        let cancelled = invitation?.isCancellation == true || event?.status == .cancelled
+        let past = end.instant() < now
+        let title = event?.summary ?? invitation?.summary ?? "(no title)"
+        let organizer = event?.organizer ?? invitation?.organizer
+        let guests = (event?.attendees.isEmpty == false ? event?.attendees : invitation?.attendees) ?? []
+        let selfResponse = event?.selfResponse ?? invitation?.attendee(matching: me)?.response
+
+        var page = ReaderPayload.EventPage(kicker: kicker(invitation: invitation, previous: previous, mail: mail), title: title, when: Formatting.eventRange(start, end))
+        page.relative = past ? nil : Formatting.relativeDay(start.instant(), now: now)
+        page.zone = Formatting.organizerZone(start, end)
+        let recurrence = event?.recurrence.isEmpty == false ? event!.recurrence : (invitation?.recurrence ?? [])
+        page.repeats = Recurrence.summary(recurrence, start: event?.start ?? start, calendar: .current)
+        page.agenda = (event?.details ?? invitation?.details).map { HTMLText.plainText(fromHTML: $0.contains("<") ? $0 : $0.replacingOccurrences(of: "\n", with: "<br>")) }.flatMap { $0.isEmpty ? nil : $0 }
+        if let previous, let invitation { page.changes = Self.changes(from: previous, to: invitation) }
+
+        // Only web links: the event's author chooses this text.
+        if let url = ICalendar.webLink(event?.conferenceURL) ?? ICalendar.webLink(invitation?.conferenceURL) {
+            page.facts.append(.init(label: "Join", value: Formatting.shortLink(url), key: "gj", link: url))
+        }
+        if let place = event?.location ?? invitation?.location, !place.isEmpty, place != event?.conferenceURL {
+            page.facts.append(.init(label: "Where", value: place))
+        }
+        if let organizer {
+            page.facts.append(.init(label: "Organizer", value: me.contains(organizer.normalized) || organizer.isSelf ? "you" : (organizer.name ?? organizer.email)))
+        }
+        let people = guests.filter { !$0.isResource }
+        page.guests = people.map { guest in
+            let isMe = guest.isSelf || me.contains(guest.normalized)
+            let kind = guest.isOrganizer ? "organizer" : guest.response.word
+            return .init(name: isMe ? "you" : (guest.name ?? guest.email), answer: guest.isOrganizer ? "organizer" : guest.response.word, kind: kind == "organizer" ? "yes" : kind)
+        }
+        if people.count > 1 {
+            let counts = Dictionary(grouping: people.filter { !$0.isOrganizer }, by: \.response).mapValues(\.count)
+            let parts = [ResponseStatus.accepted, .tentative, .declined, .needsAction].compactMap { response in counts[response].map { "\($0) \(response.word)" } }
+            page.guestSummary = "\(people.count) guests · " + parts.joined(separator: ", ")
+        }
+
+        // State chips and the answer keys. Your own events have nothing to answer.
+        let isOrganizer = event?.organizerIsSelf == true || organizer.map { $0.isSelf || me.contains($0.normalized) } == true
+        // An invitation not on the calendar here can still be answered when it names you: Google may be keeping it hidden.
+        let invitedByMail = event == nil && invitation?.method == .request && services.calendarEngine != nil && invitation?.attendee(matching: me) != nil
+        let answerable = (event?.selfAttendee != nil || invitedByMail) && !isOrganizer && !past && !cancelled && invitation?.method != .reply
+        if cancelled {
+            page.chips.append(.init(text: "cancelled", kind: "clash"))
+        } else if past {
+            page.chips.append(.init(text: "past", kind: "muted"))
+        } else if isOrganizer {
+            page.chips.append(.init(text: "you organize", kind: "ok"))
+        } else if let selfResponse, selfResponse != .needsAction {
+            page.chips.append(.init(text: "you said \(selfResponse.word)", kind: selfResponse == .declined ? "muted" : "ok"))
+        } else if event?.selfAttendee != nil || invitation?.method == .request {
+            page.chips.append(.init(text: "needs your answer", kind: "needs"))
+        }
+        if answerable {
+            page.answers = [
+                .init(title: "Yes", key: "Y", action: "answerYes", selected: selfResponse == .accepted),
+                .init(title: "Maybe", key: "M", action: "answerMaybe", selected: selfResponse == .tentative),
+                .init(title: "No", key: "N", action: "answerNo", selected: selfResponse == .declined),
+                .init(title: "With a note", key: "R", action: "answerNote", selected: false),
+            ]
+        }
+
+        // Your day.
+        if services.calendarEngine == nil {
+            page.dayMessage = services.isGmail ? "Connect Google Calendar to see your day and answer here. Press : and choose “Connect Google Calendar”." : nil
+        } else if event == nil, invitation != nil, !cancelled, !past {
+            page.dayMessage = "This invitation is not on your Google Calendar yet."
+            page.day = await dayColumn(for: start, end: end, excluding: nil, ghost: true, title: title)
+        } else {
+            page.day = await dayColumn(for: start, end: end, excluding: event, ghost: !isOrganizer && selfResponse == .needsAction, title: title)
+        }
+        if let day = page.day, let clash = day.blocks.first(where: { $0.kind == "clash" }), !cancelled, !past, page.day?.peeking == false {
+            page.chips.append(.init(text: "overlaps \(clash.title)", kind: "clash"))
+        }
+        // A repeating invitation: which of its next 8 dates overlap something you go to.
+        if !recurrence.isEmpty, !cancelled, !past, services.calendarEngine != nil, answerable || event == nil {
+            let clashes = await seriesClashes(event: event, invitation: invitation, now: now)
+            if !clashes.isEmpty {
+                page.chips.append(.init(text: "\(clashes.count) of the next 8 overlap", kind: "clash"))
+                page.facts.append(.init(label: "Overlaps", value: clashes.prefix(3).joined(separator: " · ") + (clashes.count > 3 ? " · \(clashes.count - 3) more" : "")))
+            }
+        }
+
+        if mail != nil {
+            page.footer = answerable ? "Archive after answering: \(settings.archiveInvitationsAfterAnswer ? "on" : "off") · gc this event in the calendar" : "gc this event in the calendar"
+            page.original = "Original email from \(mail!.from.displayName)\(mail!.attachments.contains { $0.filename.lowercased().hasSuffix(".ics") } ? " · invite.ics" : "")"
+        } else if hasMail {
+            page.footer = "gm the invitation mail"
+        }
+        return page
+    }
+
+    /// The next 8 dates of a series (from the calendar, or the invitation when it is not on the calendar)
+    /// that overlap a busy event you have not declined: "Tue Oct 13 with Design sync".
+    private func seriesClashes(event: CalendarEvent?, invitation: Invitation?, now: Date) async -> [String] {
+        var dates: [(start: Date, end: Date)] = []
+        if let event {
+            let seriesID = event.recurringEventID ?? event.id
+            let items = (try? await services.store.occurrences(calendarID: event.calendarID, seriesID: seriesID, from: now, limit: 8)) ?? []
+            dates = items.filter { !$0.start.isAllDay }.map { ($0.start.instant(), $0.end.instant()) }
+        } else if let invitation, !invitation.start.isAllDay {
+            // The rule comes from mail: worked out away from the main thread.
+            let occurrences = await Task.detached(priority: .userInitiated) {
+                Recurrence.occurrences(
+                    start: invitation.start, end: invitation.effectiveEnd, recurrence: invitation.recurrence, from: now,
+                    to: now.addingTimeInterval(400 * 86_400), calendar: .current
+                ) ?? []
+            }.value
+            dates = occurrences.prefix(8).map { ($0.start.instant(), $0.end.instant()) }
+        }
+        let seriesID = event.map { $0.recurringEventID ?? $0.id }
+        var clashes: [String] = []
+        for date in dates {
+            let others = ((try? await services.store.agenda(from: date.start, to: date.end)) ?? []).filter { item in
+                isYourTime(item) && !item.start.isAllDay && item.event.isBusy && item.event.status != .cancelled && item.event.selfResponse != .declined
+                    && (seriesID == nil || (item.seriesID != seriesID && item.event.id != seriesID)) && item.event.iCalUID != invitation?.uid
+            }
+            if let other = others.first {
+                clashes.append("\(Formatting.dayTitle(date.start)) with \(other.event.summary)")
+            }
+        }
+        return clashes
+    }
+
+    private func kicker(invitation: Invitation?, previous: Invitation?, mail: MailMessage?) -> String {
+        let from = mail.map { " · \($0.from.displayName) · \(Formatting.readerTime($0.date))" } ?? ""
+        guard let invitation else { return "Event" }
+        switch invitation.method {
+        case .cancel: return "Cancelled" + from
+        case .reply:
+            let guest = invitation.attendees.first
+            return "\(guest?.name ?? guest?.email ?? "A guest") said \(guest?.response.word ?? "?")" + (mail.map { " · \(Formatting.readerTime($0.date))" } ?? "")
+        default:
+            return (previous != nil || invitation.sequence > 0 ? "Updated invitation" : "Invitation") + from
+        }
+    }
+
+    /// What an updated invitation changed, in words.
+    static func changes(from old: Invitation, to new: Invitation) -> [String] {
+        var result: [String] = []
+        if old.start != new.start || old.effectiveEnd != new.effectiveEnd {
+            result.append("Time: \(Formatting.eventRange(old.start, old.effectiveEnd)) → \(Formatting.eventRange(new.start, new.effectiveEnd))")
+        }
+        if (old.location ?? "") != (new.location ?? "") { result.append("Place: \(old.location ?? "none") → \(new.location ?? "none")") }
+        if old.summary != new.summary { result.append("Title: \(old.summary) → \(new.summary)") }
+        let added = Set(new.attendees.map(\.normalized)).subtracting(old.attendees.map(\.normalized))
+        if !added.isEmpty { result.append("Added: \(new.attendees.filter { added.contains($0.normalized) }.map { $0.name ?? $0.email }.joined(separator: ", "))") }
+        return result
+    }
+
+    /// The day column: your day around an event, with the event dashed when you have not answered,
+    /// and overlaps in red. `peekDays` shifts the day ({ and }).
+    func dayColumn(for start: EventTime, end: EventTime, excluding event: CalendarEvent?, ghost: Bool, title: String) async -> ReaderPayload.EventPage.Day {
+        let calendar = Calendar.current
+        let eventDay = calendar.startOfDay(for: start.instant())
+        let day = calendar.date(byAdding: .day, value: peekDays, to: eventDay) ?? eventDay
+        let dayEnd = calendar.date(byAdding: .day, value: 1, to: day) ?? day
+        let items = ((try? await services.store.agenda(from: day, to: dayEnd)) ?? []).filter(isYourTime)
+        func minutes(_ date: Date) -> Int { max(0, min(1440, Int(date.timeIntervalSince(day) / 60))) }
+
+        let isSameEvent = { (item: AgendaItem) -> Bool in
+            guard let event else { return false }
+            let target = event.recurringEventID ?? event.id
+            return (item.event.id == event.id || item.seriesID == target || item.event.id == target)
+                && item.start.instant() == start.instant()
+        }
+        var allDay: [String] = []
+        var spans: [(title: String, time: String, start: Int, end: Int, kind: String)] = []
+        for item in items where item.event.status != .cancelled {
+            if item.start.isAllDay {
+                allDay.append(item.event.summary)
+                continue
+            }
+            if isSameEvent(item) && ghost { continue }
+            let response = item.event.selfResponse
+            let kind = isSameEvent(item) ? "this" : response == .declined ? "declined" : response == .tentative ? "maybe" : response == .needsAction ? "pending" : "mine"
+            spans.append((item.event.summary, Formatting.time(item.start.instant()), minutes(item.start.instant()), max(minutes(item.end.instant()), minutes(item.start.instant()) + 15), kind))
+        }
+        let showsEvent = peekDays == 0 && !start.isAllDay
+        let eventStart = minutes(start.instant())
+        let eventEnd = max(minutes(end.instant()), eventStart + 15)
+        if showsEvent && ghost {
+            spans.append((title, Formatting.time(start.instant()), eventStart, eventEnd, "invite"))
+        }
+        // Overlaps with the event (not counting your declined events).
+        var overlaps: [(title: String, from: Int, to: Int)] = []
+        if showsEvent {
+            for index in spans.indices where ["mine", "maybe", "pending"].contains(spans[index].kind) {
+                let from = max(spans[index].start, eventStart)
+                let to = min(spans[index].end, eventEnd)
+                if from < to {
+                    spans[index].kind = "clash"
+                    overlaps.append((spans[index].title, from, to))
+                }
+            }
+        }
+        let blocks = Self.layout(spans)
+        let workStart = settings.workdayStart
+        let workEnd = max(settings.workdayEnd, workStart + 60)
+        var first = min(workStart, spans.map(\.start).min() ?? workStart)
+        var last = max(workEnd, spans.map(\.end).max() ?? workEnd)
+        if showsEvent {
+            first = min(first, eventStart - 60)
+            last = max(last, eventEnd + 60)
+        }
+        first = max(0, first / 60 * 60)
+        last = min(1440, (last + 59) / 60 * 60)
+
+        var note: String?
+        var noteKind: String?
+        if let overlap = overlaps.first {
+            note = "Overlap \(Formatting.minuteTime(overlap.from))–\(Formatting.minuteTime(overlap.to)) with \(overlap.title)" + (overlaps.count > 1 ? " and \(overlaps.count - 1) more" : "")
+            noteKind = "clash"
+        } else if showsEvent {
+            note = "Nothing else at \(Formatting.minuteTime(eventStart))–\(Formatting.minuteTime(eventEnd))"
+            noteKind = "ok"
+        }
+        let today = calendar.isDate(day, inSameDayAs: Date())
+        return .init(
+            title: Formatting.dayTitle(day), startMinute: first, endMinute: last, allDay: allDay, blocks: blocks, note: note, noteKind: noteKind,
+            nowMinute: today ? minutes(Date()) : nil, focusMinute: showsEvent ? eventStart : first, peeking: peekDays != 0
+        )
+    }
+
+    /// Side-by-side columns for overlapping events.
+    static func layout(_ spans: [(title: String, time: String, start: Int, end: Int, kind: String)]) -> [ReaderPayload.EventPage.Block] {
+        let sorted = spans.sorted { ($0.start, -$0.end) < ($1.start, -$1.end) }
+        var blocks: [ReaderPayload.EventPage.Block] = []
+        var cluster: [Int] = []
+        var clusterEnd = -1
+        var columnEnds: [Int] = []
+        func closeCluster() {
+            let columns = max(1, columnEnds.count)
+            for index in cluster { blocks[index].columns = columns }
+            cluster = []
+            columnEnds = []
+        }
+        for span in sorted {
+            if span.start >= clusterEnd { closeCluster() }
+            let column = columnEnds.firstIndex { $0 <= span.start } ?? columnEnds.count
+            if column == columnEnds.count { columnEnds.append(span.end) } else { columnEnds[column] = span.end }
+            blocks.append(.init(title: span.title, time: span.time, start: span.start, end: span.end, column: column, columns: 1, kind: span.kind))
+            cluster.append(blocks.count - 1)
+            clusterEnd = max(clusterEnd, span.end)
+        }
+        closeCluster()
+        return blocks
+    }
+
+    /// Rebuilds the page on screen after a calendar change, a peek or a setting change.
+    func refreshEventPage() async {
+        if destination == .calendar {
+            await renderAgendaEvent()
+            return
+        }
+        guard let thread = currentThread, thread.id == cursorID else { return }
+        let page = await loadEventPage(for: thread)
+        guard thread.id == cursorID else { return }
+        if page != eventPages[thread.id] {
+            eventPages[thread.id] = page
+            rerenderReader()
+        }
+    }
+
+    // MARK: - Answering
+
+    /// Y, M, N (and R with a note): answers the invitation of the selected conversations, or the agenda row.
+    func answer(_ response: ResponseStatus, comment: String? = nil) {
+        guard services.calendarEngine != nil else {
+            offerCalendarConnection()
+            return
+        }
+        if destination == .calendar {
+            answerAgendaItem(response, comment: comment)
+            return
+        }
+        let targets = actionTargets.filter { !$0.hasPrefix("draft:") }
+        guard !targets.isEmpty else {
+            showToast("Select an invitation first.")
+            return
+        }
+        lastAnswer = response
+        Task {
+            var records: [CalendarActions.AnswerRecord] = []
+            var answeredThreads: [String] = []
+            var notOnCalendar = 0
+            var lookupFailure: String?
+            for threadID in targets {
+                guard let file = try? await services.store.invitations(threadID: threadID).last, let invitation = file.main,
+                      invitation.method != .reply, !invitation.isCancellation else { continue }
+                let event: CalendarEvent
+                switch await lookUpEvent(for: invitation) {
+                case .found(let found): event = found
+                case .missing:
+                    notOnCalendar += 1
+                    continue
+                case .failed(let reason):
+                    lookupFailure = reason
+                    continue
+                }
+                if let record = try? await services.calendarActions.answer(event, response: response, comment: comment, undoWindow: settings.undoSendSeconds) {
+                    records.append(record)
+                    answeredThreads.append(threadID)
+                }
+            }
+            guard !records.isEmpty else {
+                if let lookupFailure {
+                    showToast(lookupFailure, isError: true)
+                } else if notOnCalendar > 0 {
+                    showToast("This invitation is not on your Google Calendar, so it cannot be answered here. Answer it in Google Calendar.")
+                } else {
+                    showToast(targets.count == 1 ? "This conversation has no invitation you can answer here." : "None of these has an invitation you can answer here.")
+                }
+                return
+            }
+            var archive: UndoRecord?
+            if settings.archiveInvitationsAfterAnswer {
+                let inInbox = answeredThreads.filter { id in threads.first { $0.id == id }?.labelIDs.contains(SystemLabel.inbox) ?? false }
+                if !inInbox.isEmpty {
+                    applyOptimistically(.archive, to: inInbox)
+                    clearSelection()
+                    archive = try? await services.actions.perform(.archive, threads: inInbox)
+                }
+            }
+            undoStack.append(.answer(records, archive: archive))
+            redoStack.removeAll()
+            let verb = Self.answerVerb(response)
+            let text = records.count == 1 ? "\(verb) · \(records[0].summary)" : "\(verb) \(records.count) invitations"
+            showToast(text + (archive == nil ? "" : " · archived"), undoable: true)
+            await reloadInvitationChips()
+            await refreshEventPage()
+        }
+    }
+
+    enum InvitationLookup {
+        case found(CalendarEvent)
+        /// Not on your Google Calendar.
+        case missing
+        /// Google Calendar could not be asked: why, for a toast.
+        case failed(String)
+    }
+
+    /// The calendar's event for an invitation. When none of yours is stored, Google may be keeping it hidden (an
+    /// invitation from an unknown sender stays off the calendar until it is answered): it is looked up there.
+    func lookUpEvent(for invitation: Invitation) async -> InvitationLookup {
+        if let event = try? await services.calendarActions.event(for: invitation) { return .found(event) }
+        guard let engine = services.calendarEngine else { return .missing }
+        do {
+            _ = try await engine.fetchEvents(uid: invitation.uid)
+            guard let event = try await services.calendarActions.event(for: invitation) else { return .missing }
+            return .found(event)
+        } catch ProviderError.unauthorized {
+            return .failed("Signed out of Google Calendar. Sign in again to answer.")
+        } catch CalendarProviderError.notConnected {
+            return .failed("Google Calendar has not synced yet. Try again in a moment.")
+        } catch {
+            return .failed("Could not reach Google Calendar to find this invitation. Try again.")
+        }
+    }
+
+    static func answerVerb(_ response: ResponseStatus) -> String {
+        switch response {
+        case .accepted: "Accepted"
+        case .tentative: "Maybe"
+        case .declined: "Declined"
+        case .needsAction: "Answer removed"
+        }
+    }
+
+    func undoAnswer(_ records: [CalendarActions.AnswerRecord], archive: UndoRecord?) {
+        Task {
+            do {
+                // Last first: two answers to one event (two invitation mails) end on the answer before both.
+                for record in records.reversed() { try await services.calendarActions.undo(record) }
+                if let archive { try await services.actions.undo(archive) }
+                showToast("Undone: \(Self.answerVerb(records.first?.response ?? .accepted).lowercased())\(records.count == 1 ? " · \(records[0].summary)" : "")")
+                if let first = archive?.threadIDs.first {
+                    await reloadList()
+                    if threads.contains(where: { $0.id == first }) { cursorID = first }
+                }
+                await calendarChanged()
+            } catch {
+                showToast("Could not undo: \(error.localizedDescription)", isError: true)
+            }
+        }
+    }
+
+    /// R: asks for a note, then answers with it.
+    func answerWithNote() {
+        guard services.calendarEngine != nil else {
+            offerCalendarConnection()
+            return
+        }
+        overlay = .picker(.answerNote)
+    }
+
+    func offerCalendarConnection() {
+        if services.isGmail {
+            showToast("Connect Google Calendar to answer invitations: press : and choose “Connect Google Calendar”.", isError: true)
+        } else {
+            showToast("The calendar is not available for this account.", isError: true)
+        }
+    }
+
+    // MARK: - Peeking at other days
+
+    /// { and }: the day before or after in the day column (mail), or the agenda (calendar).
+    func moveDay(_ delta: Int) {
+        if destination == .calendar {
+            moveAgendaStart(days: delta)
+            return
+        }
+        guard let id = cursorID, eventPages[id] != nil else { return }
+        peekDays += delta
+        Task { await refreshEventPage() }
+    }
+
+    // MARK: - Joining and jumping
+
+    /// gj: the selected meeting's link, or the next meeting's.
+    func joinMeeting() {
+        var link: String?
+        if destination == .calendar {
+            link = currentAgendaItem?.event.conferenceURL
+        } else if let id = cursorID, let page = eventPages[id] {
+            link = page.facts.first { $0.key == "gj" }?.link
+        }
+        // The next meeting, unless it has ended since the status bar last looked.
+        link = link ?? nextMeeting.flatMap { $0.end.instant() > Date() ? $0.event.conferenceURL : nil }
+        // Only web links: the event's author chooses this text, and other schemes open other apps.
+        guard let link = ICalendar.webLink(link), let url = URL(string: link) else {
+            showToast("No meeting link here or in your next meeting.")
+            return
+        }
+        NSWorkspace.shared.open(url)
+        showToast("Opening the meeting link…")
+    }
+
+    /// gc: the calendar view; from an invitation, at that event.
+    func openCalendar() {
+        var target: (day: Date, eventID: String?)?
+        if destination != .calendar, let thread = currentThread, thread.id == cursorID {
+            Task {
+                if let file = try? await services.store.invitations(threadID: thread.id).last, let invitation = file.main {
+                    let event = try? await services.calendarActions.event(for: invitation)
+                    // A series opens at its next occurrence, not its first; one changed occurrence at its own date.
+                    var start = invitation.start.instant()
+                    if let event, event.recurringEventID != nil {
+                        start = event.start.instant()
+                    } else if let event, event.isSeries,
+                              let next = try? await services.store.nextOccurrence(calendarID: event.calendarID, eventID: event.id) {
+                        start = next.start.instant()
+                    } else if event == nil, !invitation.recurrence.isEmpty {
+                        let now = Date()
+                        let next = await Task.detached(priority: .userInitiated) {
+                            Recurrence.occurrences(
+                                start: invitation.start, end: invitation.effectiveEnd, recurrence: invitation.recurrence, from: now,
+                                to: now.addingTimeInterval(400 * 86_400), calendar: .current
+                            )?.first
+                        }.value
+                        if let next { start = next.start.instant() }
+                    }
+                    // Rows carry the series' ID for an occurrence not changed yet; a mail-only row is found by its UID.
+                    let wanted = event.map { $0.recurringEventID ?? $0.id } ?? "uid:\(invitation.uid)"
+                    target = (Calendar.current.startOfDay(for: start), wanted)
+                }
+                showCalendar(at: target?.day, eventID: target?.eventID)
+            }
+            return
+        }
+        showCalendar(at: nil, eventID: nil)
+    }
+
+    private func showCalendar(at day: Date?, eventID: String?) {
+        let start = Self.agendaStart(showing: day ?? Date())
+        // Another fortnight: the old cursor's place means nothing there.
+        if start != agendaStart { agendaCursorID = nil }
+        agendaStart = start
+        pendingAgendaEventID = eventID
+        pendingAgendaDay = day
+        navigate(to: .calendar)
+    }
+
+    /// The first day of a fortnight that shows `day`: today when `day` is in the next two weeks, else that day.
+    static func agendaStart(showing day: Date) -> Date {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let target = calendar.startOfDay(for: day)
+        let lastShown = calendar.date(byAdding: .day, value: 13, to: today) ?? today
+        return target >= today && target <= lastShown ? today : target
+    }
+
+    /// gm: the invitation mail of the selected event.
+    func openInvitationMail() {
+        guard destination == .calendar, let item = currentAgendaItem, let uid = item.event.iCalUID else {
+            showToast("Select an event in the calendar (gc) first.")
+            return
+        }
+        Task {
+            guard let file = try? await services.store.invitations(uid: uid).last else {
+                showToast("No invitation mail for this event.")
+                return
+            }
+            reveal(threadID: file.threadID)
+        }
+    }
+
+    // MARK: - The calendar view
+
+    var currentAgendaItem: AgendaItem? {
+        guard let id = agendaCursorID else { return nil }
+        for section in agendaSections {
+            if let item = section.items.first(where: { $0.id == id }) { return item }
+        }
+        return nil
+    }
+
+    /// Rows in display order, for moving the cursor.
+    var agendaRows: [AgendaItem] { agendaSections.flatMap(\.items) }
+
+    /// The calendar ID of agenda rows that come from an invitation in mail, not from a calendar.
+    static let mailOnlyCalendarID = "mail"
+
+    /// Invitations in mail that are on no calendar, as agenda rows (dashed, "from mail").
+    private func invitationRows(from start: Date, to end: Date) async -> [AgendaItem] {
+        guard let files = try? await services.store.invitationsWithoutEvents() else { return [] }
+        let now = Date()
+        var seen = Set<String>()
+        return files.reversed().compactMap { file -> AgendaItem? in
+            guard let invitation = file.main, !invitation.isCancellation, seen.insert(invitation.uid).inserted else { return nil }
+            let itemEnd = invitation.effectiveEnd
+            guard itemEnd.instant() > max(start, now), invitation.start.instant() < end else { return nil }
+            let event = CalendarEvent(
+                id: "mail-\(file.messageID)", calendarID: Self.mailOnlyCalendarID, iCalUID: invitation.uid, summary: invitation.summary,
+                details: invitation.details, location: invitation.location, start: invitation.start, end: itemEnd,
+                organizer: invitation.organizer, attendees: invitation.attendees, conferenceURL: invitation.conferenceURL
+            )
+            return AgendaItem(calendarID: Self.mailOnlyCalendarID, event: event, seriesID: nil, originalStart: "", start: invitation.start, end: itemEnd)
+        }
+    }
+
+    func reloadAgenda() async {
+        let calendar = Calendar.current
+        let start = agendaStart
+        let end = calendar.date(byAdding: .day, value: 14, to: start) ?? start
+        let store = services.store
+        async let dayRows = store.agenda(from: start, to: end)
+        async let mailRows = invitationRows(from: start, to: end)
+        let waitingRows = await waitingItems()
+        let filter = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        func matches(_ item: AgendaItem) -> Bool {
+            guard isShown(item) else { return false }
+            guard !filter.isEmpty else { return true }
+            let text = ([item.event.summary, item.event.location ?? ""] + item.event.attendees.map { "\($0.name ?? "") \($0.email)" }).joined(separator: " ").lowercased()
+            return text.contains(filter)
+        }
+        let fromMail = await mailRows
+        let waiting = waitingRows.filter(matches)
+        let items = (((try? await dayRows) ?? []) + fromMail).filter(matches).sorted { $0.start.instant() < $1.start.instant() }
+        var sections: [AgendaSection] = []
+        if !waiting.isEmpty {
+            sections.append(AgendaSection(id: "waiting", title: "Waiting for your answer · \(waiting.count)", isWaiting: true, items: waiting.map { item in
+                var copy = item
+                copy.originalStart = "waiting:" + item.originalStart
+                return copy
+            }))
+        }
+        var day = start
+        while day < end {
+            let next = calendar.date(byAdding: .day, value: 1, to: day) ?? end
+            let dayItems = items.filter { $0.start.instant() < next && $0.end.instant() > day && !($0.start.isAllDay && $0.end.instant() <= day) }
+            if !dayItems.isEmpty {
+                let title = (calendar.isDateInToday(day) ? "Today · " : calendar.isDateInTomorrow(day) ? "Tomorrow · " : "") + Formatting.dayTitle(day)
+                sections.append(AgendaSection(id: "day-\(DayDate(day, in: calendar))", title: title, isWaiting: false, items: dayItems.map { item in
+                    var copy = item
+                    copy.originalStart = "\(DayDate(day, in: calendar))|" + item.originalStart
+                    return copy
+                }))
+            }
+            day = next
+        }
+        let previousRows = agendaRows
+        if sections != agendaSections { agendaSections = sections }
+        let overlaps = Self.overlaps(in: sections.filter { !$0.isWaiting }, yours: isYourTime)
+        if overlaps != agendaOverlaps { agendaOverlaps = overlaps }
+        reconcileAgendaCursor(previousRows: previousRows)
+        await renderAgendaEvent()
+    }
+
+    /// Rows whose time overlaps another timed event you have not declined, per day. Only your own calendars count.
+    static func overlaps(in sections: [AgendaSection], yours: (AgendaItem) -> Bool = { _ in true }) -> Set<String> {
+        var result = Set<String>()
+        for section in sections {
+            let timed = section.items.filter { !$0.start.isAllDay && $0.event.selfResponse != .declined && $0.event.isBusy && yours($0) }
+            for (index, item) in timed.enumerated() {
+                for other in timed[(index + 1)...] where other.start.instant() < item.end.instant() && item.start.instant() < other.end.instant() {
+                    result.insert(item.id)
+                    result.insert(other.id)
+                }
+            }
+        }
+        return result
+    }
+
+    /// Keeps the cursor on its row after a reload. A row that changed ID (one day of a series that became its own
+    /// event) is found again; a row that left (answered, removed) gives its place to the row that took it, as in mail,
+    /// so the next key acts on the neighbour and never on an unrelated event.
+    private func reconcileAgendaCursor(previousRows: [AgendaItem] = []) {
+        let rows = agendaRows
+        if let wanted = pendingAgendaEventID {
+            let calendar = Calendar.current
+            let matching = rows.filter { row in
+                !row.originalStart.hasPrefix("waiting:")
+                    && (row.event.id == wanted || row.seriesID == wanted || (wanted.hasPrefix("uid:") && row.event.iCalUID == String(wanted.dropFirst(4))))
+            }
+            // Of a series' rows, the one on the day asked for.
+            let onDay = pendingAgendaDay.flatMap { day in matching.first { calendar.isDate($0.start.instant(), inSameDayAs: day) } }
+            if let row = onDay ?? matching.first {
+                pendingAgendaEventID = nil
+                pendingAgendaDay = nil
+                agendaCursorID = row.id
+                return
+            }
+        }
+        if let id = agendaCursorID, rows.contains(where: { $0.id == id }) { return }
+        if let id = agendaCursorID, let index = previousRows.firstIndex(where: { $0.id == id }) {
+            let old = previousRows[index]
+            let event = old.seriesID ?? old.event.id
+            let key = Self.occurrenceKey(of: old)
+            let waiting = old.originalStart.hasPrefix("waiting:")
+            // The same row, or the same occurrence moved to another day (a day of a series edited on its own).
+            if let same = rows.first(where: { $0.calendarID == old.calendarID && $0.originalStart == old.originalStart && ($0.seriesID ?? $0.event.id) == event })
+                ?? rows.first(where: {
+                    $0.calendarID == old.calendarID && ($0.seriesID ?? $0.event.id) == event && Self.occurrenceKey(of: $0) == key
+                        && $0.originalStart.hasPrefix("waiting:") == waiting
+                }) {
+                agendaCursorID = same.id
+                return
+            }
+            if !rows.isEmpty {
+                agendaCursorID = rows[min(index, rows.count - 1)].id
+                return
+            }
+        }
+        let now = Date()
+        agendaCursorID = rows.first { !$0.originalStart.hasPrefix("waiting:") && $0.end.instant() > now }?.id ?? rows.first?.id
+    }
+
+    func moveAgendaCursor(by delta: Int) {
+        let rows = agendaRows
+        guard !rows.isEmpty else { return }
+        let index = rows.firstIndex { $0.id == agendaCursorID } ?? 0
+        agendaCursorID = rows[min(max(index + delta, 0), rows.count - 1)].id
+        Task { await renderAgendaEvent() }
+    }
+
+    func moveAgendaCursor(to index: Int) {
+        let rows = agendaRows
+        guard !rows.isEmpty else { return }
+        agendaCursorID = rows[min(max(index, 0), rows.count - 1)].id
+        Task { await renderAgendaEvent() }
+    }
+
+    func selectAgendaItem(_ id: String) {
+        agendaCursorID = id
+        focus = .list
+        Task { await renderAgendaEvent() }
+    }
+
+    /// { } [ ] t: the agenda's first day.
+    func moveAgendaStart(days: Int) {
+        let calendar = Calendar.current
+        agendaStart = calendar.date(byAdding: .day, value: days, to: agendaStart) ?? agendaStart
+        agendaCursorID = nil
+        Task { await reloadAgenda() }
+    }
+
+    func agendaToday() {
+        agendaStart = Calendar.current.startOfDay(for: Date())
+        agendaCursorID = nil
+        Task { await reloadAgenda() }
+    }
+
+    func renderAgendaEvent() async {
+        guard destination == .calendar else { return }
+        guard let item = currentAgendaItem else {
+            reader.render(.empty(agendaSections.isEmpty ? "Nothing on your calendar in these two weeks." : "Select an event", dark: theme.palette.isDark))
+            return
+        }
+        let page = await loadEventPage(for: item)
+        guard item.id == agendaCursorID, destination == .calendar else { return }
+        var payload = ReaderPayload()
+        payload.dark = theme.palette.isDark
+        // A render of the row already on screen keeps its scroll position.
+        payload.threadID = "event:\(item.id)"
+        payload.subject = item.event.summary
+        payload.showHints = settings.alwaysShowKeyHints
+        payload.event = page
+        reader.render(payload)
+    }
+
+    /// Y M N R in the calendar view. A repeating invitation not answered yet is answered as a whole (that is the
+    /// invitation); once answered, a day's row answers only that day ("can't make Tuesday's standup").
+    /// `thisDayOnly`: answer only this row's day of a series, answered or not (# declines one day).
+    private func answerAgendaItem(_ response: ResponseStatus, comment: String?, thisDayOnly: Bool = false) {
+        guard let item = currentAgendaItem else { return }
+        lastAnswer = response
+        let isWaiting = item.originalStart.hasPrefix("waiting:")
+        Task {
+            // The event to answer on its own: a changed day of a series, one day of a series, or the event behind an
+            // invitation that is only in mail (Google may keep it hidden until it is answered). Nil: the row's event.
+            var target: CalendarEvent?
+            var oneDay = false
+            if item.calendarID == Self.mailOnlyCalendarID {
+                guard let uid = item.event.iCalUID, let invitation = (try? await services.store.invitations(uid: uid))?.last?.main else { return }
+                switch await lookUpEvent(for: invitation) {
+                case .found(let event): target = event
+                case .missing:
+                    showToast("This invitation is not on your Google Calendar, so it cannot be answered here. Answer it in Google Calendar.")
+                    return
+                case .failed(let reason):
+                    showToast(reason, isError: true)
+                    return
+                }
+            } else if !isYourCalendar(item.calendarID) {
+                // There "self" is the calendar's owner: an answer would be theirs.
+                showToast("This event is on someone else's calendar. Answer it on yours.")
+                return
+            } else if let seriesID = item.event.recurringEventID {
+                // A changed day of a series. While the series itself waits for an answer, the answer is for the series
+                // (that is the invitation); once it is answered, or for # on one day, only this day.
+                let series = try? await services.store.event(calendarID: item.calendarID, id: seriesID)
+                if thisDayOnly || series?.selfAttendee == nil || series?.selfResponse != .needsAction {
+                    target = item.event
+                    oneDay = true
+                }
+            } else if item.seriesID != nil, thisDayOnly || (!isWaiting && item.event.selfResponse.map { $0 != .needsAction } == true) {
+                target = await occurrenceEvent(for: item)
+                oneDay = target != nil
+            }
+            let answer: CalendarActions.AnswerRecord?
+            if let target {
+                answer = try? await services.calendarActions.answer(target, response: response, comment: comment, undoWindow: settings.undoSendSeconds)
+            } else {
+                answer = try? await services.calendarActions.answer(
+                    calendarID: item.calendarID, eventID: item.answerTargetID, response: response, comment: comment, undoWindow: settings.undoSendSeconds
+                )
+            }
+            guard let record = answer else {
+                showToast("You are not a guest of this event.")
+                return
+            }
+            var archive: UndoRecord?
+            if !oneDay, settings.archiveInvitationsAfterAnswer, let uid = item.event.iCalUID,
+               let files = try? await services.store.invitations(uid: uid) {
+                let inbox = Array(Set(files.map(\.threadID)))
+                archive = try? await services.actions.perform(.archive, threads: inbox)
+            }
+            undoStack.append(.answer([record], archive: archive))
+            redoStack.removeAll()
+            let what = oneDay ? "\(record.summary) on \(Formatting.dayTitle(item.start.instant())) only" : record.summary
+            showToast("\(Self.answerVerb(response)) · \(what)" + (archive == nil ? "" : " · invitation archived"), undoable: true)
+        }
+    }
+
+    /// An agenda row's place in its series ("20261012T163000Z"), without the row's section prefix; "" for single events.
+    static func occurrenceKey(of item: AgendaItem) -> String {
+        var key = item.originalStart
+        if key.hasPrefix("waiting:") { key.removeFirst("waiting:".count) }
+        if let bar = key.lastIndex(of: "|") { key = String(key[key.index(after: bar)...]) }
+        return key
+    }
+
+    /// The row's occurrence of its series as its own event, to change or answer that day alone. Nil for single events.
+    func occurrenceEvent(for item: AgendaItem) async -> CalendarEvent? {
+        guard let seriesID = item.seriesID else { return nil }
+        if item.event.recurringEventID != nil { return item.event }
+        guard let series = (try? await services.store.event(calendarID: item.calendarID, id: seriesID)) ?? (item.event.id == seriesID ? item.event : nil),
+              let original = EventTime(occurrenceKey: Self.occurrenceKey(of: item), timeZone: series.start.timeZone) else { return nil }
+        return series.instance(originalStart: original, start: item.start, end: item.end)
+    }
+
+    /// r and a in the calendar: email the organizer, or everyone invited.
+    func emailGuests(all: Bool) {
+        guard let event = currentAgendaItem?.event else { return }
+        let me = services.store.selfAddresses
+        var recipients: [EmailAddress] = []
+        if all {
+            recipients = event.attendees.filter { !$0.isResource && !me.contains($0.normalized) && !$0.isSelf }.map(\.address)
+        } else if let organizer = event.organizer, !organizer.isSelf, !me.contains(organizer.normalized) {
+            recipients = [organizer.address]
+        }
+        guard !recipients.isEmpty else {
+            showToast(all ? "No other guests." : "You organize this event. Press a to email the guests.")
+            return
+        }
+        openCompose(Draft(to: recipients, subject: event.summary))
+    }
+
+    /// Enter in the calendar: your own events open in the editor; others focus the reader.
+    func openAgendaItem() {
+        guard let item = currentAgendaItem else { return }
+        if item.event.organizerIsSelf, calendars.first(where: { $0.id == item.calendarID })?.canEdit ?? true, services.calendarCanChange {
+            editEvent(item)
+        } else {
+            focus = .reader
+        }
+    }
+
+    /// # in the calendar: cancels your own event (guests are told after the undo window), or declines an invitation.
+    /// On a repeating event, only this occurrence; the editor (↵, then All events and ⌘⇧⌫) removes the series.
+    func removeAgendaEvent() {
+        guard let item = currentAgendaItem else { return }
+        guard services.calendarCanChange else {
+            showToast("This calendar is read-only here.", isError: true)
+            return
+        }
+        // An invitation only in mail: # declines it (it is looked up on Google Calendar first).
+        if item.calendarID == Self.mailOnlyCalendarID {
+            answerAgendaItem(.declined, comment: nil)
+            return
+        }
+        if item.event.selfAttendee != nil, !item.event.organizerIsSelf {
+            // On a day of a series, only that day is declined.
+            answerAgendaItem(.declined, comment: nil, thisDayOnly: !item.originalStart.hasPrefix("waiting:"))
+            return
+        }
+        guard calendars.first(where: { $0.id == item.calendarID })?.canEdit ?? true else {
+            showToast("You cannot change events on this calendar.")
+            return
+        }
+        Task {
+            if item.seriesID != nil, let occurrence = await occurrenceEvent(for: item) {
+                removeEvent(occurrence)
+            } else {
+                removeEvent((try? await services.store.event(calendarID: item.calendarID, id: item.event.id)) ?? item.event)
+            }
+        }
+    }
+
+    /// Removes an event, or one occurrence of a series (`CalendarEvent.instance`). Guests are told after the undo window.
+    func removeEvent(_ event: CalendarEvent) {
+        let hasGuests = event.attendees.contains { !$0.isSelf && !$0.isResource }
+        let name = event.recurringEventID == nil ? "“\(event.summary)”" : "“\(event.summary)” on \(Formatting.dayTitle(event.start.instant()))"
+        Task {
+            do {
+                let record = try await services.calendarActions.remove(event, sendUpdates: hasGuests ? .all : .none, undoWindow: hasGuests ? settings.undoSendSeconds : 0)
+                undoStack.append(.eventChange(record))
+                redoStack.removeAll()
+                showToast(hasGuests ? "Cancelling \(name)" : "Removed \(name).", undoable: true,
+                          countdownTo: hasGuests ? Date().addingTimeInterval(settings.undoSendSeconds) : nil)
+            } catch {
+                showToast("Could not remove the event: \(error.localizedDescription)", isError: true)
+            }
+        }
+    }
+
+    func undoEventChange(_ record: CalendarActions.ChangeRecord) {
+        Task {
+            do {
+                let cancelled = try await services.calendarActions.undo(record)
+                let event = record.before ?? record.after
+                let day = event?.recurringEventID == nil ? "" : " on \(Formatting.dayTitle((event?.originalStart ?? event?.start)?.instant() ?? Date()))"
+                let name = "“\(event?.summary ?? "event")”\(day)"
+                switch (record.before, record.after) {
+                case (nil, _?): showToast(cancelled ? "Undone: \(name) was not created." : "Undone: \(name) removed again.")
+                case (_?, nil): showToast("Undone: \(name) is back.")
+                default: showToast("Undone: the change to \(name).")
+                }
+            } catch {
+                showToast("Could not undo: \(error.localizedDescription)", isError: true)
+            }
+        }
+    }
+
+    // MARK: - Connecting the calendar
+
+    /// Signs in again with calendar access (same account, same local mail).
+    func connectCalendar() {
+        guard services.isGmail else {
+            showToast("The dummy account has its calendar already. Press gc.")
+            return
+        }
+        connectGmail()
+    }
+}
+
+extension Formatting {
+    private static let dayFormat: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US")
+        formatter.dateFormat = "EEE MMM d"
+        return formatter
+    }()
+
+    private static let hourMinute: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    static func dayTitle(_ date: Date) -> String { dayFormat.string(from: date) }
+    static func time(_ date: Date) -> String { hourMinute.string(from: date) }
+    static func minuteTime(_ minutes: Int) -> String { String(format: "%02d:%02d", minutes / 60 % 24, minutes % 60) }
+
+    /// "Mon Oct 12 · 14:00–14:45", "Mon Oct 12 · all day", "Fri Oct 16 – Sun Oct 18".
+    static func eventRange(_ start: EventTime, _ end: EventTime) -> String {
+        let calendar = Calendar.current
+        switch (start, end) {
+        case (.allDay(let first), .allDay(let after)):
+            let last = after.adding(days: -1, in: calendar)
+            return last <= first ? "\(dayTitle(first.start(in: calendar))) · all day" : "\(dayTitle(first.start(in: calendar))) – \(dayTitle(last.start(in: calendar)))"
+        default:
+            let from = start.instant(in: calendar)
+            let to = end.instant(in: calendar)
+            if calendar.isDate(from, inSameDayAs: to) || to.timeIntervalSince(from) < 86_400 && calendar.dateComponents([.hour, .minute], from: to) == DateComponents(hour: 0, minute: 0) {
+                return "\(dayTitle(from)) · \(time(from))–\(time(to))"
+            }
+            return "\(dayTitle(from)) \(time(from)) – \(dayTitle(to)) \(time(to))"
+        }
+    }
+
+    /// "Mon 14:00", or "Oct 12" for an all-day event, for list chips.
+    static func eventShort(_ start: EventTime) -> String {
+        switch start {
+        case .allDay(let day): return dayTitle(day.start()).split(separator: " ").dropFirst().joined(separator: " ")
+        case .timed(let date, _):
+            let calendar = Calendar.current
+            let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: Date()), to: calendar.startOfDay(for: date)).day ?? 0
+            let day = days == 0 ? "today" : days == 1 ? "tomorrow" : (0..<7).contains(days) ? String(dayTitle(date).prefix(3)) : String(dayTitle(date).dropFirst(4))
+            return "\(day) \(time(date))"
+        }
+    }
+
+    /// "in 3 days", "tomorrow", "today", "in 2 hours", "now".
+    static func relativeDay(_ date: Date, now: Date = Date()) -> String? {
+        let calendar = Calendar.current
+        let minutes = Int(date.timeIntervalSince(now) / 60)
+        if minutes <= 0 && minutes > -60 { return "now" }
+        if minutes < 0 { return nil }
+        if minutes < 60 { return "in \(minutes) min" }
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: date)).day ?? 0
+        if days == 0 { return minutes < 180 ? "in \(minutes / 60) h \(minutes % 60) min" : "today" }
+        if days == 1 { return "tomorrow" }
+        if days < 14 { return "in \(days) days" }
+        return "in \(days / 7) weeks"
+    }
+
+    /// "11:00–11:45 Europe/London" when the event's zone shows other times than yours.
+    static func organizerZone(_ start: EventTime, _ end: EventTime) -> String? {
+        guard case .timed(let from, let zoneID?) = start, let zone = TimeZone(identifier: zoneID),
+              zone.secondsFromGMT(for: from) != TimeZone.current.secondsFromGMT(for: from) else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US")
+        formatter.timeZone = zone
+        formatter.dateFormat = "HH:mm"
+        return "\(formatter.string(from: from))–\(formatter.string(from: end.instant())) \(zoneID.replacingOccurrences(of: "_", with: " "))"
+    }
+
+    /// "meet.google.com/abc-defg-hij": a link without its scheme and query.
+    static func shortLink(_ link: String) -> String {
+        guard let url = URL(string: link), let host = url.host else { return link }
+        return host + url.path
+    }
+
+    /// "in 12 min", "in 1 h 5 min", "now".
+    static func countdown(to date: Date, now: Date = Date()) -> String {
+        let minutes = Int((date.timeIntervalSince(now) / 60).rounded(.up))
+        if minutes <= 0 { return "now" }
+        if minutes < 60 { return "in \(minutes) min" }
+        return "in \(minutes / 60) h \(minutes % 60) min"
+    }
+}

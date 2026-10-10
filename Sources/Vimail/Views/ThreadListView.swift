@@ -145,7 +145,8 @@ struct ThreadListView: View {
                             index: index,
                             isCursor: thread.id == model.cursorID,
                             isSelected: model.selection.contains(thread.id),
-                            readerFocused: model.focus == .reader
+                            readerFocused: model.focus == .reader,
+                            invitation: model.invitationChips[thread.id]
                         )
                         .equatable()
                         .id(thread.id)
@@ -284,11 +285,13 @@ struct ThreadRow: View, Equatable {
     let isCursor: Bool
     let isSelected: Bool
     let readerFocused: Bool
+    /// The invitation's time and state, for conversations with one.
+    var invitation: InvitationChip?
     @State private var hovering = false
 
     static func == (lhs: ThreadRow, rhs: ThreadRow) -> Bool {
         lhs.thread == rhs.thread && lhs.index == rhs.index && lhs.isCursor == rhs.isCursor
-            && lhs.isSelected == rhs.isSelected && lhs.readerFocused == rhs.readerFocused
+            && lhs.isSelected == rhs.isSelected && lhs.readerFocused == rhs.readerFocused && lhs.invitation == rhs.invitation
     }
 
     var body: some View {
@@ -362,8 +365,9 @@ struct ThreadRow: View, Equatable {
     @ViewBuilder
     private var chipsRow: some View {
         let labels = model.labels.filter { $0.kind != .system && thread.labelIDs.contains($0.id) }
-        if !labels.isEmpty || thread.isStarred || thread.snoozedUntil != nil || thread.draftID != nil {
+        if !labels.isEmpty || thread.isStarred || thread.snoozedUntil != nil || thread.draftID != nil || invitation != nil {
             HStack(spacing: 6) {
+                if let invitation { LabelChip(name: invitation.text, colorIndex: invitation.colorIndex) }
                 if thread.draftID != nil { LabelChip(name: "draft", colorIndex: 1) }
                 if let until = thread.snoozedUntil { LabelChip(name: "until \(Formatting.listDate(until))", colorIndex: 3) }
                 ForEach(labels.prefix(3)) { label in

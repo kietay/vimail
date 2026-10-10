@@ -121,15 +121,17 @@ public struct SavedView: Identifiable, Hashable, Codable, Sendable {
     }
 }
 
-/// What the list pane shows: a mailbox or a saved view.
+/// What the list pane shows: a mailbox, a saved view, or the calendar.
 public enum Destination: Hashable, Codable, Sendable {
     case mailbox(Mailbox)
     case view(String)
+    case calendar
 
     public var key: String {
         switch self {
         case .mailbox(let mailbox): "mailbox:\(mailbox.key)"
         case .view(let id): "view:\(id)"
+        case .calendar: "calendar"
         }
     }
 }

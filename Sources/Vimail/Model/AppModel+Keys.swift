@@ -52,6 +52,13 @@ extension AppModel {
         // The embedded vim owns every key while it has focus.
         if context.terminalFocused { return false }
 
+        // ⌘⌫ in a text field deletes to the start of the line. Unhandled, it would reach the Message menu's
+        // ⌘⌫ (Move to Trash) and trash the conversation behind the field.
+        if context.textFocused, stroke.command, !stroke.shift, !stroke.option, !stroke.control, case .backspace = stroke.key {
+            NSApp.sendAction(#selector(NSResponder.deleteToBeginningOfLine(_:)), to: nil, from: nil)
+            return true
+        }
+
         if stroke.isCommand("k") {
             overlay = overlay == .omnibox ? nil : .omnibox
             return true
@@ -81,6 +88,23 @@ extension AppModel {
             return true
         case .viewEditor:
             if stroke.isEscape { overlay = .views; return true }
+            return false
+        case .quickAdd:
+            if stroke.isEscape { overlay = nil; return true }
+            if stroke.isEnter { createFromQuickAdd(); return true }
+            if case .tab = stroke.key { openEditor(from: quickAddResult); return true }
+            if case .up = stroke.key, quickAddDraft != nil { continueDraft(); return true }
+            return false
+        case .eventEditor:
+            if stroke.isEscape { closeEditor(); return true }
+            if stroke.command, stroke.isEnter { saveEditor(notify: !stroke.shift); return true }
+            if stroke.command, stroke.shift, case .backspace = stroke.key { removeFromEditor(); return true }
+            if stroke.isCommand("]") { findTime(forward: true); return true }
+            if stroke.isCommand("[") { findTime(forward: false); return true }
+            if stroke.isCommand("e"), let editor = eventEditor, editor.occurrence != nil {
+                editor.scope = editor.scope == .thisEvent ? .allEvents : .thisEvent
+                return true
+            }
             return false
         case .help, .settings, .views:
             if stroke.isEscape || (!context.textFocused && (stroke.isChar("q") || (overlay == .help && stroke.isChar("?")))) {
@@ -147,6 +171,11 @@ extension AppModel {
     private func handleComposeKey(_ stroke: KeyStroke, compose: ComposeModel, context: KeyContext) -> Bool {
         if stroke.command, stroke.isEnter {
             send(compose)
+            return true
+        }
+        // ⌘⇧A: your free times, at the cursor (before the body's vim keys, which pass ⌘ keys through).
+        if case .char("A") = stroke.key, stroke.command, !stroke.control {
+            insertFreeTimes(into: compose, textView: focusTarget == .composeBody ? context.textView : nil)
             return true
         }
         if stroke.isControl("g") {
@@ -258,6 +287,7 @@ extension AppModel {
     }
 
     func execute(_ command: KeyCommand, count: Int = 1) {
+        if destination == .calendar, executeInCalendar(command, count: count) { return }
         let inReader = focus == .reader
         switch command {
         case .down: inReader ? reader.scrollLines(count) : moveCursor(by: count)
@@ -324,6 +354,52 @@ extension AppModel {
         case .sync: syncNow()
         case .toggleSidebar: session.sidebarCollapsed.toggle()
         case .openAttachments: openFirstAttachment()
+        case .answer(let response): answer(response)
+        case .answerWithNote: answerWithNote()
+        case .calendar: openCalendar()
+        case .joinMeeting: joinMeeting()
+        case .openInvitationMail: openInvitationMail()
+        case .newEvent: newEvent()
+        case .previousDay: moveDay(-count)
+        case .nextDay: moveDay(count)
+        case .previousWeek: moveDay(-7 * count)
+        case .nextWeek: moveDay(7 * count)
         }
+    }
+
+    /// Keys in the calendar view. Returns false for keys that do the same as in mail.
+    private func executeInCalendar(_ command: KeyCommand, count: Int) -> Bool {
+        let inReader = focus == .reader
+        switch command {
+        case .down: inReader ? reader.scrollLines(count) : moveAgendaCursor(by: count)
+        case .up: inReader ? reader.scrollLines(-count) : moveAgendaCursor(by: -count)
+        case .top: inReader ? reader.scrollTo(top: true) : moveAgendaCursor(to: count > 1 ? count - 1 : 0)
+        case .bottom: inReader ? reader.scrollTo(top: false) : moveAgendaCursor(to: agendaRows.count - 1)
+        case .halfPageDown: inReader ? reader.scrollPage(0.5 * Double(count)) : moveAgendaCursor(by: 5 * count)
+        case .halfPageUp: inReader ? reader.scrollPage(-0.5 * Double(count)) : moveAgendaCursor(by: -5 * count)
+        case .pageDown: inReader ? reader.scrollPage(0.9) : moveAgendaCursor(by: 10 * count)
+        case .pageUp: inReader ? reader.scrollPage(-0.9) : moveAgendaCursor(by: -10 * count)
+        case .nextThread: moveAgendaCursor(by: count)
+        case .previousThread: moveAgendaCursor(by: -count)
+        case .focusReader, .open: openAgendaItem()
+        case .focusList: focus = .list
+        case .back, .escape:
+            if inReader { focus = .list } else if !searchText.isEmpty || isSearchOpen { closeSearch(); Task { await reloadAgenda() } }
+        case .label: agendaToday()
+        case .reply: emailGuests(all: false)
+        case .replyAll: emailGuests(all: true)
+        case .trash: removeAgendaEvent()
+        case .previousDay: moveAgendaStart(days: -count)
+        case .nextDay: moveAgendaStart(days: count)
+        case .previousWeek: moveAgendaStart(days: -7 * count)
+        case .nextWeek: moveAgendaStart(days: 7 * count)
+        case .archive, .spam, .toggleStar, .markUnread, .markRead, .move, .snooze, .quickSnooze, .forward, .unsubscribe,
+             .visual, .toggleSelection, .selectAll, .clearSelection, .openAttachments, .expandAll, .nextMessage, .previousMessage,
+             .readerPageDown, .readerPageUp:
+            if command == .readerPageDown { reader.scrollPage(0.85) } else if command == .readerPageUp { reader.scrollPage(-0.85) }
+        default:
+            return false
+        }
+        return true
     }
 }
