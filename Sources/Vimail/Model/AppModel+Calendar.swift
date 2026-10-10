@@ -178,7 +178,7 @@ extension AppModel {
         let message = thread.messages.first { $0.id == file.messageID }
         let earlier = (try? await services.store.invitations(uid: invitation.uid)) ?? []
         let previous = earlier.last { $0.messageID != file.messageID && $0.date < file.date && ($0.main?.sequence ?? 0) <= invitation.sequence }?.main
-        let invited = event == nil && !invitation.recurrence.isEmpty ? await mailOnlyEvent(uid: invitation.uid) : nil
+        let invited = event == nil && !invitation.recurrence.isEmpty ? await mailOnlyEvent(uid: invitation.uid, else: invitation) : nil
         return await eventPage(event: event, invitation: invitation, previous: previous, mail: message, invited: invited)
     }
 
@@ -213,7 +213,7 @@ extension AppModel {
         var mailSeries: Invitation?
         var mailDates: [InvitedDate] = []
         if event == nil, let invitation, !invitation.recurrence.isEmpty {
-            let known = invited.flatMap { $0.main == nil ? nil : $0 } ?? InvitedEvent([invitation])
+            let known = invited ?? InvitedEvent([invitation])
             mailSeries = known.main.flatMap { $0.isCancellation ? nil : $0 } ?? invitation
             mailDates = await upcomingDates(of: known, now: now, limit: 8)
         }
@@ -676,7 +676,7 @@ extension AppModel {
                         start = next.start.instant()
                     } else if event == nil, !invitation.recurrence.isEmpty {
                         // Only in mail: its next date, as the event page shows it.
-                        let invited = await mailOnlyEvent(uid: invitation.uid)
+                        let invited = await mailOnlyEvent(uid: invitation.uid, else: invitation)
                         if let next = await upcomingDates(of: invited, now: Date(), limit: 1).first { start = next.start.instant() }
                     }
                     // Rows carry the series' ID for an occurrence not changed yet; a mail-only row is found by its UID.
@@ -740,7 +740,7 @@ extension AppModel {
     /// The calendar ID of agenda rows that come from an invitation in mail, not from a calendar.
     static let mailOnlyCalendarID = "mail"
 
-    /// Invitations in mail that are on no calendar, as agenda rows (dashed, "from mail"): each of their dates in
+    /// Invitations in mail that are on no calendar, as agenda rows ("from mail"): each of their dates in
     /// [start, end) that has not ended, every date of a repeating one. With `nextOnly`, one row each: its next date.
     private func invitationRows(from start: Date, to end: Date, nextOnly: Bool = false) async -> [AgendaItem] {
         guard let events = try? await services.store.mailOnlyEvents(), !events.isEmpty else { return [] }
@@ -767,9 +767,12 @@ extension AppModel {
         )
     }
 
-    /// An invitation only in mail, as all its mail tells it (as the calendar view lists it).
-    private func mailOnlyEvent(uid: String) async -> InvitedEvent {
-        (try? await services.store.invitedEvent(uid: uid)) ?? InvitedEvent([])
+    /// An invitation only in mail, as all its mail tells it (as the calendar view lists it). `invitation`, read from one
+    /// mail, stands in when the rest of the mail does not tell the whole event (it is in Spam).
+    private func mailOnlyEvent(uid: String, else invitation: Invitation? = nil) async -> InvitedEvent {
+        let event = (try? await services.store.invitedEvent(uid: uid)) ?? InvitedEvent([])
+        guard event.main == nil, let invitation else { return event }
+        return InvitedEvent([invitation])
     }
 
     /// The next dates of an invitation only in mail, worked out away from the main thread.
