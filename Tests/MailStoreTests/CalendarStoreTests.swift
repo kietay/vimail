@@ -489,6 +489,42 @@ struct CalendarOutboxTests {
         #expect(try await store.agenda(from: at(20, 0), to: at(21, 0), calendar: la).count == 1)
     }
 
+    @Test func aChangeToALaterDayThatHasNotLeftGoesWithTheCut() async throws {
+        let store = try await store()
+        let standup = series("s1", start: at(5, 9, 30))
+        try await store.applyEvents([standup], calendarID: primary.id, window: window, calendar: la)
+        func move(_ day: Int) async throws -> Int64 {
+            let plain = occurrence(of: standup, day: day, hour: 9, minute: 30)
+            var moved = plain
+            (moved.start, moved.end) = (.timed(at(day, 11), timeZone: "America/Los_Angeles"), .timed(at(day, 11, 15), timeZone: "America/Los_Angeles"))
+            return try await store.updateLocalEvent(moved, previous: plain, sendUpdates: .all, notBefore: Date().addingTimeInterval(60), window: window, calendar: la)
+        }
+        // Oct 8 and Oct 16 moved to 11:00 on their own; both wait for the undo window.
+        let early = try await move(8)
+        let late = try await move(16)
+        let notBefore = try #require(try await store.calendarOutboxItems().first { $0.id == late }?.notBefore)
+
+        let cut = EventTime.timed(at(12, 9, 30), timeZone: "America/Los_Angeles")
+        var ended = standup
+        ended.recurrence = try #require(split(standup, at: cut)).before
+        let result = try await store.splitLocalSeries(ended, previous: standup, at: cut, following: nil, sendUpdates: .none, window: window, calendar: la)
+        // Sent after the cut, the change to Oct 16 would put that day back on the series: it is not sent.
+        #expect(result.waiting.map(\.id) == [late])
+        #expect(try await store.calendarOutboxItems().map(\.id) == [early, result.outboxID])
+        #expect(try await store.agenda(from: at(16, 0), to: at(17, 0), calendar: la).isEmpty)
+        #expect(try await store.agenda(from: at(8, 0), to: at(9, 0), calendar: la).map(\.start) == [.timed(at(8, 11), timeZone: "America/Los_Angeles")])
+
+        // Undone before the cut left, the change goes back in its old place, still waiting for its undo window.
+        #expect(try await store.revertEventChange(
+            outboxID: result.outboxID, current: ended, restore: standup, sendUpdates: .none,
+            removal: LocalRemoval(exceptions: result.exceptions, waiting: result.waiting), window: window, calendar: la
+        ))
+        let queued = try await store.calendarOutboxItems()
+        #expect(queued.map(\.id) == [early, late])
+        #expect(queued.last?.notBefore == notBefore)
+        #expect(try await store.agenda(from: at(16, 0), to: at(17, 0), calendar: la).map(\.start) == [.timed(at(16, 11), timeZone: "America/Los_Angeles")])
+    }
+
     @Test func cuttingAnAllDaySeriesTakesItsChangedDaysFromThatDate() async throws {
         let store = try await store()
         func date(_ day: Int) -> DayDate { DayDate(year: 2026, month: 10, day: day) }

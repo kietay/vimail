@@ -201,6 +201,49 @@ struct CalendarSyncEngineTests {
         }
     }
 
+    @Test func aChangeToADayTheCutTookNeverReachesTheProvider() async throws {
+        let harness = try await CalendarHarness()
+        #expect(await harness.engine.cycle())
+        let calendar = Calendar.current
+        let zone = TimeZone.current.identifier
+        func time(_ offset: Int, _ hour: Int) -> Date {
+            calendar.date(bySettingHour: hour, minute: 0, second: 0, of: calendar.date(byAdding: .day, value: offset, to: harness.nextMonday)!)!
+        }
+        func quarter(_ start: Date) -> (EventTime, EventTime) { (.timed(start, timeZone: zone), .timed(start.addingTimeInterval(900), timeZone: zone)) }
+        let series = CalendarEvent(
+            id: CalendarActions.newEventID(), calendarID: sam.email, summary: "Morning review",
+            start: quarter(time(0, 8)).0, end: quarter(time(0, 8)).1, recurrence: ["RRULE:FREQ=DAILY;COUNT=10"]
+        )
+        _ = try await harness.actions.create(series, sendUpdates: .none, addConference: false, undoWindow: 0)
+        #expect(await harness.engine.cycle())
+
+        // The seventh day moves to 11:00 on its own, and before that leaves, the series is cut at the third day.
+        let stored = try #require(try await harness.store.event(calendarID: sam.email, id: series.id))
+        let seventh = stored.instance(originalStart: quarter(time(6, 8)).0, start: quarter(time(6, 8)).0, end: quarter(time(6, 8)).1)
+        var moved = seventh
+        (moved.start, moved.end) = quarter(time(6, 11))
+        _ = try await harness.actions.update(moved, from: seventh, sendUpdates: .none, undoWindow: 0)
+        let cut = quarter(time(2, 8)).0
+        guard case .split(let before, let after)? = Recurrence.split(recurrence: stored.recurrence, seriesStart: stored.start, at: cut, calendar: calendar) else {
+            Issue.record("Expected the series to be cut in two")
+            return
+        }
+        var following = CalendarActions.followingSeries(of: stored)
+        (following.start, following.end) = quarter(time(2, 9))
+        following.recurrence = after
+        _ = try await harness.actions.split(stored, at: cut, keeping: before, following: following, sendUpdates: .none, undoWindow: 0)
+        #expect(await harness.engine.cycle())
+        #expect(try await harness.store.calendarOutboxCount() == 0)
+
+        // That day was never changed on the provider, and the Mac shows one review a day.
+        let uid = try #require(try await harness.provider.event(calendarID: sam.email, eventID: series.id)?.iCalUID)
+        #expect(try await harness.provider.events(calendarID: sam.email, iCalUID: uid).allSatisfy { $0.id != moved.id })
+        for offset in 0..<10 {
+            let items = try await harness.day(calendar.date(byAdding: .day, value: offset, to: harness.nextMonday)!).filter { $0.event.summary == "Morning review" }
+            #expect(items.map(\.start.date) == [time(offset, offset < 2 ? 8 : 9)], "day \(offset)")
+        }
+    }
+
     @Test func theNewSeriesIsNewToGoogleAndAsksForItsOwnMeetLink() async throws {
         let harness = try await CalendarHarness()
         let zone = TimeZone.current.identifier

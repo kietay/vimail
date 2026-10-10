@@ -148,8 +148,9 @@ public final class CalendarActions: Sendable {
 
     /// "This and following": ends `series` before one of its days (`day`, its start in the rule) with `recurrence` as its
     /// lines (`Recurrence.split`), and starts `following` on that day as a new series; nil only ends the series. The
-    /// series' changed occurrences from that day on go with the days it no longer has. Both changes wait for the undo
-    /// window together. Undo the records last first: that takes back the new series, then the end of the old one.
+    /// series' changed occurrences from that day on go with the days it no longer has, with their changes that had not
+    /// left. Both changes wait for the undo window together. Undo the records last first: that takes back the new
+    /// series, then the end of the old one.
     public func split(
         _ series: CalendarEvent, at day: EventTime, keeping recurrence: [String], following: CalendarEvent?, sendUpdates: SendUpdates,
         undoWindow: TimeInterval
@@ -163,7 +164,7 @@ public final class CalendarActions: Sendable {
         )
         changed()
         var end = ChangeRecord(outboxID: result.outboxID, before: series, after: ended, sendUpdates: sendUpdates)
-        end.removal = LocalRemoval(exceptions: result.exceptions)
+        end.removal = LocalRemoval(exceptions: result.exceptions, waiting: result.waiting)
         end.splitDay = day
         guard let following, let insertID = result.insertOutboxID else { return [end] }
         var start = ChangeRecord(outboxID: insertID, before: nil, after: following, sendUpdates: sendUpdates)

@@ -68,11 +68,15 @@ public struct LocalRemoval: Sendable {
     public var exceptions: [CalendarEvent] = []
     /// Operations dropped because the event's create had not left yet; they go back on undo.
     public var dropped: [CalendarOutboxItem] = []
+    /// Changes to the days a shortened series lost that had not left yet: they are not sent. An undo before the series
+    /// was shortened on the provider puts them back in their old place; after it, the days themselves are sent again.
+    public var waiting: [CalendarOutboxItem] = []
 
-    public init(outboxID: Int64? = nil, exceptions: [CalendarEvent] = [], dropped: [CalendarOutboxItem] = []) {
+    public init(outboxID: Int64? = nil, exceptions: [CalendarEvent] = [], dropped: [CalendarOutboxItem] = [], waiting: [CalendarOutboxItem] = []) {
         self.outboxID = outboxID
         self.exceptions = exceptions
         self.dropped = dropped
+        self.waiting = waiting
     }
 }
 
@@ -84,6 +88,8 @@ public struct LocalSplit: Sendable {
     public var insertOutboxID: Int64?
     /// The series' changed occurrences from the day on, which went with the days it no longer has.
     public var exceptions: [CalendarEvent]
+    /// Changes to those occurrences that had not left yet: they are not sent.
+    public var waiting: [CalendarOutboxItem]
 }
 
 /// A message whose invitation file has not been read yet.
@@ -463,7 +469,8 @@ extension MailStore {
 
     /// "This and following": `ended` is the series with rules that stop before `day` (that day's start in the rule), and
     /// `following` the new series that takes over from that day (nil only ends the series). The series' changed
-    /// occurrences from that day on go with the days it no longer has. Queues the change to the series, then the create.
+    /// occurrences from that day on go with the days it no longer has, and so do their changes that have not left (sent
+    /// later, they would bring those days back). Queues the change to the series, then the create.
     public func splitLocalSeries(
         _ ended: CalendarEvent, previous: CalendarEvent, at day: EventTime, following: CalendarEvent?, sendUpdates: SendUpdates,
         addConference: Bool = false, notBefore: Date = .distantPast, window: CalendarWindow, calendar: Calendar = .current
@@ -477,6 +484,11 @@ extension MailStore {
                 try db.run("DELETE FROM events WHERE calendar_id = ? AND id = ?", [exception.calendarID, exception.id])
                 try db.run("DELETE FROM occurrences WHERE calendar_id = ? AND event_id = ?", [exception.calendarID, exception.id])
             }
+            let lost = Set(exceptions.map(\.id))
+            let waiting = try Self.calendarOutboxItems(db).filter { item in
+                !item.isInFlight && item.operation.target.calendarID == ended.calendarID && lost.contains(item.operation.target.eventID)
+            }
+            for item in waiting { try db.run("DELETE FROM calendar_outbox WHERE id = ?", [item.id]) }
             try Self.storeLocally(ended, window: window, db, calendar: calendar)
             let outboxID = try Self.enqueueCalendar(.update(event: ended, previous: previous, sendUpdates: sendUpdates), notBefore: notBefore, db)
             var insertOutboxID: Int64?
@@ -487,7 +499,7 @@ extension MailStore {
                 )
             }
             change.calendar = true
-            return LocalSplit(outboxID: outboxID, insertOutboxID: insertOutboxID, exceptions: exceptions)
+            return LocalSplit(outboxID: outboxID, insertOutboxID: insertOutboxID, exceptions: exceptions, waiting: waiting)
         }
     }
 
@@ -496,7 +508,8 @@ extension MailStore {
     /// that was not changed before, so a change that never left leaves no exception behind. `removal` is what a
     /// removal did locally: a series' changed occurrences come back, and a create it dropped is queued again in its old place.
     /// After a series ended early ("this and following"), its changed occurrences come back too, on the provider as well
-    /// when the change had left. Returns true when nothing had reached the provider.
+    /// when the change had left; before it left, their changes that were waiting go back in their old place.
+    /// Returns true when nothing had reached the provider.
     @discardableResult
     public func revertEventChange(
         outboxID: Int64?, current: CalendarEvent?, restore: CalendarEvent?, sendUpdates: SendUpdates, dropException: Bool = false,
@@ -511,6 +524,9 @@ extension MailStore {
             if let removal, !removal.dropped.isEmpty {
                 for item in removal.dropped { _ = try Self.enqueueCalendar(item.operation, notBefore: item.notBefore, id: item.id, db) }
                 cancelled = true
+            }
+            if cancelled {
+                for item in removal?.waiting ?? [] { _ = try Self.enqueueCalendar(item.operation, notBefore: item.notBefore, id: item.id, db) }
             }
             if let restore {
                 for exception in removal?.exceptions ?? [] { try Self.upsertEvent(exception, db) }
