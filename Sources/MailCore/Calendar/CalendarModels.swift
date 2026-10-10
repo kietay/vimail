@@ -410,11 +410,14 @@ public struct Invitation: Hashable, Codable, Sendable {
     public var status: EventStatus?
     /// DTSTAMP: when the organizer's calendar wrote the file.
     public var stamp: Date?
+    /// True when the event shows as free (TRANSP:TRANSPARENT, or Outlook's X-MICROSOFT-CDO-BUSYSTATUS:FREE): it does not
+    /// take your time. Nil (busy) in files read before this was kept.
+    public var showsAsFree: Bool?
 
     public init(
         method: Method, uid: String, sequence: Int = 0, recurrenceID: EventTime? = nil, summary: String, details: String? = nil,
         location: String? = nil, start: EventTime, end: EventTime? = nil, recurrence: [String] = [], organizer: Attendee? = nil,
-        attendees: [Attendee] = [], conferenceURL: String? = nil, status: EventStatus? = nil, stamp: Date? = nil
+        attendees: [Attendee] = [], conferenceURL: String? = nil, status: EventStatus? = nil, stamp: Date? = nil, showsAsFree: Bool? = nil
     ) {
         self.method = method
         self.uid = uid
@@ -431,6 +434,7 @@ public struct Invitation: Hashable, Codable, Sendable {
         self.conferenceURL = conferenceURL
         self.status = status
         self.stamp = stamp
+        self.showsAsFree = showsAsFree
     }
 
     public var isCancellation: Bool { method == .cancel || status == .cancelled }

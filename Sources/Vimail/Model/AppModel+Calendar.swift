@@ -59,21 +59,31 @@ extension AppModel {
         item.calendarID == Self.mailOnlyCalendarID || calendars.isEmpty || shownCalendarIDs.contains(item.calendarID)
     }
 
-    /// Your own time: shown calendars you own (a colleague's calendar shown beside yours has their meetings, not yours),
-    /// and invitations only in mail that you said yes or maybe to by email. Overlaps, the next meeting, free times and
-    /// find a time count only these.
+    /// Your own time: your shown calendars (a colleague's calendar shown beside yours has their meetings, not yours), and
+    /// invitations only in mail that you said yes or maybe to by email. Overlaps, the next meeting, free times and find a
+    /// time count only these.
     func isYourTime(_ item: AgendaItem) -> Bool {
         guard item.calendarID != Self.mailOnlyCalendarID else { return [.accepted, .tentative].contains(item.event.selfResponse) }
         guard !calendars.isEmpty else { return true }
-        guard let info = calendars.first(where: { $0.id == item.calendarID }), info.isSelected else { return false }
-        return info.isPrimary || info.accessRole == .owner
+        guard calendars.contains(where: { $0.id == item.calendarID && $0.isSelected }) else { return false }
+        return isYourCalendar(item.calendarID)
     }
 
-    /// A calendar of yours (primary or owned). On a colleague's calendar shown beside yours, invitations are theirs.
+    /// A calendar whose events are your time: your primary calendar, or one you own that is not a colleague's (a
+    /// colleague's own calendar, shared with you to manage, has their address as its ID). As `MailStore.yourCalendar`.
     func isYourCalendar(_ id: String) -> Bool {
         guard !calendars.isEmpty else { return true }
         guard let info = calendars.first(where: { $0.id == id }) else { return false }
-        return info.isPrimary || info.accessRole == .owner
+        return info.isPrimary
+            || (info.accessRole == .owner && (id.hasSuffix("calendar.google.com") || services.store.selfAddresses.contains(id.lowercased())))
+    }
+
+    /// An event copy that is yours to answer: on your primary calendar, or its "self" guest is one of your addresses. On a
+    /// colleague's calendar, even one you manage, "self" is that colleague and an answer would be theirs. As
+    /// `CalendarActions.event(for:)`.
+    func isYourCopy(_ item: AgendaItem) -> Bool {
+        if calendars.contains(where: { $0.id == item.calendarID && $0.isPrimary }) { return true }
+        return item.event.selfAttendee.map { services.store.selfAddresses.contains($0.normalized) } == true
     }
 
     /// Invitations waiting for your answer, next first: on your own shown calendars, and those only in mail (each once,
@@ -82,22 +92,36 @@ extension AppModel {
         let now = Date()
         // Not connected: the events stored before are out of date, and invitations are answered by email.
         let stored = services.calendarEngine == nil ? []
-            : ((try? await services.store.waitingForAnswer()) ?? []).filter { isShown($0) && isYourCalendar($0.calendarID) }
+            : ((try? await services.store.waitingForAnswer()) ?? []).filter { isShown($0) && isYourCopy($0) }
         let mail = await invitationRows(from: now, to: now.addingTimeInterval(400 * 86_400), nextOnly: true)
         return (stored + mail).sorted { $0.start.instant() < $1.start.instant() }
     }
 
-    /// The sidebar's count of invitations waiting for an answer.
+    /// The sidebar's count of invitations waiting for an answer, and the events `invite:pending` finds.
     func reloadWaitingCount() async {
-        let count = await waitingItems().count
-        if count != waitingInvitationCount { waitingInvitationCount = count }
+        let items = await waitingItems()
+        if items.count != waitingInvitationCount { waitingInvitationCount = items.count }
+        let uids = Set(items.compactMap(\.event.iCalUID)).sorted()
+        guard uids != waitingInvitationUIDs else { return }
+        waitingInvitationUIDs = uids
+        // A list or a view searching invite:pending shows the new waiting list.
+        if currentQuery.invitation == .pending { await reloadList() }
+        if views.contains(where: { $0.pinned && $0.query.invitation == .pending }) { await reloadCounts() }
+    }
+
+    /// `query` with what the store needs from the app: for `invite:pending`, the events waiting for your answer.
+    func resolved(_ query: ThreadQuery) -> ThreadQuery {
+        guard query.invitation == .pending else { return query }
+        var query = query
+        query.waitingInvitationUIDs = waitingInvitationUIDs
+        return query
     }
 
     /// The rows your own time is read from (filter them with `isYourTime`): the stored events, and the dates of
     /// invitations only in mail that you said yes or maybe to by email. In start order.
     func agendaWithMail(from start: Date, to end: Date) async -> [AgendaItem] {
         async let stored = storedAgenda(from: start, to: end)
-        let mail = await invitationRows(from: start, to: end).filter { [.accepted, .tentative].contains($0.event.selfResponse) }
+        let mail = await yesByEmailRows(from: start, to: end)
         let items = await stored
         guard !mail.isEmpty else { return items }
         return (items + mail).sorted { $0.start.instant() < $1.start.instant() }
@@ -176,15 +200,17 @@ extension AppModel {
         case .reply:
             let guest = invitation.attendees.first
             return InvitationChip(text: "\(guest?.address.shortName ?? "guest") said \(guest?.response.word ?? "?")", colorIndex: 5)
-        default:
+        case .request:
             if invitation.isCancellation { return InvitationChip(text: "\(time) · cancelled", colorIndex: 6) }
             let event = await calendarEvent(for: invitation)
             var emailed: InvitationAnswer?
             if event == nil {
                 let known = await mailOnly(uid: invitation.uid, else: invitation)
                 let key = invitation.recurrenceID?.occurrenceKey ?? ""
-                var cancelled = known.event.answerTarget(at: key, answers: known.answers) == nil
-                if !cancelled { cancelled = (try? await services.store.isWithdrawn(invitation)) == true }
+                // What an answer goes to now (the newest version), as Y M N see it.
+                let target = known.event.answerTarget(at: key, answers: known.answers)
+                var cancelled = target == nil
+                if let target { cancelled = (try? await services.store.isWithdrawn(target)) == true }
                 if cancelled { return InvitationChip(text: "\(time) · cancelled", colorIndex: 6) }
                 emailed = known.event.answer(at: key, answers: known.answers)
             }
@@ -195,6 +221,9 @@ extension AppModel {
             case .declined?: return InvitationChip(text: "\(time) · no\(how)", colorIndex: 6)
             default: return InvitationChip(text: "\(time) · needs answer", colorIndex: 3)
             }
+        default:
+            // A ticket or a booking (PUBLISH), or a guest's proposal: nothing for you to answer.
+            return InvitationChip(text: time, colorIndex: 5)
         }
     }
 
@@ -213,15 +242,17 @@ extension AppModel {
         // Not on Google Calendar: the event as all its mail tells it, and what you answered by email.
         let known = await mailOnly(uid: invitation.uid, else: invitation)
         let key = invitation.recurrenceID?.occurrenceKey ?? ""
-        // Cancelled in another conversation, or removed from your calendar: nothing to answer.
+        let target = known.event.answerTarget(at: key, answers: known.answers)
+        // Cancelled in another conversation, or removed from your calendar: nothing to answer. What counts is the version
+        // an answer goes to now (a meeting cancelled and then sent out again waits).
         var withdrawn = false
         if invitation.method == .request {
-            withdrawn = known.event.answerTarget(at: key, answers: known.answers) == nil
-            if !withdrawn { withdrawn = (try? await services.store.isWithdrawn(invitation)) == true }
+            withdrawn = target == nil
+            if let target { withdrawn = (try? await services.store.isWithdrawn(target)) == true }
         }
         return await eventPage(
-            event: nil, invitation: invitation, previous: previous, mail: message, invited: invitation.recurrence.isEmpty ? nil : known.event,
-            answer: known.event.answer(at: key, answers: known.answers), withdrawn: withdrawn
+            event: nil, invitation: invitation, previous: previous, mail: message, invited: known.event,
+            answer: known.event.answer(at: key, answers: known.answers), target: target, withdrawn: withdrawn
         )
     }
 
@@ -237,7 +268,8 @@ extension AppModel {
             let known = await mailOnly(uid: uid)
             return await eventPage(
                 event: nil, invitation: known.event.invitation(at: key), previous: nil, mail: nil, occurrence: (item.start, item.end),
-                hasMail: !files.isEmpty, invited: known.event, answer: known.event.answer(at: key, answers: known.answers)
+                hasMail: !files.isEmpty, invited: known.event, answer: known.event.answer(at: key, answers: known.answers),
+                target: known.event.answerTarget(at: key, answers: known.answers)
             )
         }
         let invitation = files.reversed().lazy.compactMap { file in
@@ -247,23 +279,30 @@ extension AppModel {
     }
 
     /// `invited`: the event as all its mail tells it, when it is on no calendar (its dates, moved and cancelled ones too).
-    /// `answer`: what you answered by email, which counts while the event is not on Google Calendar. `withdrawn`: the
-    /// meeting is off since the invitation (`MailStore.isWithdrawn`), so it shows as cancelled.
+    /// `answer`: what you answered by email, which counts while the event is not on Google Calendar; `target`: what Y M N
+    /// answer then (`InvitedEvent.answerTarget`). `withdrawn`: the meeting is off since the invitation
+    /// (`MailStore.isWithdrawn`), so it shows as cancelled.
     func eventPage(
         event: CalendarEvent?, invitation: Invitation?, previous: Invitation?, mail: MailMessage?,
         occurrence: (start: EventTime, end: EventTime)? = nil, hasMail: Bool = false, invited: InvitedEvent? = nil,
-        answer: InvitationAnswer? = nil, withdrawn: Bool = false
+        answer: InvitationAnswer? = nil, target: Invitation? = nil, withdrawn: Bool = false
     ) async -> ReaderPayload.EventPage {
         let now = Date()
         let me = services.store.selfAddresses
         let emailed = event == nil ? answer : nil
-        // A series only in mail: its rule and next dates as all its mail tells them (this mail may be older).
+        // A series only in mail: its rule and next dates as all its mail tells them (this mail may be older, or about one
+        // of its dates).
         var mailSeries: Invitation?
         var mailDates: [InvitedDate] = []
-        if event == nil, let invitation, !invitation.recurrence.isEmpty {
+        if event == nil, let invitation {
             let known = invited ?? InvitedEvent([invitation])
-            mailSeries = known.main.flatMap { $0.isCancellation ? nil : $0 } ?? invitation
-            mailDates = await upcomingDates(of: known, now: now, limit: 8)
+            if let series = known.main, !series.isCancellation, !series.recurrence.isEmpty {
+                mailSeries = series
+                mailDates = await upcomingDates(of: known, now: now, limit: 8)
+            } else if !invitation.recurrence.isEmpty {
+                mailSeries = invitation
+                mailDates = await upcomingDates(of: InvitedEvent([invitation]), now: now, limit: 8)
+            }
         }
         // Times: the occurrence shown, else the next one of a series, else the invitation's.
         var start = occurrence?.start ?? invitation?.start ?? event?.start ?? .timed(now, timeZone: nil)
@@ -272,7 +311,8 @@ extension AppModel {
            let next = try? await services.store.nextOccurrence(calendarID: event.calendarID, eventID: event.recurringEventID ?? event.id, now: now) {
             start = next.start
             end = next.end
-        } else if occurrence == nil, let next = mailDates.first {
+        } else if occurrence == nil, invitation?.recurrenceID == nil, let next = mailDates.first {
+            // The series' next date; mail about one date shows that date.
             start = next.start
             end = next.end
         }
@@ -281,7 +321,9 @@ extension AppModel {
         let title = event?.summary ?? invitation?.summary ?? "(no title)"
         let organizer = event?.organizer ?? invitation?.organizer
         let guests = (event?.attendees.isEmpty == false ? event?.attendees : invitation?.attendees) ?? []
-        let selfResponse = event?.selfResponse ?? emailed?.response ?? invitation?.attendee(matching: me)?.response
+        // Not on Google Calendar: only an answer by email counts. The file's own PARTSTAT may be from before a newer invitation.
+        let selfResponse = event?.selfResponse
+            ?? (event == nil && invitation?.method == .request ? (emailed?.response ?? .needsAction) : invitation?.attendee(matching: me)?.response)
 
         var page = ReaderPayload.EventPage(kicker: kicker(invitation: invitation, previous: previous, mail: mail), title: title, when: Formatting.eventRange(start, end))
         page.relative = past ? nil : Formatting.relativeDay(start.instant(), now: now)
@@ -338,6 +380,10 @@ extension AppModel {
         } else if event?.selfAttendee != nil || invitation?.method == .request {
             page.chips.append(.init(text: "needs your answer", kind: "needs"))
         }
+        // A series only in mail is answered as a whole until you have; then a date changed since is answered on its own.
+        if answerable, event == nil, mailSeries != nil, let target {
+            page.facts.append(.init(label: "Answers", value: target.recurrenceID == nil ? "the whole series" : "this date only"))
+        }
         if answerable {
             page.answers = [
                 .init(title: "Yes", key: "Y", action: "answerYes", selected: selfResponse == .accepted),
@@ -354,7 +400,9 @@ extension AppModel {
             page.dayMessage = emailed == nil ? "This invitation is not on your Google Calendar yet." : "You answered by email. This event is not on your Google Calendar."
             page.day = await dayColumn(for: start, end: end, excluding: nil, uid: invitation?.uid, ghost: true, title: title)
         } else {
-            page.day = await dayColumn(for: start, end: end, excluding: event, ghost: !isOrganizer && selfResponse == .needsAction, title: title)
+            page.day = await dayColumn(
+                for: start, end: end, excluding: event, uid: event?.iCalUID ?? invitation?.uid, ghost: !isOrganizer && selfResponse == .needsAction, title: title
+            )
         }
         if let day = page.day, let clash = day.blocks.first(where: { $0.kind == "clash" }), !cancelled, !past, page.day?.peeking == false {
             page.chips.append(.init(text: "overlaps \(clash.title)", kind: "clash"))
@@ -389,14 +437,18 @@ extension AppModel {
             dates = mailDates.filter { !$0.start.isAllDay }.map { ($0.start.instant(), $0.end.instant()) }
         }
         let seriesID = event.map { $0.recurringEventID ?? $0.id }
+        let uid = event?.iCalUID ?? invitation?.uid
         guard let first = dates.map(\.start).min(), let last = dates.map(\.end).max() else { return [] }
-        let busy = await agendaWithMail(from: first, to: last).filter { item in
+        // Your yes-by-email dates in one read; your calendars date by date (a monthly series spans months).
+        let mail = await yesByEmailRows(from: first, to: last)
+        func busy(_ item: AgendaItem) -> Bool {
             isYourTime(item) && !item.start.isAllDay && item.event.isBusy && item.event.status != .cancelled && item.event.selfResponse != .declined
-                && (seriesID == nil || (item.seriesID != seriesID && item.event.id != seriesID)) && item.event.iCalUID != invitation?.uid
+                && (seriesID == nil || (item.seriesID != seriesID && item.event.id != seriesID)) && (uid == nil || item.event.iCalUID != uid)
         }
         var clashes: [String] = []
         for date in dates {
-            if let other = busy.first(where: { $0.start.instant() < date.end && $0.end.instant() > date.start }) {
+            let mailRows = mail.filter { $0.start.instant() < date.end && $0.end.instant() > date.start }
+            if let other = (await storedAgenda(from: date.start, to: date.end) + mailRows).first(where: busy) {
                 clashes.append("\(Formatting.dayTitle(date.start)) with \(other.event.summary)")
             }
         }
@@ -430,8 +482,8 @@ extension AppModel {
     }
 
     /// The day column: your day around an event, with the event dashed when you have not answered,
-    /// and overlaps in red. `peekDays` shifts the day ({ and }). `uid`: an invitation only in mail, whose own date
-    /// in your time (answered yes by email) is this event.
+    /// and overlaps in red. `peekDays` shifts the day ({ and }). `uid`: the event's UID: its dates from mail that you said
+    /// yes to by email are this event (at the time its newest mail says, which may not be this page's).
     func dayColumn(
         for start: EventTime, end: EventTime, excluding event: CalendarEvent?, uid: String? = nil, ghost: Bool, title: String
     ) async -> ReaderPayload.EventPage.Day {
@@ -443,9 +495,7 @@ extension AppModel {
         func minutes(_ date: Date) -> Int { max(0, min(1440, Int(date.timeIntervalSince(day) / 60))) }
 
         let isSameEvent = { (item: AgendaItem) -> Bool in
-            if let uid, item.calendarID == Self.mailOnlyCalendarID {
-                return item.event.iCalUID == uid && item.start.instant() == start.instant()
-            }
+            if let uid, item.calendarID == Self.mailOnlyCalendarID, item.event.iCalUID == uid { return true }
             guard let event else { return false }
             let target = event.recurringEventID ?? event.id
             return (item.event.id == event.id || item.seriesID == target || item.event.id == target)
@@ -598,9 +648,7 @@ extension AppModel {
                         continue
                     }
                     do {
-                        guard let record = try await answerByEmail(
-                            file, invitation: target, covering: known.event.coveredSequence(by: target), response: response, comment: comment
-                        ) else {
+                        guard let record = try await answerByEmail(file, invitation: target, response: response, comment: comment) else {
                             notOnCalendar += 1
                             continue
                         }
@@ -655,14 +703,13 @@ extension AppModel {
 
     /// Answers the invitation of a mail file by email (it is not on Google Calendar), in that mail's conversation. Nil
     /// when it cannot be answered by email: it names no organizer to write to, or you organize it.
-    /// `invitation`: the one to answer (`InvitedEvent.answerTarget`), else the file's main one; `covering`: the SEQUENCE
-    /// the answer covers (`InvitedEvent.coveredSequence`).
+    /// `invitation`: the one to answer (`InvitedEvent.answerTarget`), else the file's main one.
     private func answerByEmail(
-        _ file: StoredInvitation, invitation: Invitation? = nil, covering: Int? = nil, response: ResponseStatus, comment: String?
+        _ file: StoredInvitation, invitation: Invitation? = nil, response: ResponseStatus, comment: String?
     ) async throws -> CalendarActions.EmailAnswerRecord? {
         guard let invitation = invitation ?? file.main, let mail = try await services.store.message(id: file.messageID) else { return nil }
         let record = try await services.calendarActions.answerByEmail(
-            invitation, mail: mail, response: response, comment: comment, covering: covering, undoWindow: settings.undoSendSeconds
+            invitation, mail: mail, response: response, comment: comment, undoWindow: settings.undoSendSeconds
         )
         if let record { AppModel.log.info("Queued an answer by email as outbox #\(record.outboxID) (leaves in \(Int(max(0, settings.undoSendSeconds)))s)") }
         return record
@@ -826,7 +873,7 @@ extension AppModel {
         if destination != .calendar, let thread = currentThread, thread.id == cursorID {
             Task {
                 if let file = try? await services.store.invitations(threadID: thread.id).last, let invitation = file.main {
-                    let event = try? await services.calendarActions.event(for: invitation)
+                    let event = await calendarEvent(for: invitation)
                     // A series opens at its next occurrence, not its first; one changed occurrence at its own date.
                     var start = invitation.start.instant()
                     if let event, event.recurringEventID != nil {
@@ -907,15 +954,22 @@ extension AppModel {
     /// The calendar ID of agenda rows that come from an invitation in mail, not from a calendar.
     static let mailOnlyCalendarID = "mail"
 
+    /// The dates of invitations only in mail that you said yes or maybe to by email in [start, end), ended ones too: your time.
+    func yesByEmailRows(from start: Date, to end: Date) async -> [AgendaItem] {
+        await invitationRows(from: start, to: end, endedToo: true).filter { [.accepted, .tentative].contains($0.event.selfResponse) }
+    }
+
     /// Invitations in mail that are on no calendar, as agenda rows ("from mail"): each of their dates in [start, end)
-    /// that has not ended, every date of a repeating one, with you among the guests and what you answered by email. With
+    /// that has not ended (with `endedToo`, also those that have), every date of a repeating one, with you among the
+    /// guests and what you answered by email. Those you said yes or maybe to stay after their mail is binned. With
     /// `nextOnly`, the waiting list's rows: one each for those still waiting, at the first date that waits.
-    private func invitationRows(from start: Date, to end: Date, nextOnly: Bool = false) async -> [AgendaItem] {
+    private func invitationRows(from start: Date, to end: Date, nextOnly: Bool = false, endedToo: Bool = false) async -> [AgendaItem] {
         // Not connected: the events stored before are out of date, so every invitation counts as only in mail.
         let ignoring = services.calendarEngine == nil
-        guard let events = try? await services.store.mailOnlyEvents(ignoringStoredEvents: ignoring), !events.isEmpty else { return [] }
+        guard let events = try? await services.store.mailOnlyEvents(ignoringStoredEvents: ignoring, includingAccepted: !nextOnly),
+              !events.isEmpty else { return [] }
         let now = Date()
-        let from = max(start, now)
+        let from = endedToo ? start : max(start, now)
         // Repeating invitations are worked out away from the main thread, a few hundred dates at most.
         let dates = await Task.detached(priority: .userInitiated) {
             events.map { known -> [InvitedDate] in
@@ -945,7 +999,7 @@ extension AppModel {
         let event = CalendarEvent(
             id: id, calendarID: mailOnlyCalendarID, iCalUID: uid, summary: invitation.summary, details: invitation.details,
             location: invitation.location, start: date.start, end: date.end, organizer: invitation.organizer,
-            attendees: attendees, conferenceURL: invitation.conferenceURL
+            attendees: attendees, conferenceURL: invitation.conferenceURL, isBusy: invitation.showsAsFree != true
         )
         return AgendaItem(
             calendarID: mailOnlyCalendarID, event: event, seriesID: date.key.isEmpty ? nil : id, originalStart: date.key, start: date.start, end: date.end
@@ -953,10 +1007,10 @@ extension AppModel {
     }
 
     /// An invitation only in mail, as all its mail tells it (as the calendar view lists it), with your answers by email.
-    /// `invitation`, read from one mail, stands in when the rest of the mail does not tell the whole event (it is in Spam).
+    /// `invitation`, read from one mail, stands in when no other mail tells anything of the event (it is in Spam).
     private func mailOnly(uid: String, else invitation: Invitation? = nil) async -> MailOnlyEvent {
         var known = (try? await services.store.mailOnlyEvent(uid: uid)) ?? MailOnlyEvent(event: InvitedEvent([]))
-        if known.event.main == nil, let invitation { known.event = InvitedEvent([invitation]) }
+        if known.event.main == nil, known.event.changedDates.isEmpty, let invitation { known.event = InvitedEvent([invitation]) }
         return known
     }
 
@@ -1034,9 +1088,13 @@ extension AppModel {
         let rows = agendaRows
         if let wanted = pendingAgendaEventID {
             let calendar = Calendar.current
-            let matching = rows.filter { row in
+            var matching = rows.filter { row in
                 !row.originalStart.hasPrefix("waiting:")
                     && (row.event.id == wanted || row.seriesID == wanted || (wanted.hasPrefix("uid:") && row.event.iCalUID == String(wanted.dropFirst(4))))
+            }
+            // An invitation only in mail is its row from mail, not a colleague's copy of the same meeting.
+            if wanted.hasPrefix("uid:"), matching.contains(where: { $0.calendarID == Self.mailOnlyCalendarID }) {
+                matching = matching.filter { $0.calendarID == Self.mailOnlyCalendarID }
             }
             // Of a series' rows, the one on the day asked for.
             let onDay = pendingAgendaDay.flatMap { day in matching.first { calendar.isDate($0.start.instant(), inSameDayAs: day) } }
@@ -1155,7 +1213,7 @@ extension AppModel {
                         showToast("No invitation mail for this event.")
                         return
                     }
-                    await answerAgendaItemByEmail(file, invitation: invitation, covering: known.event.coveredSequence(by: invitation), response: response, comment: comment)
+                    await answerAgendaItemByEmail(file, invitation: invitation, response: response, comment: comment)
                     return
                 case .failed(let reason):
                     showToast(reason, isError: true)
@@ -1164,8 +1222,8 @@ extension AppModel {
             } else if services.calendarEngine == nil {
                 offerCalendarConnection()
                 return
-            } else if !isYourCalendar(item.calendarID) {
-                // There "self" is the calendar's owner: an answer would be theirs.
+            } else if !isYourCopy(item) {
+                // There "self" is the calendar's owner, even on a calendar you manage: an answer would be theirs.
                 showToast("This event is on someone else's calendar. Answer it on yours.")
                 return
             } else if let seriesID = item.event.recurringEventID {
@@ -1207,10 +1265,10 @@ extension AppModel {
 
     /// The calendar view's answer to an invitation that is only in mail and not on Google Calendar: by email, in the
     /// conversation of `file`, the mail that brought `invitation`.
-    private func answerAgendaItemByEmail(_ file: StoredInvitation, invitation: Invitation, covering: Int, response: ResponseStatus, comment: String?) async {
+    private func answerAgendaItemByEmail(_ file: StoredInvitation, invitation: Invitation, response: ResponseStatus, comment: String?) async {
         let record: CalendarActions.EmailAnswerRecord
         do {
-            guard let queued = try await answerByEmail(file, invitation: invitation, covering: covering, response: response, comment: comment) else {
+            guard let queued = try await answerByEmail(file, invitation: invitation, response: response, comment: comment) else {
                 showToast("This invitation is not on your Google Calendar and has no organizer to answer by email. Press gm to reply to its mail.")
                 return
             }
@@ -1224,7 +1282,9 @@ extension AppModel {
             return
         }
         var archive: UndoRecord?
-        if settings.archiveInvitationsAfterAnswer, let uid = file.main?.uid, let files = try? await services.store.invitations(uid: uid) {
+        // An answer to one date leaves the event's mail in place: its other dates may still wait.
+        if settings.archiveInvitationsAfterAnswer, invitation.recurrenceID == nil, let uid = file.main?.uid,
+           let files = try? await services.store.invitations(uid: uid) {
             archive = try? await services.actions.perform(.archive, threads: Array(Set(files.map(\.threadID))))
         }
         undoStack.append(.answerByEmail([record], calendar: [], archive: archive))
@@ -1236,17 +1296,16 @@ extension AppModel {
     /// Not a later cancellation of one day, or someone's answer.
     /// Mail you kept comes before mail in Trash or Spam (an update you binned still counts for the dates).
     static func mailFile(of invitation: Invitation?, in files: [StoredInvitation]) -> StoredInvitation? {
-        let kept = files.filter { !$0.isBinned }
-        for pool in [kept, files] {
-            guard let invitation else { break }
+        func exact(_ pool: [StoredInvitation]) -> StoredInvitation? {
+            guard let invitation else { return nil }
             let key = invitation.recurrenceID?.occurrenceKey
-            if let file = pool.last(where: { file in
+            return pool.last { file in
                 file.invitations.contains { $0.uid == invitation.uid && $0.recurrenceID?.occurrenceKey == key && $0.sequence == invitation.sequence }
-            }) {
-                return file
             }
         }
-        return kept.last { $0.main?.method == .request } ?? files.last { $0.main?.method == .request }
+        func request(_ pool: [StoredInvitation]) -> StoredInvitation? { pool.last { $0.main?.method == .request } }
+        let kept = files.filter { !$0.isBinned }
+        return exact(kept) ?? request(kept) ?? exact(files) ?? request(files)
     }
 
     /// An agenda row's place in its series ("20261012T163000Z"), without the row's section prefix; "" for single events.

@@ -90,6 +90,8 @@ struct ICalendarInvitationTests {
         #expect(invitation.details?.hasPrefix("Weekly vendor sync. Bring the contract redlines.\n\n_____") == true)
         #expect(invitation.details?.contains("Join on your computer, mobile app or room device") == true)
         #expect(invitation.stamp == utc("2026-10-09T16:04:17Z"))
+        // Outlook's own busy status (TENTATIVE) is not free.
+        #expect(invitation.showsAsFree == nil)
     }
 
     @Test func appleAllDayInvitation() throws {
@@ -104,6 +106,16 @@ struct ICalendarInvitationTests {
         #expect(invitation.attendees.map(\.isOrganizer) == [true, false])
         #expect(invitation.attendees.map(\.response) == [.accepted, .needsAction])
         #expect(invitation.conferenceURL == nil && invitation.details == nil)
+        // TRANSP:TRANSPARENT: it does not take your time.
+        #expect(invitation.showsAsFree == true)
+    }
+
+    @Test func freeOrBusy() throws {
+        #expect(try #require(event("DTSTART:20261012T090000Z\nTRANSP:OPAQUE")).showsAsFree == nil)
+        #expect(try #require(event("DTSTART:20261012T090000Z\nTRANSP:TRANSPARENT")).showsAsFree == true)
+        // Outlook writes both and reads its own.
+        #expect(try #require(event("DTSTART:20261012T090000Z\nTRANSP:OPAQUE\nX-MICROSOFT-CDO-BUSYSTATUS:FREE")).showsAsFree == true)
+        #expect(try #require(event("DTSTART:20261012T090000Z\nTRANSP:TRANSPARENT\nX-MICROSOFT-CDO-BUSYSTATUS:BUSY")).showsAsFree == nil)
     }
 
     @Test func cancellation() throws {

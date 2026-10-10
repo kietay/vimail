@@ -116,6 +116,39 @@ struct InvitationAnswerStoreTests {
         #expect(try await store.invitationAnswer(uid: "review@studio.co")?.response == .accepted)
     }
 
+    @Test func anAnswerToTheWholeEventKeepsTheDatesItCovered() async throws {
+        let store = try await seededStore()
+        try await save([invite("i1", thread: "ti")], in: store)
+        var (first, copy) = reply(.accepted)
+        first.answer.covered = ["20261012T160000Z": 1]
+        let outboxID = try await store.queueInvitationReply(first, localCopy: copy, notBefore: Date().addingTimeInterval(60))
+        let stored = try #require(try await store.invitationAnswer(uid: "review@studio.co"))
+        #expect(stored.covered == ["20261012T160000Z": 1] && stored.outboxID == outboxID)
+        #expect(try await store.mailOnlyEvent(uid: "review@studio.co").answers[""]?.covered == ["20261012T160000Z": 1])
+        // A later answer never covers fewer dates than the one before it.
+        var (second, secondCopy) = reply(.declined)
+        second.answer.covered = ["20261019T160000Z": 2]
+        _ = try await store.queueInvitationReply(second, localCopy: secondCopy, notBefore: Date().addingTimeInterval(60))
+        #expect(try await store.invitationAnswer(uid: "review@studio.co")?.covered == ["20261012T160000Z": 1, "20261019T160000Z": 2])
+        // Taking it back puts back the answer before it, with its dates.
+        let queued = try await queuedReplies(store)
+        let secondID = try #require(queued.first { $0.value.answer.response == .declined }?.key)
+        #expect(try await store.cancelInvitationReply(outboxID: secondID))
+        #expect(try await store.invitationAnswer(uid: "review@studio.co")?.covered == ["20261012T160000Z": 1])
+    }
+
+    @Test func anAnswerToAnInvitationInSpamIsKept() async throws {
+        let store = try await seededStore()
+        let (mail, invitation) = invite("i1", thread: "ti")
+        var spam = mail
+        spam.labelIDs = ["SPAM"]
+        try await save([(spam, invitation)], in: store)
+        _ = try await queue(.accepted, in: store)
+        // No mail tells the event here (Spam does not count), but your answer is still known.
+        let known = try await store.mailOnlyEvent(uid: "review@studio.co")
+        #expect(known.event.main == nil && known.answers[""]?.response == .accepted)
+    }
+
     @Test func undoBeforeTheEmailLeavesTakesBackTheEmailItsCopyAndTheAnswer() async throws {
         let store = try await seededStore()
         try await save([invite("i1", thread: "ti")], in: store)

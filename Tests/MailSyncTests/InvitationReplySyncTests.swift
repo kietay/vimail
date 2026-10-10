@@ -123,11 +123,11 @@ struct InvitationReplySyncTests {
 
         var events = mail.engine.events.makeAsyncIterator()
         #expect(await mail.engine.cycle())
-        guard case .answerFailed(_, let summary, let reason)? = await events.next() else {
+        guard case .answerFailed(_, let summary, let reason, let stands)? = await events.next() else {
             Issue.record("Expected the refusal to be reported")
             return
         }
-        #expect(summary == "Material samples review" && reason.contains("Invalid address"))
+        #expect(summary == "Material samples review" && reason.contains("Invalid address") && stands == false)
         #expect(try await mail.store.outboxCount() == 0)
         #expect(try await mail.store.invitationAnswer(uid: invitation.uid) == nil)
         #expect(try await mail.store.thread(id: review.thread)?.messages.count == 1)

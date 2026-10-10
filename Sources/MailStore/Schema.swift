@@ -227,6 +227,7 @@ enum Schema {
             response TEXT NOT NULL,
             comment TEXT,
             sequence INTEGER NOT NULL DEFAULT 0,
+            covered TEXT,                             -- JSON {occurrence key: SEQUENCE}: dates a whole-event answer covers
             answered_at INTEGER NOT NULL,
             outbox_id INTEGER,                        -- the mail outbox entry of the email that carries it
             PRIMARY KEY (uid, recurrence_id)

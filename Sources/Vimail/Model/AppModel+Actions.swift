@@ -359,7 +359,7 @@ extension AppModel {
     }
 
     func viewMatchCount(_ view: SavedView) async -> Int {
-        (try? await services.store.count(view.query)) ?? 0
+        (try? await services.store.count(resolved(view.query))) ?? 0
     }
 
     // MARK: - Reader and attachments

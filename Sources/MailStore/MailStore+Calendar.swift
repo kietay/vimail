@@ -208,8 +208,10 @@ extension MailStore {
     @discardableResult
     public func applyEvents(_ events: [CalendarEvent], calendarID: String, window: CalendarWindow, calendar: Calendar = .current) async throws -> [String] {
         guard !events.isEmpty else { return [] }
+        let me = selfAddresses
         return try await write { db, change in
             let pending = try Self.calendarOutboxItems(db).map(\.operation)
+            let primaryID = try db.first("SELECT id FROM calendars WHERE json_extract(payload, '$.isPrimary') = 1") { $0.string(0) }
             var series = Set<String>()
             for var event in events {
                 event.calendarID = calendarID
@@ -219,7 +221,9 @@ extension MailStore {
                 }
                 if event.status == .cancelled, event.recurringEventID == nil {
                     // Google's removals carry little more than the ID: the UID and sequence come from the stored copy.
-                    if let stored = try Self.storedEvent(calendarID: calendarID, eventID: event.id, db), let uid = stored.iCalUID {
+                    // Only your own copy says you were taken off: a colleague's copy goes when they are.
+                    if let stored = try Self.storedEvent(calendarID: calendarID, eventID: event.id, db), let uid = stored.iCalUID,
+                       Self.isYourCopy(stored, primaryID: primaryID, me: me) {
                         try db.run(
                             "INSERT INTO removed_events(uid, sequence) VALUES (?, ?) ON CONFLICT(uid) DO UPDATE SET sequence = max(sequence, excluded.sequence)",
                             [uid, max(stored.sequence, event.sequence)]
@@ -228,7 +232,9 @@ extension MailStore {
                     try Self.removeEvent(calendarID: calendarID, eventID: event.id, db)
                     continue
                 }
-                if let uid = event.iCalUID { try db.run("DELETE FROM removed_events WHERE uid = ? AND sequence <= ?", [uid, event.sequence]) }
+                if let uid = event.iCalUID, Self.isYourCopy(event, primaryID: primaryID, me: me) {
+                    try db.run("DELETE FROM removed_events WHERE uid = ? AND sequence <= ?", [uid, event.sequence])
+                }
                 try Self.upsertEvent(event, db)
                 if let seriesID = event.recurringEventID {
                     series.insert(seriesID)
@@ -708,28 +714,45 @@ extension MailStore {
         return try await read { db in try Self.storedInvitations(where: "i.uid = ?", [uid], me: me, db) }
     }
 
-    /// Events known only from mail: invitations (REQUEST) on none of your calendars (Google has not added them, or they
-    /// arrived before calendar sync; with `ignoringStoredEvents`, while the calendar is not connected, any), each as all its
-    /// mail tells it, with your answers by email. Left out: meetings cancelled since (a CANCEL as new or newer, for the whole
-    /// event or that occurrence), meetings the sync removed from your calendar (the organizer deleted them, or took you
-    /// off), and mail in Trash or Spam. Whether one still waits for your answer is `InvitedEvent.waitingDate`.
-    public func mailOnlyEvents(ignoringStoredEvents: Bool = false) async throws -> [MailOnlyEvent] {
+    /// Events known only from mail: invitations (REQUEST) with no copy of yours on your calendars (Google has not added
+    /// them, or they arrived before calendar sync; with `ignoringStoredEvents`, while the calendar is not connected, any),
+    /// each as all its mail tells it, with your answers by email. Left out: meetings cancelled since (a CANCEL as new or
+    /// newer, for the whole event or that occurrence), meetings the sync removed from your calendar (the organizer deleted
+    /// them, or took you off), and mail in Trash or Spam. With `includingAccepted`, also events you said yes or maybe to by
+    /// email whose mail you binned: they are still your time. Whether one waits for your answer is `InvitedEvent.waitingDate`.
+    public func mailOnlyEvents(ignoringStoredEvents: Bool = false, includingAccepted: Bool = false) async throws -> [MailOnlyEvent] {
         let me = selfAddresses
         return try await read { db in
-            let uids = try db.query(
-                """
+            let addresses = try Self.json(me.sorted())
+            var sql = """
                 SELECT DISTINCT i.uid FROM invitations i JOIN messages m ON m.id = i.message_id
                 WHERE \(Self.withoutEvents(ignoringStoredEvents: ignoringStoredEvents)) AND i.uid IS NOT NULL AND i.payload IS NOT NULL
                 """
-            ) { $0.string(0) }
+            var values: [SQLBindable] = ignoringStoredEvents ? [] : [addresses]
+            if includingAccepted {
+                sql += """
+
+                    UNION SELECT a.uid FROM invitation_answers a WHERE a.response IN ('accepted', 'tentative')
+                      AND NOT EXISTS (SELECT 1 FROM removed_events r WHERE r.uid = a.uid AND r.sequence >= a.sequence)
+                    """
+                if !ignoringStoredEvents {
+                    sql += " AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ical_uid = a.uid AND \(Self.yourCopy("e")))"
+                    values.append(addresses)
+                }
+            }
+            let uids = try db.query(sql, values) { $0.string(0) }
             return try Self.mailOnlyEvents(uids: uids, me: me, db)
         }
     }
 
-    /// One event as its mail tells it (`invitedEvent`), with your answers by email to it.
+    /// One event as its mail tells it (`invitedEvent`), with your answers by email to it, also when none of its mail
+    /// tells the event here (it is in Spam).
     public func mailOnlyEvent(uid: String) async throws -> MailOnlyEvent {
         let me = selfAddresses
-        return try await read { db in try Self.mailOnlyEvents(uids: [uid], me: me, db).first ?? MailOnlyEvent(event: InvitedEvent([])) }
+        return try await read { db in
+            try Self.mailOnlyEvents(uids: [uid], me: me, db).first
+                ?? MailOnlyEvent(event: InvitedEvent([]), answers: try Self.invitationAnswers(uids: [uid], db)[uid] ?? [:])
+        }
     }
 
     /// True when the meeting of an invitation is off since it was sent, as for the waiting list: a cancellation (CANCEL)
@@ -778,17 +801,23 @@ extension MailStore {
     /// The events with these UIDs as their mail tells them, with your answers by email: one read for all of them.
     static func mailOnlyEvents(uids: [String], me: Set<String>, _ db: SQLiteDatabase) throws -> [MailOnlyEvent] {
         let events = try invitedEvents(uids: uids, me: me, db)
+        let answers = try invitationAnswers(uids: uids, db)
+        return events.map { MailOnlyEvent(event: $0, answers: answers[$0.uid] ?? [:]) }
+    }
+
+    /// Your answers by email to the events with these UIDs, by UID and recurrence ID ("" for the whole event).
+    static func invitationAnswers(uids: [String], _ db: SQLiteDatabase) throws -> [String: [String: InvitationAnswer]] {
         var answers: [String: [String: InvitationAnswer]] = [:]
         for start in stride(from: 0, to: uids.count, by: 400) {
             let chunk = Array(uids[start..<min(start + 400, uids.count)])
             let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
             let rows = try db.query(
-                "SELECT uid, recurrence_id, response, comment, sequence, answered_at, outbox_id FROM invitation_answers WHERE uid IN (\(placeholders))",
+                "SELECT \(answerColumns) FROM invitation_answers WHERE uid IN (\(placeholders))",
                 chunk
             ) { row in decodeInvitationAnswer(row, at: 0) }
             for answer in rows.compactMap({ $0 }) { answers[answer.uid, default: [:]][answer.recurrenceID] = answer }
         }
-        return events.map { MailOnlyEvent(event: $0, answers: answers[$0.uid] ?? [:]) }
+        return answers
     }
 
     /// The events with these UIDs as their mail tells them (`invitedEvent`), each from its mail oldest first.
@@ -809,15 +838,34 @@ extension MailStore {
         return InvitedEvent.events(from: files.sorted { $0.date < $1.date }.flatMap(\.invitations).filter { wanted.contains($0.uid) })
     }
 
-    /// `mailOnlyEvents`, as a condition on `invitations i`.
+    /// `mailOnlyEvents`, as a condition on `invitations i`. Unless `ignoringStoredEvents`, binds your addresses (`yourCopy`).
     static func withoutEvents(ignoringStoredEvents: Bool = false) -> String {
         "i.method = 'REQUEST' "
-            + (ignoringStoredEvents ? "" : "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ical_uid = i.uid AND e.calendar_id IN (\(yourCalendars))) ")
+            + (ignoringStoredEvents ? "" : "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ical_uid = i.uid AND \(yourCopy("e"))) ")
             + afterEvents
     }
 
-    /// Your own calendars: the primary one and those you own. On a colleague's calendar shown beside yours, an event is theirs.
-    static let yourCalendars = "SELECT id FROM calendars WHERE json_extract(payload, '$.isPrimary') = 1 OR json_extract(payload, '$.accessRole') = 'owner'"
+    /// A stored copy of an event (`e`) that is yours: on your primary calendar, or its "self" guest is one of your
+    /// addresses. On a colleague's calendar shown beside yours, even one you manage, "self" is that colleague. As
+    /// `CalendarActions.event(for:)`. Binds your addresses as a JSON array.
+    static func yourCopy(_ e: String) -> String {
+        "(\(e).calendar_id IN (SELECT id FROM calendars WHERE json_extract(payload, '$.isPrimary') = 1)"
+            + " OR EXISTS (SELECT 1 FROM json_each(\(e).payload, '$.attendees') a WHERE json_extract(a.value, '$.isSelf') = 1"
+            + " AND lower(json_extract(a.value, '$.email')) IN (SELECT value FROM json_each(?))))"
+    }
+
+    /// A calendar (`c`) whose events are your time: your primary calendar, or one you own that is not a colleague's (a
+    /// colleague's own calendar, shared with you to manage, has their address as its ID). As `AppModel.isYourCalendar`.
+    /// Binds your addresses as a JSON array.
+    static func yourCalendar(_ c: String) -> String {
+        "(json_extract(\(c).payload, '$.isPrimary') = 1 OR (json_extract(\(c).payload, '$.accessRole') = 'owner'"
+            + " AND (\(c).id LIKE '%calendar.google.com' OR lower(\(c).id) IN (SELECT value FROM json_each(?)))))"
+    }
+
+    /// True when a stored copy of an event is yours (`yourCopy`). `primaryID`: your primary calendar.
+    static func isYourCopy(_ event: CalendarEvent, primaryID: String?, me: Set<String>) -> Bool {
+        event.calendarID == primaryID || event.selfAttendee.map { me.contains($0.normalized) } == true
+    }
 
     static let afterEvents = """
         AND NOT EXISTS (
@@ -854,7 +902,7 @@ extension MailStore {
         try db.query(
             """
             SELECT i.message_id, i.thread_id, i.payload, m.date,
-                   a.uid, a.recurrence_id, a.response, a.comment, a.sequence, a.answered_at, a.outbox_id,
+                   a.uid, a.recurrence_id, a.response, a.comment, a.sequence, a.answered_at, a.outbox_id, a.covered,
                    EXISTS (SELECT 1 FROM message_labels l WHERE l.message_id = i.message_id AND l.label_id IN ('TRASH', 'SPAM'))
             FROM invitations i JOIN messages m ON m.id = i.message_id
             LEFT JOIN invitation_answers a ON a.uid = i.uid AND a.recurrence_id = COALESCE(i.recurrence_id, '') AND a.sequence >= i.sequence
@@ -867,7 +915,7 @@ extension MailStore {
             StoredInvitation(
                 messageID: row.string(0), threadID: row.string(1),
                 invitations: try decoder.decode([Invitation].self, from: Data(row.string(2).utf8)), date: row.date(3),
-                answer: decodeInvitationAnswer(row, at: 4), isBinned: row.bool(11)
+                answer: decodeInvitationAnswer(row, at: 4), isBinned: row.bool(12)
             )
         }
     }

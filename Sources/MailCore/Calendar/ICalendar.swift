@@ -379,13 +379,17 @@ extension ICalendar {
 
         let description = first("DESCRIPTION").map { unescapedText($0.value) }
         let location = text("LOCATION")
+        // Outlook's busy status wins over TRANSP, as Outlook writes both and reads its own.
+        let busyStatus = first("X-MICROSOFT-CDO-BUSYSTATUS")?.value.trimmingCharacters(in: .whitespaces).uppercased()
+        let transparent = first("TRANSP")?.value.trimmingCharacters(in: .whitespaces).uppercased() == "TRANSPARENT"
+        let free = busyStatus.map { $0 == "FREE" } ?? transparent
         let details = description.map { withoutGoogleBoilerplate($0).trimmingCharacters(in: .whitespacesAndNewlines) }
         return Invitation(
             method: method, uid: uid, sequence: first("SEQUENCE").flatMap { Int($0.value.trimmingCharacters(in: .whitespaces)) } ?? 0,
             recurrenceID: recurrenceID, summary: text("SUMMARY") ?? "(no title)", details: details.flatMap { $0.isEmpty ? nil : $0 },
             location: location, start: start, end: end, recurrence: recurrence, organizer: organizer, attendees: attendees,
             conferenceURL: conferenceURL(google: first("X-GOOGLE-CONFERENCE")?.value, location: location, description: description),
-            status: status(first("STATUS")?.value), stamp: time("DTSTAMP")?.date
+            status: status(first("STATUS")?.value), stamp: time("DTSTAMP")?.date, showsAsFree: free ? true : nil
         )
     }
 

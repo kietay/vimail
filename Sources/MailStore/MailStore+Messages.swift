@@ -283,6 +283,7 @@ extension MailStore {
         try db.run("DELETE FROM message_labels WHERE message_id = ?", [id])
         try db.run("DELETE FROM annotations WHERE message_id = ?", [id])
         try db.run("DELETE FROM processing_log WHERE message_id = ?", [id])
+        try db.run("DELETE FROM invitations WHERE message_id = ?", [id])
         try db.run("DELETE FROM messages WHERE id = ?", [id])
         return threadID
     }

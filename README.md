@@ -89,10 +89,11 @@ them with one key, and you create events from one typed line. Everything works o
   does not know) is looked up when you answer it. An invitation that is not on your Google Calendar at all, or any
   invitation while the calendar is not connected, is answered by email: an iMIP reply (RFC 6047) to the organizer, in
   the invitation's conversation, from your address written as the invitation writes it. The organizer's calendar then
-  records your answer. By email, one answer covers the whole event and every change its mail told so far; a date the
-  organizer changes after your answer waits again and is answered on its own, and a newer invitation to the whole event
-  waits again. Here the invitation stops waiting and says "you said yes by email", and a yes or maybe counts as your
-  time (next meeting, overlaps). Like a send, the email leaves after the undo-send window, and `u` takes it back until then (once sent, it
+  records your answer. By email, one answer covers the whole event and every date its mail had changed when you
+  answered; a date the organizer changes after your answer waits again and is answered on its own, and a newer
+  invitation to the whole event waits again. The page of a series says whether `Y` `M` `N` answer the whole series or
+  this date only. Here the invitation stops waiting and says "you said yes by email", and a yes or maybe counts as your
+  time (next meeting, overlaps), also after you bin its mail. Like a send, the email leaves after the undo-send window, and `u` takes it back until then (once sent, it
   cannot be unsent). Nothing is sent for a meeting cancelled since, or one the organizer took you off, nor when the
   organizer's address is not a plain `name@domain`.
   A join link is used only when it is a web link (`https://`).
@@ -158,9 +159,9 @@ them with one key, and you create events from one typed line. Everything works o
   reminders, colors, visibility and other apps' data. It carries the event's etag; when someone changed the event
   meanwhile, vimail merges changes to different fields (guests by address) and otherwise keeps Google's version and
   says so.
-- **Your own time.** A colleague's calendar shown beside yours lists their events, but your next meeting, overlaps,
-  free times, find a time and the invitations waiting for you count only your own calendars, and the invitations only
-  in mail that you said yes or maybe to by email.
+- **Your own time.** A colleague's calendar shown beside yours lists their events (also one you manage), but your next
+  meeting, overlaps, free times, find a time and the invitations waiting for you count only your own calendars. Your
+  time also has the invitations only in mail that you said yes or maybe to by email, unless they show as free.
 
 ## Logs
 
@@ -216,10 +217,10 @@ In read-filtered lists (Unread tab, unread views) it stays visible until you ref
 
 **Search:** `from:` `to:` `subject:` `label:` `in:inbox|sent|trash|spam|snoozed|archive|anywhere`
 `is:unread|read|starred` `has:attachment` `before:` `after:` `older_than:` `newer_than:` `"phrases"` `-exclude`,
-and for calendar mail `has:invite` `invite:request|update|cancel|reply|pending|conflict` (pending: not answered yet, on
-your own calendar or by email, as the calendar view's waiting list;
-conflict: overlaps an event you go to in the next 60 days) and `organizer:me` (events you organize; with `invite:reply`,
-your guests' answers).
+and for calendar mail `has:invite` `invite:request|update|cancel|reply|pending|conflict` (pending: the conversations of
+the calendar view's waiting list, not answered yet on your calendar or by email; conflict: overlaps an event on your
+own calendars that you go to, in the next 60 days) and `organizer:me` (events you organize; with `invite:reply`, your
+guests' answers).
 
 **Unsubscribe (`⌘U`)** uses the fastest way the sender offers, from its `List-Unsubscribe` header:
 

@@ -600,12 +600,18 @@ struct InvitationSearchTests {
         #expect(try await ids("invite:request") == ["ti1"])
         #expect(try await ids("invite:update") == ["ti2"])
         #expect(try await ids("invite:reply") == ["ti3"])
-        #expect(try await ids("invite:pending") == ["ti1", "ti2"])
-        _ = try await store.respond(calendarID: calendar.id, eventID: "e1", response: .accepted, comment: nil)
+        // invite:pending: the conversations of the events the app's waiting list has (the answer rule is the app's).
         #expect(try await ids("invite:pending").isEmpty)
+        var pending = ThreadQuery(scope: .anywhere).narrowed(by: SearchQuery.parse("invite:pending"))
+        pending.waitingInvitationUIDs = ["review"]
+        #expect(try await store.threads(pending).map(\.id).sorted() == ["ti1", "ti2"])
+        #expect(try await store.count(pending) == 2)
+        // A guest's answer is not an invitation to answer.
+        pending.waitingInvitationUIDs = ["sync"]
+        #expect(try await store.threads(pending).isEmpty)
     }
 
-    @Test func pendingCountsAnswersByEmailAndOnlyYourCalendars() async throws {
+    @Test func theWaitingListCountsAnswersByEmailAndOnlyYourCopies() async throws {
         let store = try await seededStore()
         try await store.upsertMessages([
             message("p1", thread: "tp1", subject: "Invitation: Vendor call"),
@@ -621,28 +627,37 @@ struct InvitationSearchTests {
         try await store.saveInvitations([Invitation(method: .request, uid: "standup", sequence: 1, recurrenceID: tuesday, summary: "Standup", start: tuesday)], messageID: "p3", threadID: "tp3")
         try await store.saveInvitations([Invitation(method: .request, uid: "offsite", summary: "Offsite", start: start)], messageID: "p4", threadID: "tp4")
         try await store.saveInvitations([Invitation(method: .cancel, uid: "offsite", sequence: 1, summary: "Offsite", start: start)], messageID: "p5", threadID: "tp5")
-        // The vendor call is on a colleague's calendar, waiting for their answer: that is not yours.
-        let colleague = CalendarInfo(id: "jamie@studionorth.co", summary: "Jamie", accessRole: .reader)
+        // The vendor call is on a colleague's calendar that you manage, waiting for their answer: that is not yours.
+        let colleague = CalendarInfo(id: "jamie@studionorth.co", summary: "Jamie", accessRole: .owner)
         try await store.applyCalendarList([CalendarInfo(id: "sam@studionorth.co", summary: "Sam", isPrimary: true), colleague], removed: [], replaceAll: true)
         try await store.applyEvents([CalendarEvent(
             id: "v1", calendarID: colleague.id, iCalUID: "vendor", summary: "Vendor call", start: start, end: start,
             attendees: [Attendee(email: "jamie@studionorth.co", response: .needsAction, isSelf: true)]
         )], calendarID: colleague.id, window: CalendarWindow.around(Date()))
 
-        func ids(_ text: String) async throws -> [String] {
-            try await store.threads(ThreadQuery(scope: .anywhere).narrowed(by: SearchQuery.parse(text))).map(\.id).sorted()
+        func waiting() async throws -> [String: String] {
+            var dates: [String: String] = [:]
+            for known in try await store.mailOnlyEvents() {
+                if let date = known.event.waitingDate(now: Date(), answers: known.answers) { dates[known.uid] = date.key }
+            }
+            return dates
         }
         func save(_ answer: InvitationAnswer) async throws {
             try await store.write { db, _ in try MailStore.saveInvitationAnswer(answer, db) }
         }
-        // Only in mail and not answered; the cancelled offsite is not.
-        #expect(try await ids("invite:pending") == ["tp1", "tp2", "tp3"])
-        // An answer by email to the standup covers the series; Tuesday changed after it, so it still waits.
+        // Only in mail and not answered; the cancelled offsite is not. The standup waits at its first date.
+        #expect(try await waiting().keys.sorted() == ["standup", "vendor"])
+        // An answer by email to the standup that covers its dates as they were before Tuesday changed: Tuesday waits.
         try await save(InvitationAnswer(uid: "standup", response: .accepted, sequence: 0))
         try await save(InvitationAnswer(uid: "vendor", response: .declined, sequence: 0))
-        #expect(try await ids("invite:pending") == ["tp3"])
+        #expect(try await waiting() == ["standup": tuesday.occurrenceKey])
+        // Answered with Tuesday's change covered: nothing waits.
+        try await save(InvitationAnswer(uid: "standup", response: .accepted, sequence: 0, covered: [tuesday.occurrenceKey: 1]))
+        #expect(try await waiting().isEmpty)
+        // Or Tuesday answered on its own.
+        try await save(InvitationAnswer(uid: "standup", response: .accepted, sequence: 0))
         try await save(InvitationAnswer(uid: "standup", recurrenceID: tuesday.occurrenceKey, response: .declined, sequence: 1))
-        #expect(try await ids("invite:pending").isEmpty)
+        #expect(try await waiting().isEmpty)
     }
 
     @Test func conflictFindsInvitationsThatOverlapYourEvents() async throws {
@@ -662,6 +677,13 @@ struct InvitationSearchTests {
             // Time marked free does not count.
             CalendarEvent(id: "focus", calendarID: calendar.id, summary: "Focus", start: at(12), end: at(13), isBusy: false),
         ], calendarID: calendar.id, window: CalendarWindow.around(Date()))
+        // A colleague's calendar shown beside yours, even one you manage, has their meetings.
+        let jamie = CalendarInfo(id: "jamie@studionorth.co", summary: "Jamie", accessRole: .owner)
+        try await store.applyCalendarList([calendar, jamie], removed: [], replaceAll: true)
+        try await store.applyEvents(
+            [CalendarEvent(id: "dentist", calendarID: jamie.id, summary: "Dentist", start: at(12), end: at(13))],
+            calendarID: jamie.id, window: CalendarWindow.around(Date())
+        )
         let found = try await store.threads(ThreadQuery(scope: .anywhere).narrowed(by: SearchQuery.parse("invite:conflict"))).map(\.id)
         #expect(found == ["tc1"])
     }
@@ -805,7 +827,7 @@ struct InvitationSearchTests {
         #expect(Set(waiting) == ["weekly", "lunch"])
     }
 
-    @Test func onlyYourOwnCalendarsTakeAnInvitationOutOfMail() async throws {
+    @Test func onlyYourOwnCopyTakesAnInvitationOutOfMail() async throws {
         let store = try await seededStore()
         try await store.upsertMessages([
             message("v1", thread: "tv1", subject: "Invitation: Vendor call"),
@@ -814,11 +836,20 @@ struct InvitationSearchTests {
         func time(_ date: Date) -> EventTime { .timed(date, timeZone: "America/Los_Angeles") }
         let call = Invitation(method: .request, uid: "vendor", summary: "Vendor call", start: time(at(14, 15)), end: time(at(14, 16)))
         try await store.saveInvitations([call], messageID: "v1", threadID: "tv1")
-        // A colleague's calendar shown beside yours has the meeting: that is theirs, so yours is still only in mail.
-        let colleague = CalendarInfo(id: "jamie@studionorth.co", summary: "Jamie", accessRole: .reader)
+        // A colleague's calendar shown beside yours, even one you manage, has the meeting: there "self" is the colleague,
+        // so that copy is theirs and yours is still only in mail.
+        let colleague = CalendarInfo(id: "jamie@studionorth.co", summary: "Jamie", accessRole: .owner)
         try await store.applyCalendarList([primary, colleague], removed: [], replaceAll: true)
-        try await store.applyEvents([event("c1", "Vendor call", start: at(14, 15), uid: "vendor")], calendarID: colleague.id, window: window, calendar: la)
+        var theirs = event("c1", "Vendor call", start: at(14, 15), uid: "vendor")
+        theirs.attendees = [Attendee(email: "jamie@studionorth.co", name: "Jamie Chen", response: .accepted, isSelf: true)]
+        try await store.applyEvents([theirs], calendarID: colleague.id, window: window, calendar: la)
         #expect(try await store.mailOnlyEvents().map(\.uid) == ["vendor"])
+        // The organizer takes Jamie off: their copy goes, and your invitation is not withdrawn.
+        var removal = CalendarEvent(id: "c1", calendarID: colleague.id, summary: "", start: time(at(14, 15)), end: time(at(14, 15)))
+        removal.status = .cancelled
+        try await store.applyEvents([removal], calendarID: colleague.id, window: window, calendar: la)
+        #expect(try await store.mailOnlyEvents().map(\.uid) == ["vendor"])
+        #expect(try await store.isWithdrawn(call) == false)
         // On your calendar it is not, unless the events stored are out of date (the calendar is not connected).
         try await store.applyEvents([event("p1", "Vendor call", start: at(14, 15), uid: "vendor")], calendarID: primary.id, window: window, calendar: la)
         #expect(try await store.mailOnlyEvents().isEmpty)
@@ -828,6 +859,15 @@ struct InvitationSearchTests {
         try await store.saveInvitations([offsite], messageID: "v2", threadID: "tv2")
         #expect(try await store.invitations(uid: "offsite").map(\.isBinned) == [true])
         #expect(try await store.invitations(uid: "vendor").map(\.isBinned) == [false])
+        // Binned mail does not wait, but a yes by email to it keeps its dates your time.
+        #expect(try await store.mailOnlyEvents().contains { $0.uid == "offsite" } == false)
+        try await store.write { db, _ in try MailStore.saveInvitationAnswer(InvitationAnswer(uid: "offsite", response: .accepted), db) }
+        #expect(try await store.mailOnlyEvents().contains { $0.uid == "offsite" } == false)
+        #expect(try await store.mailOnlyEvents(includingAccepted: true).contains { $0.uid == "offsite" })
+        // Gmail empties Trash: the invitation goes with its message.
+        try await store.deleteMessages(["v2"])
+        #expect(try await store.invitations(uid: "offsite").isEmpty)
+        #expect(try await store.mailOnlyEvents(includingAccepted: true).contains { $0.uid == "offsite" } == false)
     }
 
     @Test func invitationsToMeetingsTheSyncRemovedStopWaiting() async throws {

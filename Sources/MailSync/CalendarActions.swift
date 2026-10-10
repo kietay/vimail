@@ -149,12 +149,12 @@ public final class CalendarActions: Sendable {
     /// Answers an invitation that is not on Google Calendar by email (iMIP): a reply to the organizer, in the conversation
     /// of the invitation's `mail`, that leaves through the mail outbox after the undo window, like a send. It answers the
     /// newest version of the invitation, which may have come in another conversation (never one from Spam). The answer
-    /// is kept here, covering `covering` (the SEQUENCE it answers; for a whole event, `InvitedEvent.coveredSequence`), so
-    /// the invitation stops waiting and its pages say what you answered. Nil when the invitation cannot be answered by
+    /// is kept here (for a whole event, with the changed dates it covers: `InvitedEvent.coverage`), so the invitation
+    /// stops waiting and its pages say what you answered. Nil when the invitation cannot be answered by
     /// email (no organizer to write to, or you organize it) or the account is not known yet. Throws
     /// `EmailAnswerError.withdrawn` when the meeting is off since (cancelled, or you were taken off it): nothing is sent then.
     public func answerByEmail(
-        _ invitation: Invitation, mail: MailMessage, response: ResponseStatus, comment: String? = nil, covering: Int? = nil, undoWindow: TimeInterval
+        _ invitation: Invitation, mail: MailMessage, response: ResponseStatus, comment: String? = nil, undoWindow: TimeInterval
     ) async throws -> EmailAnswerRecord? {
         guard let account = try await store.account() else { return nil }
         let invited = try await store.invitedEvent(uid: invitation.uid)
@@ -171,9 +171,10 @@ public final class CalendarActions: Sendable {
             now: now, timeZone: calendar.timeZone
         ) else { return nil }
         let note = comment.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+        // An answer to the whole event covers the dates its mail changed so far, each at its own SEQUENCE.
         let answer = InvitationAnswer(
             uid: invitation.uid, recurrenceID: invitation.recurrenceID?.occurrenceKey ?? "", response: response, comment: note,
-            sequence: max(invitation.sequence, covering ?? invitation.sequence), answeredAt: now
+            sequence: invitation.sequence, covered: invited.coverage(by: invitation), answeredAt: now
         )
         let copy = MailMessage(
             id: "local-\(UUID().uuidString.lowercased())", threadID: mail.threadID, labelIDs: [SystemLabel.sent], from: message.from,

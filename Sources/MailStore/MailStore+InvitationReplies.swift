@@ -35,6 +35,7 @@ extension MailStore {
             let outboxID = try Self.enqueue(.invitationReply(reply), notBefore: notBefore, db)
             var answer = reply.answer
             answer.sequence = max(answer.sequence, reply.previous?.sequence ?? 0)
+            answer.covered.merge(reply.previous?.covered ?? [:]) { max($0, $1) }
             answer.outboxID = outboxID
             try Self.saveInvitationAnswer(answer, db)
             change.threadIDs.insert(localCopy.threadID)
@@ -60,12 +61,14 @@ extension MailStore {
         }
     }
 
-    /// After the provider refused the email: its copy leaves Sent and the answer before it comes back, so the
-    /// invitation waits for an answer again.
-    public func restoreFailedInvitationReply(_ reply: InvitationReply, outboxID: Int64) async throws {
+    /// After the provider refused the email: its copy leaves Sent and the answer before it comes back. Returns true when
+    /// an answer still stands for that invitation (the one before, or a later one); else it waits for an answer again.
+    @discardableResult
+    public func restoreFailedInvitationReply(_ reply: InvitationReply, outboxID: Int64) async throws -> Bool {
         try await write { db, change in
             try Self.takeBack(reply, outboxID: outboxID, db, &change)
             try Self.refreshThreads(change.threadIDs, db, selfAddresses: self.selfAddresses)
+            return try Self.invitationAnswer(uid: reply.answer.uid, recurrenceID: reply.answer.recurrenceID, db) != nil
         }
     }
 
@@ -78,29 +81,38 @@ extension MailStore {
 
     static func invitationAnswer(uid: String, recurrenceID: String, _ db: SQLiteDatabase) throws -> InvitationAnswer? {
         try db.first(
-            "SELECT uid, recurrence_id, response, comment, sequence, answered_at, outbox_id FROM invitation_answers WHERE uid = ? AND recurrence_id = ?",
+            "SELECT \(answerColumns) FROM invitation_answers WHERE uid = ? AND recurrence_id = ?",
             [uid, recurrenceID]
         ) { decodeInvitationAnswer($0) } ?? nil
     }
 
-    /// An answer from the seven columns from `first` on (uid, recurrence_id, response, comment, sequence, answered_at,
-    /// outbox_id). Nil when they are NULL, as a LEFT JOIN without an answer leaves them.
+    /// The columns `decodeInvitationAnswer` reads, in its order.
+    static let answerColumns = "uid, recurrence_id, response, comment, sequence, answered_at, outbox_id, covered"
+
+    /// An answer from the eight columns from `first` on (`answerColumns`). Nil when they are NULL, as a LEFT JOIN without
+    /// an answer leaves them.
     static func decodeInvitationAnswer(_ row: SQLRow, at first: Int32 = 0) -> InvitationAnswer? {
         guard !row.isNull(first), let response = ResponseStatus(rawValue: row.string(first + 2)) else { return nil }
+        let covered = row.optionalString(first + 7).flatMap { try? JSONDecoder().decode([String: Int].self, from: Data($0.utf8)) } ?? [:]
         return InvitationAnswer(
             uid: row.string(first), recurrenceID: row.string(first + 1), response: response, comment: row.optionalString(first + 3),
-            sequence: row.int(first + 4), answeredAt: row.date(first + 5), outboxID: row.isNull(first + 6) ? nil : row.int64(first + 6)
+            sequence: row.int(first + 4), covered: covered, answeredAt: row.date(first + 5),
+            outboxID: row.isNull(first + 6) ? nil : row.int64(first + 6)
         )
     }
 
     static func saveInvitationAnswer(_ answer: InvitationAnswer, _ db: SQLiteDatabase) throws {
         try db.run(
             """
-            INSERT INTO invitation_answers(uid, recurrence_id, response, comment, sequence, answered_at, outbox_id) VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO invitation_answers(uid, recurrence_id, response, comment, sequence, answered_at, outbox_id, covered)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(uid, recurrence_id) DO UPDATE SET response = excluded.response, comment = excluded.comment,
-                sequence = excluded.sequence, answered_at = excluded.answered_at, outbox_id = excluded.outbox_id
+                sequence = excluded.sequence, answered_at = excluded.answered_at, outbox_id = excluded.outbox_id, covered = excluded.covered
             """,
-            [answer.uid, answer.recurrenceID, answer.response.rawValue, answer.comment, answer.sequence, answer.answeredAt, answer.outboxID]
+            [
+                answer.uid, answer.recurrenceID, answer.response.rawValue, answer.comment, answer.sequence, answer.answeredAt, answer.outboxID,
+                answer.covered.isEmpty ? nil : String(decoding: try JSONEncoder().encode(answer.covered), as: UTF8.self),
+            ]
         )
     }
 

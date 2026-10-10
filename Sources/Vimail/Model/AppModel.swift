@@ -148,6 +148,8 @@ final class AppModel {
     var agendaSections: [AgendaSection] = []
     /// Invitations waiting for your answer, for the sidebar (kept current outside the calendar view too).
     var waitingInvitationCount = 0
+    /// The events (iCalendar UIDs) of the waiting list, for `invite:pending`.
+    var waitingInvitationUIDs: [String] = []
     var agendaCursorID: String?
     /// Agenda rows that overlap another event you go to.
     var agendaOverlaps: Set<String> = []
@@ -424,8 +426,9 @@ final class AppModel {
                 if kept.isEmpty { return archive.map(UndoEntry.action) }
                 return .unsubscribe(outboxIDs: kept.map { ids[$0] }, lists: kept.map { lists[$0] }, archive: archive)
             }
-        case .answerFailed(let outboxID, let summary, let reason):
-            showToast("Could not send your answer to \(summary): \(reason). The invitation waits for your answer again.", isError: true)
+        case .answerFailed(let outboxID, let summary, let reason, let stands):
+            let state = stands ? "Your earlier answer stands." : "The invitation waits for your answer again."
+            showToast("Could not send your answer to \(summary): \(reason). \(state)", isError: true)
             // u has nothing left to take back for it; an answer that did not go out alone should not stay archived.
             undoStack = undoStack.compactMap { entry in
                 guard case .answerByEmail(let emailed, let records, let archive) = entry, emailed.contains(where: { $0.outboxID == outboxID }) else { return entry }
@@ -497,7 +500,7 @@ final class AppModel {
             "snoozed": .mailbox(.snoozed),
             "list-unread": baseQuery.applying(.unread),
         ]
-        for view in views where view.pinned { queries["view:\(view.id)"] = view.query }
+        for view in views where view.pinned { queries["view:\(view.id)"] = resolved(view.query) }
         let store = services.store
         let allQueries = queries
         async let unread = store.unreadCounts()
@@ -542,7 +545,7 @@ final class AppModel {
         var query = baseQuery.applying(listFilter)
         let search = searchText.trimmingCharacters(in: .whitespaces)
         if !search.isEmpty { query = query.narrowed(by: SearchQuery.parse(search)) }
-        return query
+        return resolved(query)
     }
 
     var isDraftsList: Bool {
@@ -1032,7 +1035,7 @@ final class AppModel {
         omniTask = Task {
             try? await Task.sleep(for: .milliseconds(70))
             guard !Task.isCancelled else { return }
-            var search = ThreadQuery(scope: .everywhereExceptTrash).narrowed(by: SearchQuery.parse(query))
+            var search = resolved(ThreadQuery(scope: .everywhereExceptTrash).narrowed(by: SearchQuery.parse(query)))
             search.limit = 6
             let results = (try? await services.store.threads(search)) ?? []
             guard !Task.isCancelled else { return }

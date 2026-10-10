@@ -170,9 +170,15 @@ struct InvitedEventTests {
     }
 }
 
-/// Your answer by email to the standup: to the whole series, or to one date by its key.
-private func answer(_ response: ResponseStatus, sequence: Int, key: String = "") -> InvitationAnswer {
-    InvitationAnswer(uid: "standup@google.com", recurrenceID: key, response: response, sequence: sequence)
+/// Your answer by email to the standup: to the whole series (with the dates it covers), or to one date by its key.
+/// `minute`: when you answered, in minutes after the first answer.
+private func answer(
+    _ response: ResponseStatus, sequence: Int, key: String = "", covered: [String: Int] = [:], minute: Int = 0
+) -> InvitationAnswer {
+    InvitationAnswer(
+        uid: "standup@google.com", recurrenceID: key, response: response, sequence: sequence, covered: covered,
+        answeredAt: at(2026, 10, 9, 8).addingTimeInterval(Double(minute) * 60)
+    )
 }
 
 @Suite("One answer per invited event")
@@ -180,22 +186,25 @@ struct InvitationAnswerRuleTests {
     /// The key of the standup on Monday Oct 12, 2026 (9:00 in Los Angeles).
     let october12 = "20261012T160000Z"
     let october19 = "20261019T160000Z"
+    let now = at(2026, 10, 9)
 
     @Test func oneAnswerCoversEveryDateAndTheDatesChangedBeforeIt() {
-        // Oct 12 moved to Tuesday 10:00 before you answered.
+        // Oct 12 moved to Tuesday 10:00 before you answered; that date counts its SEQUENCE on its own (1).
         let moved = day(at(2026, 10, 12, 9), movedTo: at(2026, 10, 13, 10))
         let event = InvitedEvent([standup(), moved])
         // Not answered yet: the first date waits, the moved one; answering it answers the series.
-        let now = at(2026, 10, 9)
         #expect(event.waitingDate(now: now, answers: [:], calendar: la)?.key == october12)
         #expect(event.answerTarget(at: october12, answers: [:]) == standup())
         #expect(event.answer(at: october12, answers: [:]) == nil)
-        // The answer to the series covers the change the mail already told.
-        #expect(event.coveredSequence(by: standup()) == 1)
-        let answers = ["": answer(.accepted, sequence: event.coveredSequence(by: standup()))]
+        // The answer to the series is at the series' SEQUENCE and covers the change the mail already told.
+        #expect(event.coverage(by: standup()) == [october12: 1])
+        #expect(event.coverage(by: moved).isEmpty)
+        let answers = ["": answer(.accepted, sequence: 0, covered: event.coverage(by: standup()))]
         #expect(event.answer(at: october12, answers: answers)?.response == .accepted)
         #expect(event.answer(at: october19, answers: answers)?.response == .accepted)
         #expect(event.waitingDate(now: now, answers: answers, calendar: la) == nil)
+        // Answering again goes to the series.
+        #expect(event.answerTarget(at: october12, answers: answers) == standup())
     }
 
     @Test func aDateChangedAfterYourAnswerAsksAgainOnItsOwn() {
@@ -206,16 +215,34 @@ struct InvitationAnswerRuleTests {
         #expect(event.answerTarget(at: october12, answers: answers) == moved)
         #expect(event.answer(at: october12, answers: answers) == nil)
         #expect(event.answer(at: october19, answers: answers)?.response == .accepted)
-        #expect(event.waitingDate(now: at(2026, 10, 9), answers: answers, calendar: la)?.key == october12)
-        #expect(event.coveredSequence(by: moved) == 1)
+        #expect(event.waitingDate(now: now, answers: answers, calendar: la)?.key == october12)
         var both = answers
-        both[october12] = answer(.declined, sequence: 1, key: october12)
+        both[october12] = answer(.declined, sequence: 1, key: october12, minute: 5)
         #expect(event.answer(at: october12, answers: both)?.response == .declined)
-        #expect(event.waitingDate(now: at(2026, 10, 9), answers: both, calendar: la) == nil)
-        // A new answer to the series covers that date again.
-        both[""] = answer(.tentative, sequence: 1)
-        #expect(event.answerTarget(at: october12, answers: both) == standup())
+        #expect(event.answerTarget(at: october12, answers: both) == moved)
+        #expect(event.waitingDate(now: now, answers: both, calendar: la) == nil)
+        // A later answer to the series covers that date again.
+        both[""] = answer(.tentative, sequence: 0, covered: [october12: 1], minute: 10)
         #expect(event.answer(at: october12, answers: both)?.response == .tentative)
+        #expect(event.answerTarget(at: october12, answers: both) == standup())
+    }
+
+    @Test func dateSequencesAndTheSeriesSequenceAreCountedApart() {
+        // Answered with Oct 12 already moved (its SEQUENCE 1); the series is still at 0.
+        let moved = day(at(2026, 10, 12, 9), movedTo: at(2026, 10, 13, 10))
+        let answers = ["": answer(.accepted, sequence: 0, covered: [october12: 1])]
+        // Oct 19 moved for the first time, also at SEQUENCE 1: it was not covered, so it waits on its own.
+        let later = day(at(2026, 10, 19, 9), movedTo: at(2026, 10, 20, 10))
+        let event = InvitedEvent([standup(), moved, later])
+        #expect(event.answer(at: october12, answers: answers)?.response == .accepted)
+        #expect(event.answer(at: october19, answers: answers) == nil)
+        #expect(event.answerTarget(at: october19, answers: answers) == later)
+        #expect(event.waitingDate(now: now, answers: answers, calendar: la)?.key == october19)
+        // The whole series moved to 10:00 at SEQUENCE 1: a newer invitation, so every date waits again.
+        let updated = InvitedEvent([standup(), moved, standup(sequence: 1, hour: 10)])
+        #expect(updated.answer(at: october12, answers: answers) == nil)
+        #expect(updated.answerTarget(at: october12, answers: answers) == standup(sequence: 1, hour: 10))
+        #expect(updated.waitingDate(now: now, answers: answers, calendar: la) != nil)
     }
 
     @Test func anUpdateToTheWholeSeriesAsksAgain() {
@@ -223,7 +250,7 @@ struct InvitationAnswerRuleTests {
         let event = InvitedEvent([standup(), standup(sequence: 2, hour: 10)])
         #expect(event.answer(at: october19, answers: answers) == nil)
         #expect(event.answerTarget(at: october19, answers: answers) == standup(sequence: 2, hour: 10))
-        #expect(event.waitingDate(now: at(2026, 10, 9), answers: answers, calendar: la)?.start == time(at(2026, 10, 12, 10)))
+        #expect(event.waitingDate(now: now, answers: answers, calendar: la)?.start == time(at(2026, 10, 12, 10)))
     }
 
     @Test func cancelledDatesAndEventsHaveNothingToAnswer() {
@@ -231,25 +258,34 @@ struct InvitationAnswerRuleTests {
         let event = InvitedEvent([standup(), off])
         #expect(event.answerTarget(at: october12, answers: [:]) == nil)
         #expect(event.answerTarget(at: october19, answers: [:]) == standup())
-        // The first waiting date skips the cancelled one.
-        #expect(event.waitingDate(now: at(2026, 10, 9), answers: [:], calendar: la)?.key == october19)
+        // The first waiting date skips the cancelled one, and a cancelled date is not part of an answer.
+        #expect(event.waitingDate(now: now, answers: [:], calendar: la)?.key == october19)
+        #expect(event.coverage(by: standup()).isEmpty)
         let cancel = Invitation(method: .cancel, uid: "standup@google.com", sequence: 1, summary: "Weekly standup", start: standup().start)
         #expect(InvitedEvent([standup(), cancel]).answerTarget(at: october19, answers: [:]) == nil)
-        #expect(InvitedEvent([standup(), cancel]).waitingDate(now: at(2026, 10, 9), answers: [:], calendar: la) == nil)
+        #expect(InvitedEvent([standup(), cancel]).waitingDate(now: now, answers: [:], calendar: la) == nil)
+        // An update marked STATUS:CANCELLED cancels as well.
+        var calledOff = standup(sequence: 1)
+        calledOff.status = .cancelled
+        #expect(InvitedEvent([standup(), calledOff]).answerTarget(at: october19, answers: [:]) == nil)
+        #expect(InvitedEvent([standup(), calledOff]).answer(at: october19, answers: ["": answer(.accepted, sequence: 1)]) == nil)
     }
 
     @Test func datesWithoutTheWholeEventAreAnsweredOneByOne() {
         let one = day(at(2026, 10, 19, 9), movedTo: at(2026, 10, 19, 13))
         let event = InvitedEvent([one])
         // An answer to the whole series does not answer a date the mail names on its own.
-        let whole = ["": answer(.accepted, sequence: 1)]
+        let whole = ["": answer(.accepted, sequence: 1, covered: [october19: 1])]
         #expect(event.answerTarget(at: october19, answers: whole) == one)
         #expect(event.answer(at: october19, answers: whole) == nil)
         #expect(event.answerTarget(at: october12, answers: whole) == nil)
-        #expect(event.coveredSequence(by: one) == 1)
+        #expect(event.coverage(by: one).isEmpty)
         let own = [october19: answer(.declined, sequence: 1, key: october19)]
         #expect(event.answer(at: october19, answers: own)?.response == .declined)
-        #expect(event.waitingDate(now: at(2026, 10, 9), answers: own, calendar: la) == nil)
+        #expect(event.waitingDate(now: now, answers: own, calendar: la) == nil)
+        // Moved again: it waits again.
+        let again = day(at(2026, 10, 19, 9), movedTo: at(2026, 10, 19, 15), sequence: 2)
+        #expect(InvitedEvent([one, again]).answer(at: october19, answers: own) == nil)
     }
 
     @Test func anAnswerGoesToTheNewestWordTheMailTells() {
@@ -267,7 +303,15 @@ struct InvitationAnswerRuleTests {
         let lunch = Invitation(
             method: .request, uid: "lunch", summary: "Lunch", start: time(at(2026, 10, 14, 12)), end: time(at(2026, 10, 14, 13))
         )
-        #expect(InvitedEvent([lunch]).waitingDate(now: at(2026, 10, 9), answers: [:], calendar: la)?.key == "")
+        #expect(InvitedEvent([lunch]).waitingDate(now: now, answers: [:], calendar: la)?.key == "")
         #expect(InvitedEvent([lunch]).waitingDate(now: at(2026, 10, 15), answers: [:], calendar: la) == nil)
+    }
+
+    @Test func answersQueuedBeforeDatesWereRecordedStillDecode() throws {
+        let json = #"{"uid":"standup@google.com","recurrenceID":"","response":"accepted","sequence":0,"answeredAt":0}"#
+        let decoded = try JSONDecoder().decode(InvitationAnswer.self, from: Data(json.utf8))
+        #expect(decoded.covered.isEmpty && decoded.response == .accepted)
+        let round = try JSONDecoder().decode(InvitationAnswer.self, from: JSONEncoder().encode(answer(.declined, sequence: 2, covered: [october12: 3])))
+        #expect(round.covered == [october12: 3] && round.sequence == 2)
     }
 }
