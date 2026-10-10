@@ -451,6 +451,42 @@ struct InvitationSearchTests {
         #expect(found == ["tc1"])
     }
 
+    @Test func eventsOnlyInMailBringTheirMovedAndCancelledDates() async throws {
+        let store = try await seededStore()
+        try await store.upsertMessages([
+            message("s1", thread: "ts1", subject: "Invitation: Weekly sync", minutesAgo: 300),
+            message("s2", thread: "ts2", subject: "Updated invitation: Weekly sync @ Tue Oct 13", minutesAgo: 200),
+            message("s3", thread: "ts3", subject: "Canceled event: Weekly sync @ Mon Oct 19", labels: ["TRASH"], minutesAgo: 100),
+            message("s4", thread: "ts4", subject: "Invitation: Lunch", minutesAgo: 50),
+            message("s5", thread: "ts5", subject: "Canceled event: Retro @ Mon Oct 19", minutesAgo: 40),
+        ])
+        func time(_ date: Date) -> EventTime { .timed(date, timeZone: "America/Los_Angeles") }
+        // Mondays 9:00 from Oct 5; Oct 12 moved to Tuesday, Oct 19 cancelled.
+        let weekly = Invitation(method: .request, uid: "weekly", summary: "Weekly sync", start: time(at(5, 9)), end: time(at(5, 9, 30)), recurrence: ["RRULE:FREQ=WEEKLY"])
+        let moved = Invitation(method: .request, uid: "weekly", sequence: 1, recurrenceID: time(at(12, 9)), summary: "Weekly sync", start: time(at(13, 9)), end: time(at(13, 9, 30)))
+        let cancelled = Invitation(method: .cancel, uid: "weekly", sequence: 1, recurrenceID: time(at(19, 9)), summary: "Weekly sync", start: time(at(19, 9)))
+        let lunch = Invitation(method: .request, uid: "lunch", summary: "Lunch", start: time(at(14, 12)), end: time(at(14, 13)))
+        // A cancelled date of an event whose invitation is not in the mail.
+        let retro = Invitation(method: .cancel, uid: "retro", sequence: 1, recurrenceID: time(at(19, 16)), summary: "Retro", start: time(at(19, 16)))
+        for (index, invitation) in [weekly, moved, cancelled, lunch, retro].enumerated() {
+            try await store.saveInvitations([invitation], messageID: "s\(index + 1)", threadID: "ts\(index + 1)")
+        }
+
+        let events = try await store.mailOnlyEvents()
+        #expect(events.map(\.uid).sorted() == ["lunch", "weekly"])
+        let series = try #require(events.first { $0.uid == "weekly" })
+        #expect(series.main == weekly)
+        // The cancellation counts though its mail is in Trash.
+        #expect(series.dates(from: at(9, 0), to: at(23, 0), calendar: la).map(\.start) == [time(at(13, 9))])
+        #expect(try await store.mailOnlyEvents(uid: "lunch").map(\.main) == [lunch])
+        #expect(try await store.mailOnlyEvents(uid: "retro").isEmpty)
+
+        // Once the event is on the calendar, it is no longer only in mail.
+        try await store.applyCalendarList([primary], removed: [], replaceAll: true)
+        try await store.applyEvents([event("e1", "Weekly sync", start: at(5, 9), uid: "weekly")], calendarID: primary.id, window: window, calendar: la)
+        #expect(try await store.mailOnlyEvents().map(\.uid) == ["lunch"])
+    }
+
     @Test func cancelledAndBinnedInvitationsAreNotWaiting() async throws {
         let store = try await seededStore()
         try await store.upsertMessages([

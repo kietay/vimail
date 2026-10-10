@@ -621,16 +621,22 @@ extension MailStore {
     /// Left out: meetings cancelled since (a CANCEL as new or newer, for the whole event or that occurrence), meetings the
     /// sync removed from your calendar (the organizer deleted them, or took you off), and mail in Trash or Spam.
     public func invitationsWithoutEvents() async throws -> [StoredInvitation] {
+        try await read { db in try Self.storedInvitations(where: Self.withoutEvents, [], db) }
+    }
+
+    /// Events known only from mail: those of `invitationsWithoutEvents`, each read together with the cancellations of
+    /// its single dates (which count wherever their mail is, as for whole events). Only `uid`'s event when it is given.
+    public func mailOnlyEvents(uid: String? = nil) async throws -> [InvitedEvent] {
         try await read { db in
-            try Self.storedInvitations(where: """
-                i.method = 'REQUEST' AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ical_uid = i.uid)
-                AND NOT EXISTS (
-                    SELECT 1 FROM invitations c WHERE c.uid = i.uid AND c.method = 'CANCEL' AND c.sequence >= i.sequence
-                        AND (c.recurrence_id IS NULL OR c.recurrence_id = i.recurrence_id)
-                )
-                AND NOT EXISTS (SELECT 1 FROM message_labels l WHERE l.message_id = i.message_id AND l.label_id IN ('TRASH', 'SPAM'))
-                AND NOT EXISTS (SELECT 1 FROM removed_events r WHERE r.uid = i.uid AND r.sequence >= i.sequence)
-                """, [], db)
+            let only = uid == nil ? "" : " AND i.uid = ?"
+            let values: [SQLBindable] = uid.map { [$0] } ?? []
+            let waiting = try Self.storedInvitations(where: Self.withoutEvents + only, values, db)
+            let uids = Set(waiting.compactMap(\.main?.uid))
+            guard !uids.isEmpty else { return [] }
+            let cancelled = try Self.storedInvitations(where: "i.method = 'CANCEL' AND i.recurrence_id IS NOT NULL" + only, values, db)
+                .filter { $0.main.map { uids.contains($0.uid) } ?? false }
+            let files = (waiting + cancelled).sorted { $0.date < $1.date }
+            return InvitedEvent.events(from: files.flatMap(\.invitations).filter { uids.contains($0.uid) })
         }
     }
 
@@ -651,6 +657,17 @@ extension MailStore {
     }
 
     // MARK: - Helpers
+
+    /// `invitationsWithoutEvents`, as a condition on `invitations i`.
+    static let withoutEvents = """
+        i.method = 'REQUEST' AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ical_uid = i.uid)
+        AND NOT EXISTS (
+            SELECT 1 FROM invitations c WHERE c.uid = i.uid AND c.method = 'CANCEL' AND c.sequence >= i.sequence
+                AND (c.recurrence_id IS NULL OR c.recurrence_id = i.recurrence_id)
+        )
+        AND NOT EXISTS (SELECT 1 FROM message_labels l WHERE l.message_id = i.message_id AND l.label_id IN ('TRASH', 'SPAM'))
+        AND NOT EXISTS (SELECT 1 FROM removed_events r WHERE r.uid = i.uid AND r.sequence >= i.sequence)
+        """
 
     static let agendaSelect = """
         SELECT o.calendar_id, o.series_id, o.original_start, o.start_ms, o.end_ms, o.start_day, o.end_day, e.payload

@@ -75,12 +75,13 @@ extension AppModel {
         return info.isPrimary || info.accessRole == .owner
     }
 
-    /// Invitations waiting for your answer: on your own shown calendars, and those only in mail (any date ahead).
-    /// The sidebar count and the calendar view's first group are both this list.
+    /// Invitations waiting for your answer, next first: on your own shown calendars, and those only in mail (each once,
+    /// at its next date). The sidebar count and the calendar view's first group are both this list.
     func waitingItems() async -> [AgendaItem] {
         let now = Date()
         let stored = ((try? await services.store.waitingForAnswer()) ?? []).filter { isShown($0) && isYourCalendar($0.calendarID) }
-        return stored + (await invitationRows(from: now, to: now.addingTimeInterval(400 * 86_400)))
+        let mail = await invitationRows(from: now, to: now.addingTimeInterval(400 * 86_400), nextOnly: true)
+        return (stored + mail).sorted { $0.start.instant() < $1.start.instant() }
     }
 
     /// The sidebar's count of invitations waiting for an answer.
@@ -177,7 +178,8 @@ extension AppModel {
         let message = thread.messages.first { $0.id == file.messageID }
         let earlier = (try? await services.store.invitations(uid: invitation.uid)) ?? []
         let previous = earlier.last { $0.messageID != file.messageID && $0.date < file.date && ($0.main?.sequence ?? 0) <= invitation.sequence }?.main
-        return await eventPage(event: event, invitation: invitation, previous: previous, mail: message)
+        let invited = event == nil && !invitation.recurrence.isEmpty ? await mailOnlyEvent(uid: invitation.uid, files: earlier) : nil
+        return await eventPage(event: event, invitation: invitation, previous: previous, mail: message, invited: invited)
     }
 
     /// The page for an agenda row in the calendar view. Of the invitation mail, only what is about this row counts:
@@ -186,23 +188,40 @@ extension AppModel {
         let uid = item.event.iCalUID
         let files = uid == nil ? [] : ((try? await services.store.invitations(uid: uid!)) ?? [])
         let key = Self.occurrenceKey(of: item)
+        if item.calendarID == Self.mailOnlyCalendarID, let uid {
+            // Only in mail: the page the mail gives, for this date.
+            let invited = await mailOnlyEvent(uid: uid, files: files)
+            return await eventPage(
+                event: nil, invitation: invited.invitation(at: key), previous: nil, mail: nil, occurrence: (item.start, item.end),
+                hasMail: !files.isEmpty, invited: invited
+            )
+        }
         let invitation = files.reversed().lazy.compactMap { file in
             file.invitations.first { !key.isEmpty && $0.recurrenceID?.occurrenceKey == key } ?? file.invitations.first { $0.recurrenceID == nil }
         }.first
         return await eventPage(event: item.event, invitation: invitation, previous: nil, mail: nil, occurrence: (item.start, item.end), hasMail: !files.isEmpty)
     }
 
+    /// `invited`: the event as all its mail tells it, when it is on no calendar (its dates, moved and cancelled ones too).
     func eventPage(
         event: CalendarEvent?, invitation: Invitation?, previous: Invitation?, mail: MailMessage?,
-        occurrence: (start: EventTime, end: EventTime)? = nil, hasMail: Bool = false
+        occurrence: (start: EventTime, end: EventTime)? = nil, hasMail: Bool = false, invited: InvitedEvent? = nil
     ) async -> ReaderPayload.EventPage {
         let now = Date()
         let me = services.store.selfAddresses
+        // A series only in mail: its next dates.
+        var mailDates: [InvitedDate] = []
+        if event == nil, let invitation, !invitation.recurrence.isEmpty {
+            mailDates = await upcomingDates(of: invited ?? InvitedEvent([invitation]), now: now, limit: 8)
+        }
         // Times: the occurrence shown, else the next one of a series, else the invitation's.
         var start = occurrence?.start ?? invitation?.start ?? event?.start ?? .timed(now, timeZone: nil)
         var end = occurrence?.end ?? invitation?.effectiveEnd ?? event?.end ?? start
         if occurrence == nil, let event, event.isSeries || invitation?.recurrence.isEmpty == false,
            let next = try? await services.store.nextOccurrence(calendarID: event.calendarID, eventID: event.recurringEventID ?? event.id, now: now) {
+            start = next.start
+            end = next.end
+        } else if occurrence == nil, let next = mailDates.first {
             start = next.start
             end = next.end
         }
@@ -282,7 +301,7 @@ extension AppModel {
         }
         // A repeating invitation: which of its next 8 dates overlap something you go to.
         if !recurrence.isEmpty, !cancelled, !past, services.calendarEngine != nil, answerable || event == nil {
-            let clashes = await seriesClashes(event: event, invitation: invitation, now: now)
+            let clashes = await seriesClashes(event: event, invitation: invitation, mailDates: mailDates, now: now)
             if !clashes.isEmpty {
                 page.chips.append(.init(text: "\(clashes.count) of the next 8 overlap", kind: "clash"))
                 page.facts.append(.init(label: "Overlaps", value: clashes.prefix(3).joined(separator: " · ") + (clashes.count > 3 ? " · \(clashes.count - 3) more" : "")))
@@ -298,23 +317,16 @@ extension AppModel {
         return page
     }
 
-    /// The next 8 dates of a series (from the calendar, or the invitation when it is not on the calendar)
+    /// The next 8 dates of a series (from the calendar, or `mailDates` when it is only in mail)
     /// that overlap a busy event you have not declined: "Tue Oct 13 with Design sync".
-    private func seriesClashes(event: CalendarEvent?, invitation: Invitation?, now: Date) async -> [String] {
+    private func seriesClashes(event: CalendarEvent?, invitation: Invitation?, mailDates: [InvitedDate], now: Date) async -> [String] {
         var dates: [(start: Date, end: Date)] = []
         if let event {
             let seriesID = event.recurringEventID ?? event.id
             let items = (try? await services.store.occurrences(calendarID: event.calendarID, seriesID: seriesID, from: now, limit: 8)) ?? []
             dates = items.filter { !$0.start.isAllDay }.map { ($0.start.instant(), $0.end.instant()) }
-        } else if let invitation, !invitation.start.isAllDay {
-            // The rule comes from mail: worked out away from the main thread.
-            let occurrences = await Task.detached(priority: .userInitiated) {
-                Recurrence.occurrences(
-                    start: invitation.start, end: invitation.effectiveEnd, recurrence: invitation.recurrence, from: now,
-                    to: now.addingTimeInterval(400 * 86_400), calendar: .current
-                ) ?? []
-            }.value
-            dates = occurrences.prefix(8).map { ($0.start.instant(), $0.end.instant()) }
+        } else {
+            dates = mailDates.filter { !$0.start.isAllDay }.map { ($0.start.instant(), $0.end.instant()) }
         }
         let seriesID = event.map { $0.recurringEventID ?? $0.id }
         var clashes: [String] = []
@@ -659,14 +671,9 @@ extension AppModel {
                               let next = try? await services.store.nextOccurrence(calendarID: event.calendarID, eventID: event.id) {
                         start = next.start.instant()
                     } else if event == nil, !invitation.recurrence.isEmpty {
-                        let now = Date()
-                        let next = await Task.detached(priority: .userInitiated) {
-                            Recurrence.occurrences(
-                                start: invitation.start, end: invitation.effectiveEnd, recurrence: invitation.recurrence, from: now,
-                                to: now.addingTimeInterval(400 * 86_400), calendar: .current
-                            )?.first
-                        }.value
-                        if let next { start = next.start.instant() }
+                        // Only in mail: its next date, as the event page shows it.
+                        let invited = await mailOnlyEvent(uid: invitation.uid)
+                        if let next = await upcomingDates(of: invited, now: Date(), limit: 1).first { start = next.start.instant() }
                     }
                     // Rows carry the series' ID for an occurrence not changed yet; a mail-only row is found by its UID.
                     let wanted = event.map { $0.recurringEventID ?? $0.id } ?? "uid:\(invitation.uid)"
@@ -729,22 +736,45 @@ extension AppModel {
     /// The calendar ID of agenda rows that come from an invitation in mail, not from a calendar.
     static let mailOnlyCalendarID = "mail"
 
-    /// Invitations in mail that are on no calendar, as agenda rows (dashed, "from mail").
-    private func invitationRows(from start: Date, to end: Date) async -> [AgendaItem] {
-        guard let files = try? await services.store.invitationsWithoutEvents() else { return [] }
-        let now = Date()
-        var seen = Set<String>()
-        return files.reversed().compactMap { file -> AgendaItem? in
-            guard let invitation = file.main, !invitation.isCancellation, seen.insert(invitation.uid).inserted else { return nil }
-            let itemEnd = invitation.effectiveEnd
-            guard itemEnd.instant() > max(start, now), invitation.start.instant() < end else { return nil }
-            let event = CalendarEvent(
-                id: "mail-\(file.messageID)", calendarID: Self.mailOnlyCalendarID, iCalUID: invitation.uid, summary: invitation.summary,
-                details: invitation.details, location: invitation.location, start: invitation.start, end: itemEnd,
-                organizer: invitation.organizer, attendees: invitation.attendees, conferenceURL: invitation.conferenceURL
-            )
-            return AgendaItem(calendarID: Self.mailOnlyCalendarID, event: event, seriesID: nil, originalStart: "", start: invitation.start, end: itemEnd)
-        }
+    /// Invitations in mail that are on no calendar, as agenda rows (dashed, "from mail"): each of their dates in
+    /// [start, end) that has not ended, every date of a repeating one. With `nextOnly`, one row each: its next date.
+    private func invitationRows(from start: Date, to end: Date, nextOnly: Bool = false) async -> [AgendaItem] {
+        guard let events = try? await services.store.mailOnlyEvents(), !events.isEmpty else { return [] }
+        let from = max(start, Date())
+        // Repeating invitations are worked out away from the main thread, a few hundred dates at most.
+        let dates = await Task.detached(priority: .userInitiated) {
+            events.map { $0.dates(from: from, to: end, limit: nextOnly ? 1 : 300, calendar: .current) }
+        }.value
+        return zip(events, dates).flatMap { event, dates in dates.map { Self.mailOnlyRow($0, uid: event.uid) } }
+    }
+
+    /// One date of an invitation only in mail, as an agenda row. A series' rows share its ID and carry their date's key,
+    /// so each date is a row of its own.
+    private static func mailOnlyRow(_ date: InvitedDate, uid: String) -> AgendaItem {
+        let invitation = date.invitation
+        let id = "mail-\(uid)"
+        let event = CalendarEvent(
+            id: id, calendarID: mailOnlyCalendarID, iCalUID: uid, summary: invitation.summary, details: invitation.details,
+            location: invitation.location, start: date.start, end: date.end, organizer: invitation.organizer,
+            attendees: invitation.attendees, conferenceURL: invitation.conferenceURL
+        )
+        return AgendaItem(
+            calendarID: mailOnlyCalendarID, event: event, seriesID: date.key.isEmpty ? nil : id, originalStart: date.key, start: date.start, end: date.end
+        )
+    }
+
+    /// An invitation only in mail, as its mail tells it: from the mail that waits for an answer (as the calendar view
+    /// lists it), else from all mail with its UID (`files`, when already read).
+    private func mailOnlyEvent(uid: String, files: [StoredInvitation]? = nil) async -> InvitedEvent {
+        if let waiting = try? await services.store.mailOnlyEvents(uid: uid).first { return waiting }
+        var all = files ?? []
+        if files == nil { all = (try? await services.store.invitations(uid: uid)) ?? [] }
+        return InvitedEvent(all.flatMap(\.invitations).filter { $0.uid == uid })
+    }
+
+    /// The next dates of an invitation only in mail, worked out away from the main thread.
+    private func upcomingDates(of event: InvitedEvent, now: Date, limit: Int) async -> [InvitedDate] {
+        await Task.detached(priority: .userInitiated) { event.upcoming(now: now, limit: limit) }.value
     }
 
     func reloadAgenda() async {
@@ -920,7 +950,9 @@ extension AppModel {
             var target: CalendarEvent?
             var oneDay = false
             if item.calendarID == Self.mailOnlyCalendarID {
-                guard let uid = item.event.iCalUID, let invitation = (try? await services.store.invitations(uid: uid))?.last?.main else { return }
+                // Any date of a series answers the series (that is the invitation); a date the mail names on its own, that date.
+                guard let uid = item.event.iCalUID,
+                      let invitation = await mailOnlyEvent(uid: uid).invitationToAnswer(at: Self.occurrenceKey(of: item)) else { return }
                 switch await lookUpEvent(for: invitation) {
                 case .found(let event): target = event
                 case .missing:
@@ -1005,10 +1037,11 @@ extension AppModel {
         openCompose(Draft(to: recipients, subject: event.summary))
     }
 
-    /// Enter in the calendar: your own events open in the editor; others focus the reader.
+    /// Enter in the calendar: your own events open in the editor; others, and invitations only in mail, focus the reader.
     func openAgendaItem() {
         guard let item = currentAgendaItem else { return }
-        if item.event.organizerIsSelf, calendars.first(where: { $0.id == item.calendarID })?.canEdit ?? true, services.calendarCanChange {
+        if item.calendarID != Self.mailOnlyCalendarID, item.event.organizerIsSelf,
+           calendars.first(where: { $0.id == item.calendarID })?.canEdit ?? true, services.calendarCanChange {
             editEvent(item)
         } else {
             focus = .reader

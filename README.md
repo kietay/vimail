@@ -83,14 +83,16 @@ them with one key, and you create events from one typed line. Everything works o
   "find a time"; debug builds ask for `calendar.events.readonly` instead of `calendar.events`).
 - **Invitations.** When the cursor reaches an invitation, the reader shows the event instead of the email: time,
   join link, organizer, every guest's answer, the agenda, and your day beside it with the invitation dashed and
-  overlaps in red. `{` `}` show the day before or after. A repeating invitation also says how many of its next
-  8 dates overlap. `Y` `M` `N` answer yes, maybe or no; `R` adds a note. An invitation to one changed date of a
+  overlaps in red. `{` `}` show the day before or after. A repeating invitation shows its next date and says how many
+  of its next 8 dates overlap. `Y` `M` `N` answer yes, maybe or no; `R` adds a note. An invitation to one changed date of a
   series answers only that date. An invitation Google keeps off your calendar until you answer (from someone it
   does not know) is looked up when you answer it. A join link is used only when it is a web link (`https://`).
   With *Archive invitations after answering* on (Settings → Calendar), the mail is archived and the cursor moves on,
   and one `u` takes back both. The answer leaves after the undo-send window. `O` shows the original email.
 - **Calendar view.** `gc` (from an invitation: at its event). Invitations waiting for your answer come first, then
-  two weeks of days. `j` `k` move, `{` `}` `[` `]` change the day or week, `t` is today, `↵` edits your own event,
+  two weeks of days. Invitations that are only in mail (not on your Google Calendar) are dashed. A repeating one is on
+  each of its days, with the days later mail moved or cancelled, and waits once, at its next day; answering any of its
+  days answers the series. `j` `k` move, `{` `}` `[` `]` change the day or week, `t` is today, `↵` edits your own event,
   `r` `a` email the organizer or the guests, `#` cancels your event or declines an invitation, `gm` opens the
   invitation mail, `gj` joins the meeting. The status bar shows your next meeting; `gj` joins it from the list or the reader too.
 - **Repeating events, one day at a time.** On a day of a series, `#` removes or declines only that day (the editor's
