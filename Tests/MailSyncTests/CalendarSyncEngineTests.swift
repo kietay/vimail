@@ -201,6 +201,37 @@ struct CalendarSyncEngineTests {
         }
     }
 
+    @Test func theNewSeriesIsNewToGoogleAndAsksForItsOwnMeetLink() async throws {
+        let harness = try await CalendarHarness()
+        let zone = TimeZone.current.identifier
+        let first = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: harness.nextMonday)!
+        let cut = EventTime.timed(Calendar.current.date(byAdding: .day, value: 14, to: first)!, timeZone: zone)
+        /// Whether the create of the series that takes over asks for a join link of its own.
+        func asksForLink(link: String, location: String?) async throws -> Bool? {
+            var series = CalendarEvent(
+                id: CalendarActions.newEventID(), calendarID: sam.email, iCalUID: "planning@google.com", summary: "Planning", location: location,
+                start: .timed(first, timeZone: zone), end: .timed(first.addingTimeInterval(1800), timeZone: zone), recurrence: ["RRULE:FREQ=WEEKLY"],
+                conferenceURL: link, etag: "\"7\"", sequence: 3
+            )
+            series.htmlLink = "https://calendar.example.com/event?eid=1"
+            guard case .split(let before, let after)? = Recurrence.split(recurrence: series.recurrence, seriesStart: series.start, at: cut, calendar: .current)
+            else { return nil }
+            var following = CalendarActions.followingSeries(of: series)
+            #expect(following.id != series.id && following.iCalUID == nil && following.etag == nil && following.htmlLink == nil && following.sequence == 0)
+            #expect(following.summary == "Planning" && following.conferenceURL == link)
+            following.start = cut
+            following.recurrence = after
+            let records = try await harness.actions.split(series, at: cut, keeping: before, following: following, sendUpdates: .none, undoWindow: 60)
+            let item = try await harness.store.calendarOutboxItems().first { $0.id == records.last?.outboxID }
+            guard case .insert(let created, _, let conference)? = item?.operation, created.id == following.id else { return nil }
+            return conference
+        }
+        // vimail keeps Google's link, not its conference: the new series gets a Meet link of its own.
+        #expect(try await asksForLink(link: "https://meet.google.com/abc-defg-hij", location: nil) == true)
+        // A link written in the place goes along with it.
+        #expect(try await asksForLink(link: "https://zoom.us/j/123", location: "https://zoom.us/j/123") == false)
+    }
+
     @Test func undoOfAnOccurrenceChangeThatNeverLeftLeavesNoException() async throws {
         let harness = try await CalendarHarness()
         #expect(await harness.engine.cycle())
