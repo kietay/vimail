@@ -462,8 +462,11 @@ extension AppModel {
             }
             (start, end) = (parsedStart, parsedEnd)
         }
+        // This and following takes the times as typed (the new series' first event), on the old series' clock.
+        if cut != nil, let series = editor.original {
+            (start, end) = Recurrence.followingTimes(start: start, end: end, seriesStart: series.start, seriesEnd: series.end)
+        }
         // All events, opened on one occurrence: the series moves by the same change, on its own days.
-        // (This and following takes the times as typed: they are the new series' first event.)
         if let occurrence = editor.occurrence, let series = editor.original, scope == .allEvents {
             if editor.keptTimes != nil {
                 (start, end) = (series.start, series.end)

@@ -884,6 +884,8 @@ struct RecurrenceSplitTests {
         #expect(split(skipped, first: first, at: .timed(at(2026, 10, 20, 9), timeZone: laID))?.before.first == "RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261020T155959Z")
         let allDay = EventTime.allDay(day("2026-10-02"))
         #expect(Recurrence.split(recurrence: ["RRULE:FREQ=WEEKLY"], seriesStart: allDay, at: allDay, calendar: la) == .wholeSeries)
+        // One event alone has nothing after it.
+        #expect(Recurrence.split(recurrence: [], seriesStart: first, at: .timed(at(2026, 10, 13, 9), timeZone: laID), calendar: la) == .wholeSeries)
     }
 
     /// A 09:00 Los Angeles series cut after the clocks went back on Nov 1: 09:00 is 17:00 UTC there, not 16:00.
@@ -904,6 +906,25 @@ struct RecurrenceSplitTests {
         let mondays = try #require(split(["RRULE:FREQ=WEEKLY;BYDAY=MO"], first: .timed(at(2026, 10, 5, 9), timeZone: laID), at: .timed(at(2026, 11, 9, 9), timeZone: laID)))
         #expect(mondays.before == ["RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20261109T165959Z"])
         #expect(starts(mondays.before, first: at(2026, 10, 5, 9), from: at(2026, 10, 1), to: at(2027, 1, 1))?.last == utc("2026-11-02T17:00:00Z"))
+    }
+
+    @Test func theNewSeriesRepeatsOnTheOldSeriesClock() {
+        // A Phoenix series (no daylight time) seen from Los Angeles: 10:00 typed here in February is 11:00 in Phoenix.
+        let phoenix = "America/Phoenix"
+        let series = (EventTime.timed(at(2027, 1, 4, 9, zone: phoenix), timeZone: phoenix), EventTime.timed(at(2027, 1, 4, 10, zone: phoenix), timeZone: phoenix))
+        let times = Recurrence.followingTimes(
+            start: .timed(at(2027, 2, 1, 10), timeZone: laID), end: .timed(at(2027, 2, 1, 11), timeZone: laID), seriesStart: series.0, seriesEnd: series.1
+        )
+        #expect(times.start == .timed(at(2027, 2, 1, 10), timeZone: phoenix))
+        #expect(times.end == .timed(at(2027, 2, 1, 11), timeZone: phoenix))
+        // Once Los Angeles has changed its clocks, it still meets at 11:00 in Phoenix, which is 11:00 here too.
+        let march = Recurrence.occurrences(
+            start: times.start, end: times.end, recurrence: ["RRULE:FREQ=WEEKLY"], from: at(2027, 3, 15), to: at(2027, 3, 16), calendar: la
+        )?.compactMap(\.start.date)
+        #expect(march == [at(2027, 3, 15, 11)])
+        // Whole days have no clock.
+        let allDay = Recurrence.followingTimes(start: .allDay(day("2027-02-01")), end: .allDay(day("2027-02-02")), seriesStart: series.0, seriesEnd: series.1)
+        #expect(allDay.start == .allDay(day("2027-02-01")) && allDay.end == .allDay(day("2027-02-02")))
     }
 
     @Test func aCountThatCannotBeCountedHereIsRefused() {

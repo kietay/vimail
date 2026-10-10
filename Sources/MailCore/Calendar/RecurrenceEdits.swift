@@ -51,7 +51,8 @@ extension Recurrence {
 extension Recurrence {
     /// Where "this and following" cuts a series.
     public enum Split: Hashable, Sendable {
-        /// Nothing of the series comes before the day (it is the first): every event changes, as for all events.
+        /// Nothing of the series comes before the day (it is the first, or the event does not repeat): every event
+        /// changes, as for all events.
         case wholeSeries
         /// The series keeps `before`: its rules end the moment before the day, and the days it skips or adds from then on
         /// are gone. A new series starts that day with `after`: the same rules (COUNT less the events before, UNTIL as it
@@ -70,7 +71,8 @@ extension Recurrence {
         // The events before the cut, as `occurrences` windows them.
         let from = seriesStart.instant(in: viewer)
         let to = series.isAllDay ? day.start(in: viewer) : cut
-        guard cut > series.first else { return .wholeSeries }
+        // Without rules or added days there is one event, so nothing follows it either.
+        guard cut > series.first, recurrence.contains(where: { ["RRULE", "RDATE"].contains(propertyName($0)) }) else { return .wholeSeries }
         // The first day always comes before the cut, unless an EXDATE takes it away: then another day has to.
         let excluded = recurrence.filter { propertyName($0) == "EXDATE" }.compactMap(parseDates).flatMap(\.stamps)
         if series.exclusions(excluded).contains(series.first),
@@ -114,6 +116,16 @@ extension Recurrence {
             }
         }
         return .split(before: before, after: after)
+    }
+
+    /// The first event of the series that takes over ("this and following"): the times as typed, kept on the old series'
+    /// clock (its zone), so the new series repeats at the same time as the old one did. All-day times stay as they are.
+    public static func followingTimes(start: EventTime, end: EventTime, seriesStart: EventTime, seriesEnd: EventTime) -> (start: EventTime, end: EventTime) {
+        func zoned(_ time: EventTime, _ zone: String?) -> EventTime {
+            guard case .timed(let date, let own) = time else { return time }
+            return .timed(date, timeZone: zone ?? own)
+        }
+        return (zoned(start, seriesStart.timeZone), zoned(end, seriesEnd.timeZone ?? seriesStart.timeZone))
     }
 
     /// An EXDATE or RDATE line as the old series keeps it (its values before the cut) and as the new one takes it (the
