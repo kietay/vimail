@@ -71,6 +71,21 @@ struct SearchQueryTests {
         let narrowed = ThreadQuery(scope: .anywhere).narrowed(by: query)
         #expect(narrowed.excludedSenders == ["linear"] && narrowed.excludedLabelNames == ["work"] && narrowed.isList == true)
     }
+
+    @Test func organizerMeCombinesWithInvitationTerms() {
+        let answers = SearchQuery.parse("invite:reply organizer:me")
+        #expect(answers.invitation == .reply)
+        #expect(answers.organizedByMe == true)
+        #expect(answers.terms.isEmpty)
+        #expect(SearchQuery.parse("organizer:ME").organizedByMe == true)
+        // Only "me" is known; another organizer is searched as text.
+        let other = SearchQuery.parse("organizer:alex")
+        #expect(other.organizedByMe == nil)
+        #expect(other.terms == ["organizer:alex"])
+        let query = ThreadQuery.mailbox(.inbox).narrowed(by: answers)
+        #expect(query.organizedByMe == true && query.invitation == .reply)
+        #expect(ThreadQuery.mailbox(.inbox).narrowed(by: other).organizedByMe == nil)
+    }
 }
 
 @Suite("Replies")

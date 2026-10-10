@@ -124,22 +124,12 @@ struct ComposeView: View {
 
     /// Finished recipients as pills, then the text field for the one being typed.
     private func addressRow<Trailing: View>(_ title: String, input: Binding<String>, field: FocusTarget, @ViewBuilder trailing: () -> Trailing) -> some View {
-        let recipients = compose.recipients(field)
-        return HStack(alignment: .top, spacing: 16) {
+        HStack(alignment: .top, spacing: 16) {
             Text(title).font(AppFonts.sans(12)).foregroundStyle(theme.mutedForeground)
                 .frame(width: 52, height: RecipientFlow.lineHeight, alignment: .leading)
-            RecipientFlow {
-                ForEach(recipients, id: \.normalized) { address in
-                    RecipientPill(address: address) { compose.removeRecipient(address, from: field) }
-                }
-                TextField("", text: input, prompt: recipients.isEmpty ? Text("name@example.com").foregroundColor(theme.mutedForeground.opacity(0.6)) : nil)
-                    .textFieldStyle(.plain)
-                    .font(AppFonts.sans(13))
-                    .foregroundStyle(theme.foreground)
-                    .focused($focus, equals: field)
+            RecipientInput(addresses: compose.recipients(field), text: input, prompt: "name@example.com", field: field, focus: $focus) { address in
+                compose.removeRecipient(address, from: field)
             }
-            .contentShape(Rectangle())
-            .onTapGesture { focus = field }
             trailing().frame(height: RecipientFlow.lineHeight)
         }
         .padding(.horizontal, 24)
@@ -150,39 +140,15 @@ struct ComposeView: View {
                 // Just below the row, however many lines of pills it has. The zero-height frame
                 // hangs the list from the row's bottom edge. An alignment guide does not work here:
                 // SwiftUI ignores it inside this `if`, and the list covers the header.
-                suggestionList(for: field)
-                    .padding(.top, 2)
-                    .frame(height: 0, alignment: .top)
-                    .offset(x: 92)
+                RecipientSuggestions(suggestions: compose.suggestions.items, highlighted: compose.suggestions.index) { index in
+                    compose.acceptSuggestion(for: field, index: index)
+                }
+                .padding(.top, 2)
+                .frame(height: 0, alignment: .top)
+                .offset(x: 92)
             }
         }
         .zIndex(focus == field ? 3 : 1)
-    }
-
-    private func suggestionList(for target: FocusTarget) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            ForEach(Array(compose.suggestions.enumerated()), id: \.element.normalized) { index, address in
-                HStack(spacing: 10) {
-                    Text(address.initials).font(AppFonts.mono(9)).foregroundStyle(theme.mutedForeground)
-                        .frame(width: 22, height: 22).background(theme.muted, in: Circle())
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(address.displayName).font(AppFonts.sans(12)).foregroundStyle(theme.foreground)
-                        if address.name != nil { Text(address.email).font(AppFonts.sans(10)).foregroundStyle(theme.mutedForeground) }
-                    }
-                    Spacer()
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(index == compose.suggestionIndex ? theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
-                .contentShape(Rectangle())
-                .onTapGesture { compose.acceptSuggestion(for: target, index: index) }
-            }
-        }
-        .padding(6)
-        .frame(width: 320)
-        .background(theme.reader, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.border, lineWidth: 1))
-        .shadow(color: .black.opacity(0.3), radius: 16, y: 8)
     }
 
     private func smallToggle(_ title: String, action: @escaping () -> Void) -> some View {
@@ -212,7 +178,7 @@ struct ComposeView: View {
                     .onAppear {
                         guard compose.focusBodyOnAppear else { return }
                         compose.focusBodyOnAppear = false
-                        Task { await focusBodyTextView() }
+                        Task { await MainWindow.focusTextView() }
                     }
                 if compose.draft.body.isEmpty {
                     Text("Write a message…")
@@ -224,19 +190,6 @@ struct ComposeView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    /// Focuses the body after the embedded editor quits (:wq). SwiftUI drops focus requests made
-    /// before the new text view is in the window, so this waits for it and asks AppKit, like a
-    /// click does. SwiftUI's focus state follows.
-    private func focusBodyTextView() async {
-        for _ in 0..<40 {
-            if let textView = MainWindow.shared?.contentView?.firstDescendant(of: NSTextView.self, where: { !$0.isFieldEditor && $0.isEditable }) {
-                textView.window?.makeFirstResponder(textView)
-                return
-            }
-            try? await Task.sleep(for: .milliseconds(25))
         }
     }
 
@@ -378,10 +331,32 @@ struct ComposeView: View {
 /// Shows the outgoing HTML on a white page, like a recipient's mail client.
 struct PreviewWebView: NSViewRepresentable {
     let html: String
+    var policy = Policy.mail
+
+    /// What the page may load and do.
+    enum Policy {
+        /// Compose: images from the web too, as recipients' mail clients show them (a signature's logo).
+        case mail
+        /// The event editor: no scripts, no images from the web, and no page but this one. A description stored with
+        /// the event can hold HTML written elsewhere; links still open in the browser.
+        case strict
+
+        var contentSecurity: String {
+            switch self {
+            case .mail: "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: https: http:;"
+            case .strict: "default-src 'none'; style-src 'unsafe-inline'; img-src data:;"
+            }
+        }
+    }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         var loaded = false
         var pending: String?
+        let policy: Policy
+
+        init(policy: Policy) {
+            self.policy = policy
+        }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             loaded = true
@@ -390,7 +365,10 @@ struct PreviewWebView: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
             if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
-                NSWorkspace.shared.open(url)
+                if policy == .mail || ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") { NSWorkspace.shared.open(url) }
+                decisionHandler(.cancel)
+            } else if policy == .strict, loaded {
+                // HTML put in the page can still navigate it (<meta http-equiv="refresh">): only the page itself loads.
                 decisionHandler(.cancel)
             } else {
                 decisionHandler(.allow)
@@ -398,7 +376,7 @@ struct PreviewWebView: NSViewRepresentable {
         }
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(policy: policy) }
 
     func makeNSView(context: Context) -> WKWebView {
         let view = WKWebView()
@@ -406,7 +384,7 @@ struct PreviewWebView: NSViewRepresentable {
         view.setValue(false, forKey: "drawsBackground")
         let page = """
         <!doctype html><html><head><meta charset="utf-8">
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: https: http:;">
+        <meta http-equiv="Content-Security-Policy" content="\(policy.contentSecurity)">
         <style>html,body{margin:0;background:#ffffff;color-scheme:light;}#mail{padding:20px 22px;}</style></head>
         <body><div id="mail"></div></body></html>
         """

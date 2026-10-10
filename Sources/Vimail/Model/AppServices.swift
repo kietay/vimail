@@ -19,6 +19,15 @@ final class AppServices {
     let rules: RuleEngine
     /// Debug builds with Gmail: where changes and sends are logged instead of reaching Gmail.
     let dryRunDirectory: URL?
+    /// Nil when the account has not granted calendar access (Gmail without calendar scopes).
+    let calendarProvider: (any CalendarProvider)?
+    let dummyCalendar: DummyCalendarProvider?
+    let calendarEngine: CalendarSyncEngine?
+    let calendarActions: CalendarActions
+    /// Reads invitation files from mail, with or without calendar access.
+    let invitations: InvitationIndexer
+    /// True when the account can change its calendar (answers, creates); false for read-only access.
+    let calendarCanChange: Bool
 
     /// Debug builds read real mail with real spend: each run over stored mail takes at most this many messages.
     static var runMessageLimit: Int? {
@@ -30,6 +39,9 @@ final class AppServices {
     }
 
     init(settings: AppSettings, ai: AIServices) throws {
+        var calendarProvider: (any CalendarProvider)?
+        var dummyCalendar: DummyCalendarProvider?
+        var calendarCanChange = false
         switch settings.dataSource {
         case .dummy:
             accountKey = "dummy"
@@ -37,6 +49,12 @@ final class AppServices {
             self.dummy = dummy
             provider = dummy
             dryRunDirectory = nil
+            let calendar = DummyCalendarProvider(directory: AppPaths.dummyServer, configuration: Self.dummyCalendarConfiguration(settings)) {
+                (try? await dummy.invites()) ?? []
+            }
+            dummyCalendar = calendar
+            calendarProvider = calendar
+            calendarCanChange = true
         case .gmail:
             var credential = GmailAccounts.credential(email: settings.gmailAccount)
             var key = GmailAccounts.accountKey(email: settings.gmailAccount)
@@ -49,16 +67,24 @@ final class AppServices {
             accountKey = key
             dummy = nil
             let gmail = GmailProvider(credential: credential)
+            let calendar = credential.flatMap { CalendarScope.allowsReading($0.scopes) ? GoogleCalendarProvider(credential: $0) : nil }
             #if DEBUG
             // Test builds read real mail but never change it: every change and send stays on this Mac.
             let directory = AppPaths.dryRun(account: key)
             provider = DryRunProvider(wrapping: gmail, directory: directory)
             dryRunDirectory = directory
+            calendarProvider = calendar.map { DryRunCalendarProvider(wrapping: $0, directory: directory) }
+            calendarCanChange = calendar != nil
             #else
             provider = gmail
             dryRunDirectory = nil
+            calendarProvider = calendar
+            calendarCanChange = credential.map { CalendarScope.allowsChanges($0.scopes) } ?? false
             #endif
         }
+        self.calendarProvider = calendarProvider
+        self.dummyCalendar = dummyCalendar
+        self.calendarCanChange = calendarCanChange
         Log("app").info("Opening account \(accountKey) (\(provider.kind)\(dryRunDirectory == nil ? "" : ", dry run: changes stay on this Mac"))")
         store = try MailStore(url: AppPaths.database(account: accountKey))
         let engine = SyncEngine(
@@ -72,6 +98,11 @@ final class AppServices {
             store: store, judge: ai.judge(forAccount: accountKey), config: ai.judgeConfig, simulatedSync: dryRunDirectory != nil,
             runMessageLimit: Self.runMessageLimit, spend: ai.spendFigures, outboxChanged: { engine.wake() }
         )
+        let calendarEngine: CalendarSyncEngine?
+        if let calendarProvider { calendarEngine = CalendarSyncEngine(provider: calendarProvider, store: store) } else { calendarEngine = nil }
+        self.calendarEngine = calendarEngine
+        calendarActions = CalendarActions(store: store, changed: { calendarEngine?.wake() }, mailChanged: { engine.wake() })
+        invitations = InvitationIndexer(store: store, provider: provider, found: { calendarEngine?.wake() })
     }
 
     var isGmail: Bool { dummy == nil }
@@ -84,6 +115,8 @@ final class AppServices {
         await setRulesPaused(paused)
         await rules.start()
         await dummy?.startSimulation()
+        await calendarEngine?.start()
+        await invitations.start()
     }
 
     /// The key, the model, consent or a budget changed: the rules get the judge and Claude's state.
@@ -105,11 +138,22 @@ final class AppServices {
         await engine.stop()
         await rules.stop()
         await dummy?.stopSimulation()
+        await calendarEngine?.stop()
+        await invitations.stop()
     }
 
     func apply(_ settings: AppSettings) async {
         await dummy?.configure(Self.dummyConfiguration(settings))
+        await dummyCalendar?.configure(Self.dummyCalendarConfiguration(settings))
         await engine.setPollInterval(.seconds(max(5, settings.pollSeconds)))
+    }
+
+    static func dummyCalendarConfiguration(_ settings: AppSettings) -> DummyCalendarProvider.Configuration {
+        var configuration = DummyCalendarProvider.Configuration()
+        let latency = max(0, settings.dummyLatencyMilliseconds)
+        configuration.latency = (latency / 3)...max(latency / 3, latency)
+        configuration.failureRate = min(max(settings.dummyFailureRate, 0), 1)
+        return configuration
     }
 
     static func dummyConfiguration(_ settings: AppSettings) -> DummyMailProvider.Configuration {

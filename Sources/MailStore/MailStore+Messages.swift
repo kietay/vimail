@@ -311,6 +311,7 @@ extension MailStore {
         for table in ["rule_queue", "rule_decisions", "rule_ledger", "label_marks", "rule_examples", "verdicts"] {
             try db.run("DELETE FROM \(table) WHERE message_id = ?", [id])
         }
+        try db.run("DELETE FROM invitations WHERE message_id = ?", [id])
         try db.run("DELETE FROM messages WHERE id = ?", [id])
         for (runID, failed) in queued {
             try db.run("UPDATE rule_runs SET total = MAX(total - 1, 0), failed = MAX(failed - ?, 0) WHERE id = ?", [failed ? 1 : 0, runID])

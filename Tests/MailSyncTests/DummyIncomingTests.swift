@@ -9,7 +9,8 @@ struct DummyIncomingTests {
     /// What kind of mail an incoming message is, by its sender and headers.
     func kind(_ message: MailMessage) -> String {
         if message.from.normalized == DummyContent.stripe.address.normalized { return "receipt" }
-        if message.from.normalized == DummyContent.calendar.address.normalized { return "invite" }
+        // Invitations come from their organizer, as Google sends them, with the event as an invite.ics file.
+        if message.attachments.contains(where: { $0.filename == "invite.ics" }) { return "invite" }
         if message.listUnsubscribe != nil { return "newsletter" }
         if DummyContent.people.contains(where: { $0.address.normalized == message.from.normalized }) { return "person" }
         return "notification"

@@ -123,12 +123,15 @@ public struct OutgoingMessage: Hashable, Codable, Sendable {
     /// The RFC 5322 Message-ID, fixed when the message is queued so retries can detect a send
     /// that already arrived. Nil for messages queued before this field existed.
     public var messageID: String?
+    /// An answer to an invitation that the organizer's calendar reads (iMIP), sent next to the text.
+    /// Nil for other mail, and for messages queued before this field existed.
+    public var calendar: CalendarPart?
 
     public init(
         from: EmailAddress, to: [EmailAddress], cc: [EmailAddress] = [], bcc: [EmailAddress] = [],
         subject: String, textBody: String, htmlBody: String? = nil, threadID: String? = nil,
         inReplyTo: String? = nil, references: [String] = [], attachments: [DraftAttachment] = [],
-        messageID: String? = nil
+        messageID: String? = nil, calendar: CalendarPart? = nil
     ) {
         self.from = from
         self.to = to
@@ -142,5 +145,19 @@ public struct OutgoingMessage: Hashable, Codable, Sendable {
         self.references = references
         self.attachments = attachments
         self.messageID = messageID
+        self.calendar = calendar
+    }
+}
+
+/// An iCalendar object sent as a `text/calendar` part of an email (iMIP, RFC 6047), such as an answer to an invitation.
+public struct CalendarPart: Hashable, Codable, Sendable {
+    /// The iTIP method the part's Content-Type names, for example "REPLY".
+    public var method: String
+    /// The iCalendar text, with CRLF line ends.
+    public var text: String
+
+    public init(method: String, text: String) {
+        self.method = method
+        self.text = text
     }
 }

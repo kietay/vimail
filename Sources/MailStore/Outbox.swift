@@ -29,6 +29,9 @@ public enum OutboxOperation: Hashable, Codable, Sendable {
     case deleteLabel(id: String)
     /// Leaves a mailing list. Queued with a delay that gives time to undo, like a send.
     case unsubscribe(UnsubscribeRequest)
+    /// Answers an invitation that is not on Google Calendar by email (iMIP). Queued with a delay that gives time to
+    /// undo, like a send; a refusal puts back the answer before it.
+    case invitationReply(InvitationReply)
 
     /// For logs: the kind and size, never subjects or addresses.
     public var logDescription: String {
@@ -44,6 +47,7 @@ public enum OutboxOperation: Hashable, Codable, Sendable {
             case .oneClick: "unsubscribe (one-click)"
             case .email(let message): "unsubscribe (email \(message.messageID ?? "message"))"
             }
+        case .invitationReply(let reply): "answer \(reply.answer.response.rawValue) by email \(reply.message.messageID ?? "message")"
         }
     }
 
@@ -56,6 +60,7 @@ public enum OutboxOperation: Hashable, Codable, Sendable {
         case .renameLabel(_, let name): "rename label to \(name)"
         case .deleteLabel: "delete label"
         case .unsubscribe(let request): "unsubscribe from \(request.list)"
+        case .invitationReply(let reply): "answer \"\(reply.summary)\" by email"
         }
     }
 }

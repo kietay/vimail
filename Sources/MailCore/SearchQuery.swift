@@ -5,8 +5,18 @@ import Foundation
 /// Supported: free words (prefix match), `"exact phrase"`, `-excluded`, `from:`, `-from:`, `to:`, `subject:`,
 /// `label:`, `-label:`, `in:inbox|sent|trash|spam|starred|snoozed|drafts|archive|anywhere`,
 /// `is:unread|read|starred|list`, `has:attachment`, `before:YYYY-MM-DD`, `after:YYYY-MM-DD`,
-/// `older_than:3d|2w|1m|1y`, `newer_than:...`.
+/// `older_than:3d|2w|1m|1y`, `newer_than:...`, and for calendar mail `has:invite`,
+/// `invite:request|update|cancel|reply|pending|conflict` and `organizer:me`.
 public struct SearchQuery: Hashable, Sendable {
+    /// Which calendar mail to find: any invitation file, or one kind of it.
+    public enum InvitationFilter: String, Hashable, Sendable {
+        case any, request, update, cancel, reply
+        /// Invitations you have not answered yet.
+        case pending
+        /// Invitations whose time overlaps an event you go to (in the next 60 days).
+        case conflict
+    }
+
     public var terms: [String] = []
     public var phrases: [String] = []
     public var excluded: [String] = []
@@ -24,6 +34,9 @@ public struct SearchQuery: Hashable, Sendable {
     public var hasAttachment: Bool?
     /// `is:list`: mailing-list mail (it has a List-Unsubscribe header).
     public var isList: Bool?
+    public var invitation: InvitationFilter?
+    /// Calendar mail about events you organize (`organizer:me`): with `invite:reply`, your guests' answers.
+    public var organizedByMe: Bool?
     public var before: Date?
     public var after: Date?
 
@@ -79,7 +92,25 @@ public struct SearchQuery: Hashable, Sendable {
                 default: query.terms.append(raw)
                 }
             case "has":
-                if value.lowercased().hasPrefix("attachment") { query.hasAttachment = true } else { query.terms.append(raw) }
+                if value.lowercased().hasPrefix("attachment") {
+                    query.hasAttachment = true
+                } else if value.lowercased().hasPrefix("invit") {
+                    query.invitation = .any
+                } else {
+                    query.terms.append(raw)
+                }
+            case "invite", "invitation":
+                switch value.lowercased() {
+                case "request", "new": query.invitation = .request
+                case "update", "updated": query.invitation = .update
+                case "cancel", "cancelled", "canceled": query.invitation = .cancel
+                case "reply", "replies": query.invitation = .reply
+                case "pending", "unanswered": query.invitation = .pending
+                case "conflict", "conflicts", "overlap", "overlaps": query.invitation = .conflict
+                default: query.terms.append(raw)
+                }
+            case "organizer":
+                if value.lowercased() == "me" { query.organizedByMe = true } else { query.terms.append(raw) }
             case "before": query.before = parseDate(value)
             case "after": query.after = parseDate(value)
             case "older_than": query.before = relativeDate(value, now: now, calendar: calendar)

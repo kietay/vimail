@@ -43,6 +43,8 @@ public actor SyncEngine {
         case unsubscribed(list: String)
         /// A queued unsubscribe failed for good: the list refused it, or its server never answered.
         case unsubscribeFailed(outboxID: Int64, list: String, reason: String)
+        /// The provider refused an answer by email. The answer before it is back; `outcome` says what stands now.
+        case answerFailed(outboxID: Int64, summary: String, reason: String, outcome: RefusedAnswerOutcome)
     }
 
     public let provider: any MailProvider
@@ -556,6 +558,10 @@ public actor SyncEngine {
                 _ = try? await store.upsertMessages([sent], recordsContacts: false)
             }
             eventContinuation.yield(.unsubscribed(list: request.list))
+        case .invitationReply(let reply):
+            let sent = try await provider.send(reply.message, fileData: [:], isRetry: isRetry)
+            // It went out, so nothing may throw from here: a refusal would take back an answer the organizer has.
+            try? await store.replaceLocalMessage(localID: reply.localMessageID, with: sent)
         }
     }
 
@@ -586,6 +592,9 @@ public actor SyncEngine {
             eventContinuation.yield(.operationFailed("Could not change label: \(reason)"))
         case .unsubscribe(let request):
             eventContinuation.yield(.unsubscribeFailed(outboxID: item.id, list: request.list, reason: reason))
+        case .invitationReply(let reply):
+            let outcome = try await store.restoreFailedInvitationReply(reply, outboxID: item.id)
+            eventContinuation.yield(.answerFailed(outboxID: item.id, summary: reply.summary, reason: reason, outcome: outcome))
         }
     }
 

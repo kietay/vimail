@@ -21,6 +21,7 @@ struct SidebarView: View {
                 ForEach(navigation, id: \.0) { mailbox, icon, key in
                     navItem(mailbox, icon: icon, key: key)
                 }
+                calendarItem
             }
 
             if collapsed {
@@ -94,6 +95,29 @@ struct SidebarView: View {
         .buttonStyle(.plain)
         .hintScope()
         .help("\(mailbox.title) (\(key))")
+    }
+
+    private var calendarItem: some View {
+        let active = model.destination == .calendar
+        let waiting = model.waitingInvitationCount
+        return Button { model.openCalendar() } label: {
+            HStack(spacing: 12) {
+                Icon(name: .calendar, size: 16)
+                if !collapsed {
+                    Text("Calendar").font(AppFonts.sans(12, active ? .semibold : .regular))
+                    Spacer()
+                    if waiting > 0 { Text("\(waiting)").font(AppFonts.mono(10)) } else { HintText("gc") }
+                }
+            }
+            .foregroundStyle(active ? theme.green : theme.mutedForeground)
+            .padding(.horizontal, collapsed ? 4 : 12)
+            .frame(maxWidth: .infinity, minHeight: 36, alignment: collapsed ? .center : .leading)
+            .contentShape(Rectangle())
+            .hoverHighlight(cornerRadius: 6, active: active)
+        }
+        .buttonStyle(.plain)
+        .hintScope()
+        .help("Calendar (gc)")
     }
 
     @ViewBuilder

@@ -67,4 +67,17 @@ struct WindowConfigurator: NSViewRepresentable {
 @MainActor
 enum MainWindow {
     static weak var shared: NSWindow?
+
+    /// Focuses the multi-line text view that is back after the embedded editor quits (:wq): the compose body, or the
+    /// event editor's Notes. SwiftUI drops focus requests made before the new text view is in the window, so this
+    /// waits for it and asks AppKit, like a click does. SwiftUI's focus state follows.
+    static func focusTextView() async {
+        for _ in 0..<40 {
+            if let textView = shared?.contentView?.firstDescendant(of: NSTextView.self, where: { !$0.isFieldEditor && $0.isEditable }) {
+                textView.window?.makeFirstResponder(textView)
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+    }
 }

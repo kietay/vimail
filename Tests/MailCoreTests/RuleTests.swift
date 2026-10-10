@@ -127,6 +127,17 @@ struct RuleFilterTests {
         #expect((try? RuleFilter.parse("re:hello"))?.query.terms == ["re:hello"])
     }
 
+    @Test func rejectsCalendarSearch() {
+        // A rule's SQL tests one message, not a conversation's invitation files: calendar terms would match everything.
+        for when in ["has:invite", "invite:request", "invite:pending", "Invitation:conflict", "organizer:me", "from:x organizer:ME"] {
+            #expect(throws: RuleFilter.Problem.self, "\(when)") { try RuleFilter.parse(when) }
+        }
+        // What search reads as text stays text.
+        #expect((try? RuleFilter.parse("organizer:alex"))?.query.terms == ["organizer:alex"])
+        #expect((try? RuleFilter.parse("invite:soon"))?.query.terms == ["invite:soon"])
+        #expect((try? RuleFilter.parse("-organizer:me"))?.query.terms == ["-organizer:me"])
+    }
+
     @Test func labelTermsResolveEveryLabelWithTheName() {
         let labels = [
             MailLabel(id: "Label_1", name: "Receipts", kind: .user),

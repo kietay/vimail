@@ -46,6 +46,8 @@ public actor DummyMailProvider: MailProvider {
         var nextLabelNumber: Int
         var scheduledReplies: [ScheduledReply]
         var incomingCounter: Int
+        /// Meetings of invitation mails, keyed by message ID. Missing in servers made before invitations had files.
+        var invites: [String: DummyInvite]?
     }
 
     public nonisolated let kind = "dummy"
@@ -318,6 +320,14 @@ public actor DummyMailProvider: MailProvider {
             }
             attachments.append(MailAttachment(id: attachmentID, filename: attachment.filename, mimeType: attachment.mimeType, size: attachment.size))
         }
+        // An answer to an invitation: Gmail lists its text/calendar part as invite.ics.
+        if let calendar = outgoing.calendar {
+            let attachmentID = "att-\(newID())"
+            let data = Data(calendar.text.utf8)
+            try? FileManager.default.createDirectory(at: attachmentsDirectory, withIntermediateDirectories: true)
+            try? data.write(to: attachmentsDirectory.appendingPathComponent(attachmentID))
+            attachments.append(MailAttachment(id: attachmentID, filename: "invite.ics", mimeType: "text/calendar", size: data.count))
+        }
 
         var labels: Set<String> = [SystemLabel.sent]
         let me = state!.account.normalized
@@ -334,7 +344,8 @@ public actor DummyMailProvider: MailProvider {
         )
         state!.messages[id] = message
         record(.added, [id])
-        scheduleReply(to: message)
+        // The organizer's calendar reads an answer to an invitation; nobody writes back.
+        if outgoing.calendar == nil { scheduleReply(to: message) }
         return message
     }
 
@@ -361,7 +372,7 @@ public actor DummyMailProvider: MailProvider {
             throw ProviderError.notFound("attachment \(attachmentID)")
         }
         if let stored = try? Data(contentsOf: attachmentsDirectory.appendingPathComponent(attachmentID)) { return stored }
-        return DummyAttachments.data(for: attachment, in: message)
+        return DummyAttachments.data(for: attachment, in: message, invite: state!.invites?[messageID])
     }
 
     public func createLabel(name: String) async throws -> MailLabel {
@@ -400,6 +411,12 @@ public actor DummyMailProvider: MailProvider {
         if !changed.isEmpty { record(.labels, changed) }
     }
 
+    /// The meetings of the mailbox's invitation mails, for the dummy calendar.
+    public func invites() throws -> [DummyInvite] {
+        try ensureLoaded()
+        return Array((state!.invites ?? [:]).values)
+    }
+
     // MARK: - Simulated incoming mail
 
     private func deliverIncoming(count: Int) {
@@ -410,6 +427,9 @@ public actor DummyMailProvider: MailProvider {
             let existing = Array(state!.messages.values)
             let messages = content.incomingMessages(account: state!.account, existing: existing, labels: state!.labels, newID: { self.newID() })
             for message in messages { state!.messages[message.id] = message }
+            for (id, invite) in content.invites where messages.contains(where: { $0.id == id }) {
+                state!.invites = (state!.invites ?? [:]).merging([id: invite]) { _, new in new }
+            }
             record(.added, messages.map(\.id))
         }
     }

@@ -30,6 +30,7 @@ struct OverlayHost: View {
         case .aiConsent: model.declineConsent()
         case .ruleEditor: model.ruleEditor?.leaveByClick()
         case .backfill: model.backfill?.back()
+        case .eventEditor: model.closeEditor()
         default: model.overlay = nil
         }
     }
@@ -52,6 +53,8 @@ struct OverlayHost: View {
             if let editor = model.ruleEditor { RuleEditorView(editor: editor) }
         case .backfill:
             if let sheet = model.backfill { BackfillView(sheet: sheet) }
+        case .quickAdd: QuickAddView()
+        case .eventEditor: EventEditorView()
         }
     }
 }
@@ -217,6 +220,7 @@ struct PickerView: View {
         switch kind {
         case .label: "↵ toggle and close · tab toggle and stay · esc close"
         case .snooze: "press a letter for a preset · ↵ choose · esc close"
+        case .answerNote: "type a note · ↵ yes · ↓ maybe or no · esc close"
         default: "↵ choose · esc close"
         }
     }
@@ -335,7 +339,7 @@ struct ToastView: View {
                 if let deadline = toast.countdownTo {
                     TimelineView(.periodic(from: .now, by: 0.25)) { context in
                         let seconds = max(1, Int(deadline.timeIntervalSince(context.date).rounded(.up)))
-                        Text("\(toast.text) in \(seconds)s.\(detail)")
+                        Text("\(toast.text) \(toast.countdownLead) \(seconds)s.\(detail)")
                     }
                 } else {
                     Text(toast.text + detail)

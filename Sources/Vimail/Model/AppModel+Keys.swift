@@ -58,8 +58,19 @@ extension AppModel {
 
     /// Routes one key press. Returns true when the key was handled and must not reach the view.
     func handleKey(_ stroke: KeyStroke, context: KeyContext) -> Bool {
+        // ⌘⌫ in the event editor outside a text field (its preview, your editor on the notes) does nothing: unhandled, it
+        // would reach the Message menu's ⌘⌫ (Move to Trash) and trash the conversation behind the editor.
+        if overlay == .eventEditor, !context.textFocused, stroke.command, !stroke.shift, case .backspace = stroke.key { return true }
+
         // The embedded vim owns every key while it has focus.
         if context.terminalFocused { return false }
+
+        // ⌘⌫ in a text field deletes to the start of the line. Unhandled, it would reach the Message menu's
+        // ⌘⌫ (Move to Trash) and trash the conversation behind the field.
+        if context.textFocused, stroke.command, !stroke.shift, !stroke.option, !stroke.control, case .backspace = stroke.key {
+            NSApp.sendAction(#selector(NSResponder.deleteToBeginningOfLine(_:)), to: nil, from: nil)
+            return true
+        }
 
         if stroke.isCommand("k") {
             overlay = overlay == .omnibox ? nil : .omnibox
@@ -104,6 +115,14 @@ extension AppModel {
         case .backfill:
             guard let sheet = backfill else { overlay = nil; return true }
             return handleBackfillKey(stroke, sheet: sheet)
+        case .quickAdd:
+            if stroke.isEscape { overlay = nil; return true }
+            if stroke.isEnter { createFromQuickAdd(); return true }
+            if case .tab = stroke.key { openEditor(from: quickAddResult); return true }
+            if case .up = stroke.key, quickAddDraft != nil { continueDraft(); return true }
+            return false
+        case .eventEditor:
+            return handleEditorKey(stroke, context: context)
         case .help, .settings, .views:
             if stroke.isEscape || (!context.textFocused && (stroke.isChar("q") || (overlay == .help && stroke.isChar("?")))) {
                 overlay = nil
@@ -381,6 +400,11 @@ extension AppModel {
             send(compose)
             return true
         }
+        // ⌘⇧A: your free times, at the cursor (before the body's vim keys, which pass ⌘ keys through).
+        if case .char("A") = stroke.key, stroke.command, !stroke.control {
+            insertFreeTimes(into: compose, textView: focusTarget == .composeBody ? context.textView : nil)
+            return true
+        }
         if stroke.isControl("g") {
             compose.toggleVim()
             return true
@@ -389,7 +413,9 @@ extension AppModel {
             if focusTarget == .composeBody, let textView = context.textView {
                 return handleBodyKey(stroke, compose: compose, textView: textView)
             }
-            if let field = focusTarget, ComposeModel.recipientFields.contains(field), handleRecipientKey(stroke, field: field, compose: compose) {
+            if let field = focusTarget, ComposeModel.recipientFields.contains(field),
+               handleRecipientKey(stroke, suggestions: compose.suggestions, take: { compose.acceptSuggestion(for: field) },
+                                  finish: { compose.commitInput(field) }, removeLast: { compose.removeLastRecipient(field) }) {
                 return true
             }
             if stroke.isEscape {
@@ -418,30 +444,82 @@ extension AppModel {
         return !stroke.command
     }
 
-    /// To, Cc and Bcc: the suggestion list, Enter and Tab finish an address, Backspace in an
-    /// empty field removes the last one.
-    private func handleRecipientKey(_ stroke: KeyStroke, field: FocusTarget, compose: ComposeModel) -> Bool {
-        if !compose.suggestions.isEmpty {
+    /// The event editor: its shortcuts, then the vim keys in Notes and Guests' suggestions and pills. Esc closes it and
+    /// keeps a draft (in Notes, after leaving insert mode).
+    private func handleEditorKey(_ stroke: KeyStroke, context: KeyContext) -> Bool {
+        if stroke.command, stroke.isEnter { saveEditor(notify: !stroke.shift); return true }
+        if stroke.command, stroke.shift, case .backspace = stroke.key { removeFromEditor(); return true }
+        if stroke.isCommand("]") { findTime(forward: true); return true }
+        if stroke.isCommand("[") { findTime(forward: false); return true }
+        if stroke.isControl("g") {
+            editNotesInVim()
+            return true
+        }
+        if let editor = eventEditor {
+            if stroke.isCommand("e"), editor.occurrence != nil {
+                editor.cycleScope()
+                return true
+            }
+            // ⌘P anywhere, or p outside a field (as p shows compose's preview): what guests see, or find a time again.
+            if stroke.isCommand("p") || (!context.textFocused && stroke.isChar("p")) {
+                editor.showsPreview.toggle()
+                return true
+            }
+            if context.textFocused, focusTarget == .eventNotes, let textView = context.textView {
+                return handleNotesKey(stroke, editor: editor, textView: textView)
+            }
+            if context.textFocused, focusTarget == .eventGuests,
+               handleRecipientKey(stroke, suggestions: editor.suggestions, take: { editor.acceptSuggestion() },
+                                  finish: { editor.finishGuests() }, removeLast: { editor.removeLastGuest() }) {
+                return true
+            }
+        }
+        if stroke.isEscape { closeEditor(); return true }
+        return false
+    }
+
+    /// Notes: vim keys in its text view, as in the compose body. Esc in insert mode goes to normal mode;
+    /// esc in normal mode closes the editor, keeping a draft.
+    private func handleNotesKey(_ stroke: KeyStroke, editor: EventEditorModel, textView: NSTextView) -> Bool {
+        let outcome = editor.notesVim.handle(stroke, in: textView)
+        editor.syncNotesVim()
+        switch outcome {
+        case .handled:
+            return true
+        case .passThrough:
+            return false
+        case .escape:
+            closeEditor()
+            return true
+        }
+    }
+
+    /// To, Cc, Bcc and the event editor's Guests: the suggestion list, Enter and Tab finish an address
+    /// (`finish`), Backspace in an empty field removes the last one (`removeLast`).
+    private func handleRecipientKey(
+        _ stroke: KeyStroke, suggestions: ContactSuggestions, take: () -> Void, finish: () -> Void, removeLast: () -> Bool
+    ) -> Bool {
+        if !suggestions.isEmpty {
             switch stroke.key {
-            case .down: compose.moveSuggestion(1); return true
-            case .up: compose.moveSuggestion(-1); return true
-            case .enter, .tab: compose.acceptSuggestion(for: field); return true
-            case .escape: compose.suggestions = []; return true
+            case .down: suggestions.move(1); return true
+            case .up: suggestions.move(-1); return true
+            case .enter, .tab: take(); return true
+            case .escape: suggestions.close(); return true
             default:
-                if stroke.isControl("n") { compose.moveSuggestion(1); return true }
-                if stroke.isControl("p") { compose.moveSuggestion(-1); return true }
+                if stroke.isControl("n") { suggestions.move(1); return true }
+                if stroke.isControl("p") { suggestions.move(-1); return true }
             }
         }
         switch stroke.key {
         case .enter:
-            compose.commitInput(field)
+            finish()
             return true
         case .tab:
             // Tab still moves to the next field.
-            compose.commitInput(field)
+            finish()
             return false
         case .backspace where !stroke.command && !stroke.option:
-            return compose.removeLastRecipient(field)
+            return removeLast()
         default:
             return false
         }
@@ -490,6 +568,7 @@ extension AppModel {
     }
 
     func execute(_ command: KeyCommand, count: Int = 1) {
+        if destination == .calendar, executeInCalendar(command, count: count) { return }
         let inReader = focus == .reader
         switch command {
         case .down: inReader ? reader.scrollLines(count) : moveCursor(by: count)
@@ -568,6 +647,52 @@ extension AppModel {
         case .runRules: runRulesOnSelection()
         case .manageRules: manageRules()
         case .ruleFromThread: newRuleFromThread()
+        case .answer(let response): answer(response)
+        case .answerWithNote: answerWithNote()
+        case .calendar: openCalendar()
+        case .joinMeeting: joinMeeting()
+        case .openInvitationMail: openInvitationMail()
+        case .newEvent: newEvent()
+        case .previousDay: moveDay(-count)
+        case .nextDay: moveDay(count)
+        case .previousWeek: moveDay(-7 * count)
+        case .nextWeek: moveDay(7 * count)
         }
+    }
+
+    /// Keys in the calendar view. Returns false for keys that do the same as in mail.
+    private func executeInCalendar(_ command: KeyCommand, count: Int) -> Bool {
+        let inReader = focus == .reader
+        switch command {
+        case .down: inReader ? reader.scrollLines(count) : moveAgendaCursor(by: count)
+        case .up: inReader ? reader.scrollLines(-count) : moveAgendaCursor(by: -count)
+        case .top: inReader ? reader.scrollTo(top: true) : moveAgendaCursor(to: count > 1 ? count - 1 : 0)
+        case .bottom: inReader ? reader.scrollTo(top: false) : moveAgendaCursor(to: agendaRows.count - 1)
+        case .halfPageDown: inReader ? reader.scrollPage(0.5 * Double(count)) : moveAgendaCursor(by: 5 * count)
+        case .halfPageUp: inReader ? reader.scrollPage(-0.5 * Double(count)) : moveAgendaCursor(by: -5 * count)
+        case .pageDown: inReader ? reader.scrollPage(0.9) : moveAgendaCursor(by: 10 * count)
+        case .pageUp: inReader ? reader.scrollPage(-0.9) : moveAgendaCursor(by: -10 * count)
+        case .nextThread: moveAgendaCursor(by: count)
+        case .previousThread: moveAgendaCursor(by: -count)
+        case .focusReader, .open: openAgendaItem()
+        case .focusList: focus = .list
+        case .back, .escape:
+            if inReader { focus = .list } else if !searchText.isEmpty || isSearchOpen { closeSearch(); Task { await reloadAgenda() } }
+        case .label: agendaToday()
+        case .reply: emailGuests(all: false)
+        case .replyAll: emailGuests(all: true)
+        case .trash: removeAgendaEvent()
+        case .previousDay: moveAgendaStart(days: -count)
+        case .nextDay: moveAgendaStart(days: count)
+        case .previousWeek: moveAgendaStart(days: -7 * count)
+        case .nextWeek: moveAgendaStart(days: 7 * count)
+        case .archive, .spam, .toggleStar, .markUnread, .markRead, .move, .snooze, .quickSnooze, .forward, .unsubscribe,
+             .visual, .toggleSelection, .selectAll, .clearSelection, .openAttachments, .expandAll, .nextMessage, .previousMessage,
+             .readerPageDown, .readerPageUp:
+            if command == .readerPageDown { reader.scrollPage(0.85) } else if command == .readerPageUp { reader.scrollPage(-0.85) }
+        default:
+            return false
+        }
+        return true
     }
 }

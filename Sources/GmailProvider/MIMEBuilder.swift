@@ -2,7 +2,8 @@ import Foundation
 import MailCore
 
 /// Builds the RFC 5322 / MIME message that Gmail sends: a plain-text and an HTML alternative
-/// (UTF-8, quoted-printable), plus attachments (base64). Lines end with CRLF.
+/// (UTF-8, quoted-printable), an invitation answer as a `text/calendar` alternative, plus attachments
+/// (base64). Lines end with CRLF.
 public enum MIMEBuilder {
     public struct File: Sendable {
         public var filename: String
@@ -52,16 +53,27 @@ public enum MIMEBuilder {
 
     // MARK: - Parts
 
-    /// The text part, or text + HTML alternatives, including their Content-Type headers.
+    /// The text part, or the alternatives (text, HTML, an invitation answer for calendars), including their Content-Type headers.
     static func textBody(_ message: OutgoingMessage) -> String {
         let plain = "Content-Type: text/plain; charset=\"UTF-8\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"
             + quotedPrintable(message.textBody)
-        guard let html = message.htmlBody else { return plain }
+        var alternatives = [plain]
+        if let html = message.htmlBody {
+            alternatives.append("Content-Type: text/html; charset=\"UTF-8\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n" + quotedPrintable(html))
+        }
+        // Last, as the richest alternative: calendars read it, mail apps show the text (RFC 6047).
+        if let calendar = message.calendar { alternatives.append(calendarPart(calendar)) }
+        guard alternatives.count > 1 else { return plain }
         let boundary = makeBoundary("alt")
-        let htmlPart = "Content-Type: text/html; charset=\"UTF-8\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"
-            + quotedPrintable(html)
         return "Content-Type: multipart/alternative; boundary=\"\(boundary)\"\r\n\r\n"
-            + "--\(boundary)\r\n\(plain)\r\n--\(boundary)\r\n\(htmlPart)\r\n--\(boundary)--"
+            + alternatives.map { "--\(boundary)\r\n\($0)\r\n" }.joined() + "--\(boundary)--"
+    }
+
+    /// An iCalendar object as a `text/calendar` part (iMIP), in base64 so its CRLF lines arrive exactly as written.
+    static func calendarPart(_ part: CalendarPart) -> String {
+        let method = part.method.uppercased().filter { $0.isASCII && ($0.isLetter || $0 == "-") }
+        return "Content-Type: text/calendar; charset=\"UTF-8\"\(method.isEmpty ? "" : "; method=\(method)")\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+            + Data(part.text.utf8).base64EncodedString(options: [.lineLength76Characters, .endLineWithCarriageReturn, .endLineWithLineFeed])
     }
 
     static func attachmentPart(_ file: File) -> String {
@@ -78,12 +90,16 @@ public enum MIMEBuilder {
 
     // MARK: - Headers
 
+    /// `Name <address>`. Line breaks and other control characters never reach the header: names and addresses can come
+    /// from someone else's file (an invitation's organizer), and a line break would start a header of its own.
     static func address(_ address: EmailAddress) -> String {
-        guard let name = address.name, !name.isEmpty else { return address.email }
-        if !name.allSatisfy(\.isASCII) { return "\(encodedWords(name)) <\(address.email)>" }
+        let email = String(String.UnicodeScalarView(address.email.unicodeScalars.filter { $0.properties.generalCategory != .control }))
+        guard let written = address.name, !written.isEmpty else { return email }
+        let name = String(String.UnicodeScalarView(written.unicodeScalars.map { $0.properties.generalCategory == .control ? " " : $0 }))
+        if !name.allSatisfy(\.isASCII) { return "\(encodedWords(name)) <\(email)>" }
         let needsQuotes = name.contains { "()<>[]:;@\\,.\"".contains($0) }
         let shown = needsQuotes ? "\"\(name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\"" : name
-        return "\(shown) <\(address.email)>"
+        return "\(shown) <\(email)>"
     }
 
     static func addressHeader(_ name: String, _ addresses: [EmailAddress]) -> String {

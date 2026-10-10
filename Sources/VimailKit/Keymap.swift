@@ -1,4 +1,5 @@
 import Foundation
+import MailCore
 
 /// One key press, normalized: shifted characters are folded into the character ("G", "#").
 public struct KeyStroke: Hashable, Sendable, CustomStringConvertible {
@@ -83,6 +84,10 @@ public enum KeyCommand: Hashable, Sendable {
     case manageRules
     /// A new rule from the conversation under the cursor.
     case ruleFromThread
+    // Calendar: answer an invitation (Y M N, R with a note), the calendar view, joining, moving by day and week.
+    case answer(ResponseStatus), answerWithNote
+    case calendar, joinMeeting, openInvitationMail, newEvent
+    case previousDay, nextDay, previousWeek, nextWeek
 }
 
 public enum Keymap {
@@ -118,6 +123,10 @@ public enum Keymap {
         ("go", .openAttachments),
         // Rules
         ("g?", .explainLabels), ("=", .runRules), ("gr", .manageRules), ("T", .ruleFromThread),
+        // Calendar
+        ("Y", .answer(.accepted)), ("M", .answer(.tentative)), ("N", .answer(.declined)), ("R", .answerWithNote),
+        ("gc", .calendar), ("gj", .joinMeeting), ("gm", .openInvitationMail), ("C", .newEvent),
+        ("{", .previousDay), ("}", .nextDay), ("[", .previousWeek), ("]", .nextWeek),
         // Modes and app
         ("/", .search), (":", .omnibox), ("<D-k>", .omnibox), ("?", .help), ("<C-l>", .sync),
         ("<C-\\>", .toggleSidebar),

@@ -32,7 +32,20 @@ struct StatusBar: View {
                     Text("│").padding(.horizontal, 12)
                     rulesText(rules)
                 }
-                let pending = model.compose?.bodyPendingKeys ?? model.pendingKeys
+                if let calendar = calendarText {
+                    Text("│").padding(.horizontal, 12)
+                    calendar
+                }
+                if let meeting = model.nextMeeting {
+                    Text("│").padding(.horizontal, 12)
+                    Button { model.joinMeeting() } label: {
+                        Text("next: \(meeting.event.summary) \(Formatting.time(meeting.start.instant())) · \(Formatting.countdown(to: meeting.start.instant()))\(meeting.event.conferenceURL == nil ? "" : " · gj")")
+                            .foregroundStyle(meeting.start.instant().timeIntervalSinceNow < 600 ? theme.statusBright : theme.statusText)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Join the meeting (gj)")
+                }
+                let pending = model.compose?.bodyPendingKeys ?? model.eventEditor?.notesPendingKeys ?? model.pendingKeys
                 if !pending.isEmpty {
                     Text(pending)
                         .foregroundStyle(theme.statusBright)
@@ -59,6 +72,20 @@ struct StatusBar: View {
         .background(theme.status.opacity(0.85))
         .overlay(alignment: .top) { Rectangle().fill(theme.border.opacity(0.4)).frame(height: 1) }
         .onHover { hovering = $0 }
+    }
+
+    /// Calendar sync trouble only; a working calendar says nothing here.
+    private var calendarText: Text? {
+        let status = model.calendarStatus
+        let pending = status.pendingOperations > 0 ? " · \(status.pendingOperations) queued" : ""
+        switch status.phase {
+        case .offline: return Text("calendar offline\(pending)").foregroundStyle(theme.yellow)
+        case .rateLimited: return Text("calendar · rate limit").foregroundStyle(theme.yellow)
+        case .signedOut: return Text("calendar signed out").foregroundStyle(theme.red)
+        case .notConnected: return Text("calendar not connected").foregroundStyle(theme.yellow)
+        case .failed: return Text("calendar failed").foregroundStyle(theme.red)
+        case .idle, .syncing: return status.pendingOperations > 0 ? Text("calendar\(pending)").foregroundStyle(theme.yellow) : nil
+        }
     }
 
     /// Local-first sync state: actions apply instantly; this shows what is still on its way.
@@ -124,6 +151,11 @@ struct StatusBar: View {
     }
 
     private var position: String {
+        if model.destination == .calendar {
+            let rows = model.agendaRows
+            let index = rows.firstIndex { $0.id == model.agendaCursorID }
+            return "\(index.map { $0 + 1 } ?? 0):\(rows.count)"
+        }
         guard let index = model.cursorIndex else { return "0:\(model.totalCount)" }
         return "\(index + 1):\(model.totalCount)"
     }

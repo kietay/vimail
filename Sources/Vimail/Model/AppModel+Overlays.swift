@@ -60,6 +60,28 @@ extension AppModel {
                                   keywords: "tag folder", active: destination == .mailbox(.label(label.id))) { self.navigate(to: .mailbox(.label(label.id))) })
         }
 
+        items += [
+            OmniItem(id: "calendar", title: "Go to calendar", group: "Calendar", icon: .clock, keywords: "agenda events meetings schedule",
+                     shortcut: "gc", active: destination == .calendar) { self.openCalendar() },
+            OmniItem(id: "event-new", title: "New event…", group: "Calendar", icon: .plus, keywords: "create meeting schedule quick add invite",
+                     shortcut: "C") { self.newEvent() },
+            OmniItem(id: "join", title: nextMeeting.map { "Join \($0.event.summary)" } ?? "Join the next meeting", group: "Calendar", icon: .arrow,
+                     keywords: "meet zoom video call link", shortcut: "gj") { self.joinMeeting() },
+            OmniItem(id: "answer-yes", title: "Answer yes to the invitation", group: "Calendar", icon: .check, keywords: "accept rsvp invite", shortcut: "Y") { self.answer(.accepted) },
+            OmniItem(id: "answer-maybe", title: "Answer maybe to the invitation", group: "Calendar", icon: .check, keywords: "tentative rsvp invite", shortcut: "M") { self.answer(.tentative) },
+            OmniItem(id: "answer-no", title: "Answer no to the invitation", group: "Calendar", icon: .close, keywords: "decline rsvp invite", shortcut: "N") { self.answer(.declined) },
+            OmniItem(id: "answer-note", title: "Answer the invitation with a note…", group: "Calendar", icon: .edit, keywords: "rsvp comment invite", shortcut: "R") { self.answerWithNote() },
+            OmniItem(id: "archive-invitations", title: "\(settings.archiveInvitationsAfterAnswer ? "Keep" : "Archive") invitations after answering", group: "Calendar",
+                     icon: .archive, keywords: "setting auto archive rsvp", keepsCompose: true) {
+                self.settings.archiveInvitationsAfterAnswer.toggle()
+                self.showToast(self.settings.archiveInvitationsAfterAnswer ? "Invitations are archived after you answer." : "Invitations stay after you answer.")
+            },
+        ]
+        if services.isGmail {
+            items.append(OmniItem(id: "calendar-connect", title: services.calendarEngine == nil ? "Connect Google Calendar" : "Connect Google Calendar again", group: "Calendar",
+                                  icon: .refresh, keywords: "sign in calendar access oauth") { self.connectCalendar() })
+        }
+
         for view in views {
             items.append(OmniItem(id: "view-\(view.id)", title: "Open view: \(view.name)", group: "Views", icon: .views,
                                   keywords: "filter saved \(view.pinned ? "pinned" : "")", active: destination == .view(view.id)) { self.navigate(to: .view(view.id)) })
@@ -319,6 +341,7 @@ extension AppModel {
         case .move: return "Move to\(suffix)"
         case .snooze: return "Snooze until\(suffix)"
         case .goToLabel: return "Go to label"
+        case .answerNote: return "Answer with a note"
         }
     }
 
@@ -328,6 +351,7 @@ extension AppModel {
         case .move: "Move to…"
         case .snooze: "2h, 3d, tomorrow 9am, mon…"
         case .goToLabel: "Find a label…"
+        case .answerNote: "A note for the organizer…"
         }
     }
 
@@ -396,6 +420,14 @@ extension AppModel {
                 }
             }
             return items
+        case .answerNote:
+            let note = query.isEmpty ? nil : query
+            return [(ResponseStatus.accepted, "Yes"), (.tentative, "Maybe"), (.declined, "No")].map { response, title in
+                PickerItem(id: response.rawValue, title: note == nil ? title : "\(title), with this note", icon: .check) { _ in
+                    self.overlay = nil
+                    self.answer(response, comment: note)
+                }
+            }
         case .goToLabel:
             return userLabels.filter { matches($0.name) }.map { label in
                 PickerItem(id: label.id, title: label.name, subtitle: label.kind == .local ? "local only" : nil, colorIndex: label.paletteIndex(count: 7)) { _ in
@@ -457,6 +489,24 @@ extension AppModel {
         ("Go to", [
             ("gi / gs", "Inbox / starred"), ("gt / gd", "Sent / drafts"), ("ga / gz", "Archive / snoozed"), ("g# / g!", "Trash / spam"),
             ("gA", "All mail"), ("gl", "Label…"), ("gv", "Manage views"), ("H / L · ⌘⇧[ / ]", "Cycle pinned views + Inbox"),
+        ]),
+        ("Calendar", [
+            ("Y / M / N", "Answer yes / maybe / no (by email when not on Google Calendar)"), ("R", "Answer with a note"),
+            ("gc", "Calendar (from an invitation: its event)"),
+            ("gj", "Join the selected or next meeting"), ("{ / }", "Day before / after"), ("[ / ]", "Week before / after (calendar)"),
+            ("t", "Today (calendar)"), ("gm", "The event's invitation mail"), ("r / a", "Email organizer / guests (calendar)"),
+            ("# / dd", "Cancel your event or decline; one day of a series (calendar)"), ("O", "Original invitation email"),
+            ("C", "New event (on a conversation: its subject and people)"), ("C then ↑", "Continue the new event kept as a draft"),
+            ("↵", "Edit your event (calendar)"),
+            ("⌘⇧A", "Insert your free times (compose)"),
+        ]),
+        ("Event editor", [
+            ("⌘↵ / ⌘⇧↵", "Save and email guests / save without email"), ("⌘[ / ⌘]", "Find a time: previous / next time everyone is free"),
+            ("⌘E", "This event / this and following / all events of a series"),
+            ("↵ / tab", "Guests: take the suggestion, or finish the address"), ("⌫", "Guests: remove the last one"),
+            ("^g", "Notes (Markdown) in your editor; :wq comes back"), ("⌘P", "What guests see / find a time (p outside a field)"),
+            ("⌘⇧⌫", "Remove the event; on a series, what ⌘E says (a new one is discarded)"),
+            ("esc", "Vim keys in Notes, then close, keeping changes as a draft"),
         ]),
         ("App", [("/", "Search mail"), (": / ⌘K", "Omnibox"), ("?", "This help"), ("^l", "Sync now"), ("go", "Open attachment"), ("^\\", "Toggle sidebar")]),
     ]

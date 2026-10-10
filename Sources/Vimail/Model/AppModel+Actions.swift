@@ -246,6 +246,14 @@ extension AppModel {
                     showToast("Could not undo: \(error.localizedDescription)", isError: true)
                 }
             }
+        case .answer(let records, let archive):
+            undoAnswer(records, archive: archive)
+        case .answerByEmail(let emailed, let records, let archive):
+            undoAnswerByEmail(emailed, calendar: records, archive: archive)
+        case .eventChange(let record):
+            undoEventChange(record)
+        case .eventChanges(let records):
+            undoEventChanges(records)
         case .send(let outboxID, let draft, let localMessageID, let archived):
             Task {
                 if let archived {
@@ -305,6 +313,10 @@ extension AppModel {
     }
 
     func repeatLastAction() {
+        if let lastAnswer, undoStack.last?.isAnswer == true {
+            answer(lastAnswer)
+            return
+        }
         guard let lastAction else {
             showToast("Nothing to repeat.")
             return
@@ -437,7 +449,8 @@ extension AppModel {
     }
 
     func viewMatchCount(_ view: SavedView) async -> Int {
-        (try? await services.store.count(view.query)) ?? 0
+        if view.query.invitation == .conflict { await reloadConflictingInvitations() }
+        return (try? await services.store.count(resolved(view.query))) ?? 0
     }
 
     // MARK: - Reader and attachments
@@ -464,6 +477,16 @@ extension AppModel {
         case "previous": moveCursor(by: -1)
         case "next": moveCursor(by: 1)
         case "open": openCurrent()
+        case "answerYes": answer(.accepted)
+        case "answerMaybe": answer(.tentative)
+        case "answerNo": answer(.declined)
+        case "answerNote": answerWithNote()
+        case "join": joinMeeting()
+        case "calendar": openCalendar()
+        case "invitationMail": openInvitationMail()
+        case "nextWith": openNextWith()
+        case "previousDay": moveDay(-1)
+        case "nextDay": moveDay(1)
         case "loadImages":
             if let id = cursorID { remoteImagesAllowed.insert(id) }
             rerenderReader()

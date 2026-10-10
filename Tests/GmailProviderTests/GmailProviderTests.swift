@@ -207,11 +207,11 @@ struct MappingTests {
         #expect(message.sizeEstimate == 4321)
 
         let files = message.fileAttachments.map(\.filename)
-        #expect(files == ["photo.jpg", "Plan.pdf"])
+        #expect(files == ["photo.jpg", "Plan.pdf", "invite.ics"])
         let logo = message.attachments.first { $0.filename == "logo.png" }
         #expect(logo?.isInline == true && logo?.contentID == "logo@x" && logo?.id == "att-logo")
-        // The calendar part repeats an invite; it is not listed.
-        #expect(!message.attachments.contains { $0.mimeType == "text/calendar" })
+        // A calendar part without a file name (as Outlook sends invitations) is kept, so the invitation can be read.
+        #expect(message.attachments.contains { $0.mimeType == "text/calendar" && $0.filename == "invite.ics" && $0.id == "att-cal" })
     }
 
     @Test func decodesEncodedWordsAndCharsets() {
@@ -520,6 +520,37 @@ struct ProviderTests {
         try? FileManager.default.removeItem(at: directory)
     }
 
+    @Test func anAnswerByEmailIsSentWithItsCalendarPart() async throws {
+        let transport = FakeTransport { call in
+            switch (call.method, call.path) {
+            case ("POST", "/upload/gmail/v1/users/me/messages/send"): return (200, #"{"id":"s1","threadId":"t1","labelIds":["SENT"]}"#)
+            case ("GET", "/gmail/v1/users/me/messages/s1"): return (200, json(sampleMessage(id: "s1", thread: "t1", labels: ["SENT"])))
+            default: return (404, "{}")
+            }
+        }
+        let answer = OutgoingMessage(
+            from: EmailAddress(email: "me@example.com"), to: [EmailAddress(email: "alex@studio.co")], subject: "Accepted: Review @ Mon Oct 12, 2026 2pm (PDT)",
+            textBody: "Me has accepted this invitation.", threadID: "t1", messageID: "<vimail.1@example.com>",
+            calendar: CalendarPart(method: "REPLY", text: "BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nEND:VCALENDAR\r\n")
+        )
+        _ = try await makeProvider(transport).send(answer, fileData: [:], isRetry: false)
+        let upload = try #require(transport.apiCalls.first { $0.method == "POST" })
+        let body = String(decoding: upload.body, as: UTF8.self)
+        #expect(body.contains(#"{"threadId":"t1"}"#))
+        #expect(body.contains("Content-Type: text/calendar; charset=\"UTF-8\"; method=REPLY\r\nContent-Transfer-Encoding: base64\r\n\r\n"))
+        #expect(body.contains(Data("BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\n".utf8).base64EncodedString().prefix(20)))
+
+        // A dry run keeps it on this Mac, with the calendar part in the .eml and in the log.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("vimail-dryrun-\(UUID().uuidString)")
+        let silent = FakeTransport { _ in (500, "{}") }
+        _ = try await DryRunProvider(wrapping: makeProvider(silent), directory: directory).send(answer, fileData: [:], isRetry: false)
+        #expect(silent.apiCalls.isEmpty)
+        let eml = try #require(try FileManager.default.contentsOfDirectory(atPath: directory.path).first { $0.hasSuffix(".eml") })
+        #expect(try String(contentsOf: directory.appendingPathComponent(eml), encoding: .utf8).contains("method=REPLY"))
+        #expect(try String(contentsOf: directory.appendingPathComponent("changes.log"), encoding: .utf8).contains("calendar=REPLY"))
+        try? FileManager.default.removeItem(at: directory)
+    }
+
     @Test func oneClickUnsubscribeIsOnePlainPost() async throws {
         let transport = FakeTransport { call in call.url.host == "news.co" ? (204, "") : (404, "{}") }
         let provider = makeProvider(transport)
@@ -698,6 +729,92 @@ struct MIMETests {
         #expect(text.contains("Content-Type: application/pdf; name=\"Plan.pdf\""))
         #expect(text.contains("filename*=UTF-8''r%C3%A9sum%C3%A9.txt"))
         #expect(text.contains(pdf.base64EncodedString().prefix(60)))
+    }
+
+    /// The MIME text with its random boundaries named by kind, so whole messages can be compared.
+    func sameBoundaries(_ mime: Data) -> String {
+        String(decoding: mime, as: UTF8.self).replacingOccurrences(of: #"vimail-(alt|mixed)-[0-9a-f]{32}"#, with: "vimail-$1-B", options: .regularExpression)
+    }
+
+    @Test func messagesWithoutACalendarPartAreBuiltAsBefore() {
+        let date = Date(timeIntervalSince1970: 0)
+        let plain = OutgoingMessage(from: EmailAddress(email: "me@example.com"), to: [EmailAddress(email: "a@b.co")], subject: "Hi", textBody: "Hello")
+        let head = "From: me@example.com\r\nTo: a@b.co\r\nSubject: Hi\r\nDate: \(MIMEBuilder.rfc5322Date(date))\r\nMessage-ID: <m@x>\r\nMIME-Version: 1.0\r\n"
+        let text = "Content-Type: text/plain; charset=\"UTF-8\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nHello"
+        let html = "Content-Type: text/html; charset=\"UTF-8\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n<p>Hello</p>"
+        let alternative = "Content-Type: multipart/alternative; boundary=\"vimail-alt-B\"\r\n\r\n--vimail-alt-B\r\n\(text)\r\n--vimail-alt-B\r\n\(html)\r\n--vimail-alt-B--"
+        #expect(sameBoundaries(MIMEBuilder.build(plain, messageID: "<m@x>", files: [], date: date)) == head + text)
+
+        var rich = plain
+        rich.htmlBody = "<p>Hello</p>"
+        #expect(sameBoundaries(MIMEBuilder.build(rich, messageID: "<m@x>", files: [], date: date)) == head + alternative)
+
+        let file = MIMEBuilder.File(filename: "a.txt", mimeType: "text/plain", data: Data("hi".utf8))
+        let attachment = "Content-Type: text/plain; name=\"a.txt\"\r\nContent-Disposition: attachment; filename=\"a.txt\"\r\nContent-Transfer-Encoding: base64\r\n\r\naGk="
+        #expect(sameBoundaries(MIMEBuilder.build(rich, messageID: "<m@x>", files: [file], date: date)) == head
+            + "Content-Type: multipart/mixed; boundary=\"vimail-mixed-B\"\r\n\r\n--vimail-mixed-B\r\n\(alternative)\r\n--vimail-mixed-B\r\n\(attachment)\r\n--vimail-mixed-B--\r\n")
+    }
+
+    @Test func anInvitationAnswerIsATextCalendarAlternative() throws {
+        let ics = "BEGIN:VCALENDAR\r\nPRODID:-//vimail//EN\r\nVERSION:2.0\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:review@studio.co\r\n"
+            + "ATTENDEE;PARTSTAT=ACCEPTED;CN=Zoë Ångström:mailto:zoe@example.com\r\nCOMMENT:Bis später\\, danke\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        let message = OutgoingMessage(
+            from: EmailAddress(name: "Zoë Ångström", email: "zoe@example.com"), to: [EmailAddress(email: "jamie@studio.co")],
+            subject: "Accepted: Review @ Mon Oct 12, 2026 2pm - 2:45pm (PDT)", textBody: "Zoë Ångström has accepted this invitation.",
+            threadID: "t1", inReplyTo: "<invite@studio.co>", references: ["<invite@studio.co>"], messageID: "<vimail.1@example.com>",
+            calendar: CalendarPart(method: "REPLY", text: ics)
+        )
+        let mime = MIMEBuilder.build(message, messageID: "<vimail.1@example.com>", files: [], date: Date(timeIntervalSince1970: 0))
+        let text = sameBoundaries(mime)
+        // CRLF only, short lines, everything ASCII.
+        #expect(mime.allSatisfy { $0 < 0x80 })
+        #expect(!text.replacingOccurrences(of: "\r\n", with: "").contains("\n"))
+        #expect(text.components(separatedBy: "\r\n").allSatisfy { $0.utf8.count <= 998 })
+        #expect(text.contains("In-Reply-To: <invite@studio.co>\r\nReferences: <invite@studio.co>\r\n"))
+
+        // The text first, the calendar part last in one multipart/alternative.
+        let body = try #require(text.components(separatedBy: "MIME-Version: 1.0\r\n").last)
+        let calendarHead = "Content-Type: text/calendar; charset=\"UTF-8\"; method=REPLY\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+        #expect(body.hasPrefix("Content-Type: multipart/alternative; boundary=\"vimail-alt-B\"\r\n\r\n--vimail-alt-B\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n"))
+        #expect(body.components(separatedBy: "--vimail-alt-B\r\n").count == 3)
+        let encoded = try #require(body.components(separatedBy: "\r\n--vimail-alt-B\r\n" + calendarHead).last?.components(separatedBy: "\r\n--vimail-alt-B--").first)
+        #expect(body.hasSuffix("\r\n--vimail-alt-B--"))
+        #expect(encoded.components(separatedBy: "\r\n").allSatisfy { $0.count <= 76 })
+        // Base64 keeps the file exactly: its CRLF lines and its UTF-8.
+        let decoded = try #require(Data(base64Encoded: encoded.replacingOccurrences(of: "\r\n", with: "")))
+        #expect(String(decoding: decoded, as: UTF8.self) == ics)
+
+        // With HTML and a file: text, HTML and calendar are the alternatives, the file comes after them.
+        var rich = message
+        rich.htmlBody = "<p>Accepted</p>"
+        let mixed = sameBoundaries(MIMEBuilder.build(rich, messageID: "<m@x>", files: [MIMEBuilder.File(filename: "a.txt", mimeType: "text/plain", data: Data("hi".utf8))]))
+        let parts = mixed.components(separatedBy: "--vimail-alt-B\r\n").dropFirst().map { $0.components(separatedBy: "\r\n").first ?? "" }
+        #expect(parts == ["Content-Type: text/plain; charset=\"UTF-8\"", "Content-Type: text/html; charset=\"UTF-8\"", "Content-Type: text/calendar; charset=\"UTF-8\"; method=REPLY"])
+        #expect(mixed.contains("--vimail-alt-B--\r\n--vimail-mixed-B\r\nContent-Type: text/plain; name=\"a.txt\""))
+    }
+
+    @Test func namesAndAddressesCannotStartAHeaderLine() {
+        // As an invitation's organizer can write them: a bare LF in the name, a CRLF in the address.
+        let message = OutgoingMessage(
+            from: EmailAddress(name: "Sam\r\nX-Evil: 1", email: "sam@hey.com"),
+            to: [EmailAddress(name: "Jamie\nBcc: nina@evil.example", email: "jamie@studio.co\r\nX-Evil: 2"), EmailAddress(name: "Zoë\u{85}X-Evil: 3", email: "zoe@x.co")],
+            subject: "Accepted: Review", textBody: "Sam has accepted this invitation."
+        )
+        let text = String(decoding: MIMEBuilder.build(message, messageID: "<m@x>", files: []), as: UTF8.self)
+        let head = text.components(separatedBy: "\r\n\r\n")[0]
+        #expect(!head.replacingOccurrences(of: "\r\n", with: "").contains { $0 == "\r" || $0 == "\n" })
+        let lines = head.components(separatedBy: "\r\n")
+        #expect(!lines.contains { $0.lowercased().hasPrefix("bcc") || $0.hasPrefix("X-Evil") })
+        #expect(lines.contains("From: \"Sam  X-Evil: 1\" <sam@hey.com>"))
+        #expect(lines.contains { $0.hasPrefix("To: \"Jamie Bcc: nina@evil.example\" <jamie@studio.coX-Evil: 2>") })
+    }
+
+    @Test func aCalendarMethodCannotAddHeaders() {
+        var message = OutgoingMessage(from: EmailAddress(email: "me@example.com"), to: [EmailAddress(email: "a@b.co")], subject: "Hi", textBody: "Hello")
+        message.calendar = CalendarPart(method: "reply\r\nBcc: evil@x.co", text: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")
+        let lines = String(decoding: MIMEBuilder.build(message, messageID: "<m@x>", files: []), as: UTF8.self).components(separatedBy: "\r\n")
+        #expect(!lines.contains { $0.lowercased().hasPrefix("bcc") })
+        #expect(lines.contains { $0.hasPrefix("Content-Type: text/calendar; charset=\"UTF-8\"; method=REPLY") })
     }
 
     @Test func quotedPrintableRoundTrips() {

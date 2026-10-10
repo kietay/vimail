@@ -19,8 +19,8 @@ final class ComposeModel {
     var bccInput = "" { didSet { if bccInput != oldValue { inputChanged(.composeBcc) } } }
     var showCc: Bool
     var showBcc: Bool
-    var suggestions: [EmailAddress] = []
-    var suggestionIndex = 0
+    /// Contacts matching what is typed in To, Cc or Bcc.
+    let suggestions: ContactSuggestions
     var lastFocus: FocusTarget? = .composeBody
     var previewHTML = ""
     var savedAt: Date?
@@ -36,7 +36,6 @@ final class ComposeModel {
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private let store: MailStore
     @ObservationIgnored private var saveTask: Task<Void, Never>?
-    @ObservationIgnored private var suggestionTask: Task<Void, Never>?
     @ObservationIgnored private var previewTask: Task<Void, Never>?
     @ObservationIgnored private var everSaved = false
     /// The signature that turning it back on restores.
@@ -49,6 +48,7 @@ final class ComposeModel {
         self.source = source
         self.store = store
         self.app = app
+        suggestions = ContactSuggestions(store: store)
         showCc = !draft.cc.isEmpty
         showBcc = !draft.bcc.isEmpty
         everSaved = !draft.isBlank
@@ -157,7 +157,9 @@ final class ComposeModel {
             DispatchQueue.main.async { [weak self] in self?.setInput(typing, for: field) }
             return
         }
-        updateSuggestions(for: typing.trimmingCharacters(in: .whitespaces))
+        suggestions.update(for: typing.trimmingCharacters(in: .whitespaces)) { [weak self] in
+            Set(self?.draft.recipients.map(\.normalized) ?? [])
+        }
     }
 
     private func add(_ addresses: [EmailAddress], to field: FocusTarget) {
@@ -190,33 +192,10 @@ final class ComposeModel {
         return true
     }
 
-    private func updateSuggestions(for token: String) {
-        suggestionTask?.cancel()
-        guard !token.isEmpty, !token.contains("<") else {
-            suggestions = []
-            return
-        }
-        let store = store
-        suggestionTask = Task {
-            try? await Task.sleep(for: .milliseconds(40))
-            guard !Task.isCancelled, let found = try? await store.contacts(matching: token) else { return }
-            let existing = Set(draft.recipients.map(\.normalized))
-            suggestions = found.filter { !existing.contains($0.normalized) }
-            suggestionIndex = 0
-        }
-    }
-
-    func moveSuggestion(_ delta: Int) {
-        guard !suggestions.isEmpty else { return }
-        suggestionIndex = (suggestionIndex + delta + suggestions.count) % suggestions.count
-    }
-
     func acceptSuggestion(for field: FocusTarget, index: Int? = nil) {
-        guard !suggestions.isEmpty else { return }
-        let chosen = suggestions[min(index ?? suggestionIndex, suggestions.count - 1)]
+        guard let chosen = suggestions.take(at: index) else { return }
         add([chosen], to: field)
         setInput("", for: field)
-        suggestions = []
     }
 
     /// Recipients that do not look like email addresses.

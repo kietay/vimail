@@ -5,7 +5,8 @@ import Foundation
 /// Allowed: words, `"phrases"`, `-word`, `from:`, `-from:`, `to:`, `subject:`, `label:`, `-label:`,
 /// `has:attachment`, `is:list`, `before:` and `after:`. Operators that change after mail arrives
 /// (`in:`, `is:read`, `is:unread`, `is:starred`) or with the clock (`newer_than:`, `older_than:`)
-/// are rejected, because a rule decides once per message.
+/// are rejected, because a rule decides once per message. So is calendar search (`has:invite`,
+/// `invite:`, `organizer:me`).
 public struct RuleFilter: Hashable, Sendable {
     /// Everything except the label terms. The store tests it in SQL.
     public var query: SearchQuery
@@ -78,6 +79,12 @@ public struct RuleFilter: Hashable, Sendable {
             return SearchQuery.parseDate(value) == nil ? "\(key): needs a date such as 2026-10-01" : nil
         case "newer_than", "older_than":
             return "\(key): is not available in rules: it depends on today's date. Use after: or before: with a date"
+        case "invite", "invitation", "organizer":
+            // Calendar search (`invite:request`, `organizer:me`, ...) tests a conversation's invitation files, which
+            // are read after a message arrives. Values search does not know stay text, as in search.
+            let calendar = SearchQuery.parse(raw)
+            guard calendar.invitation != nil || calendar.organizedByMe != nil else { return nil }
+            return "\(key):\(value) is not available in rules: invitations are read after a message arrives"
         default:
             // Not an operator (for example "re:" or a URL): searched as text, as in search.
             return nil

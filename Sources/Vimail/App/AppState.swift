@@ -145,6 +145,11 @@ struct AppSettings: Codable, Equatable {
     var dummyFailureRate = 0.0
     /// Claude for rules: model, consent per account, budgets, pause.
     var ai = AISettings.buildDefault
+    /// After Y, M or N on an invitation: archive its mail and move to the next conversation.
+    var archiveInvitationsAfterAnswer = true
+    /// Working hours (minutes after midnight): the day column on an invitation shows at least these.
+    var workdayStart = 9 * 60
+    var workdayEnd = 18 * 60
 
     init() {}
 
@@ -193,12 +198,16 @@ struct AppSettings: Codable, Equatable {
         // VIMAIL_AI_BUDGET raises saved budgets too.
         ai = ai.raisingBudgets()
         #endif
+        archiveInvitationsAfterAnswer = (try? container.decode(Bool.self, forKey: .archiveInvitationsAfterAnswer)) ?? defaults.archiveInvitationsAfterAnswer
+        workdayStart = (try? container.decode(Int.self, forKey: .workdayStart)) ?? defaults.workdayStart
+        workdayEnd = (try? container.decode(Int.self, forKey: .workdayEnd)) ?? defaults.workdayEnd
     }
 
     enum CodingKeys: String, CodingKey {
         case appearance, lightTheme, darkTheme, markReadDelay, undoSendSeconds, archiveOnSend, quickSnooze, loadRemoteImages, editorCommand
         case composeStartsInVim, showComposePreview, signatures, defaultSignature, alwaysShowKeyHints, dataSource, gmailAccount, pollSeconds
         case dummySimulateIncomingMail, dummyLatencyMilliseconds, dummyFailureRate, ai
+        case archiveInvitationsAfterAnswer, workdayStart, workdayEnd
         case legacyTheme = "theme"
         case legacySignature = "signature"
         case legacyUseGmailSignature = "useGmailSignature"
@@ -227,6 +236,9 @@ struct AppSettings: Codable, Equatable {
         try container.encode(dummyLatencyMilliseconds, forKey: .dummyLatencyMilliseconds)
         try container.encode(dummyFailureRate, forKey: .dummyFailureRate)
         try container.encode(ai, forKey: .ai)
+        try container.encode(archiveInvitationsAfterAnswer, forKey: .archiveInvitationsAfterAnswer)
+        try container.encode(workdayStart, forKey: .workdayStart)
+        try container.encode(workdayEnd, forKey: .workdayEnd)
     }
 
     /// The theme to show for a system appearance.

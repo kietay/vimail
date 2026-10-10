@@ -150,8 +150,9 @@ extension MailStore {
     /// The message `m` came from a mailing list (it has a List-Unsubscribe header).
     static let isListMessage = "(m.list_unsubscribe IS NOT NULL AND m.list_unsubscribe != '')"
 
-    /// SQL for a thread query. `selecting` is either the summary column list or `COUNT(*)`.
-    static func threadQuerySQL(_ query: ThreadQuery, selecting: String, paged: Bool) -> (String, [SQLBindable]) {
+    /// SQL for a thread query. `selecting` is either the summary column list or `COUNT(*)`. `me` is the account's own
+    /// addresses (lowercased), for `organizer:me`.
+    static func threadQuerySQL(_ query: ThreadQuery, selecting: String, paged: Bool, me: Set<String>) -> (String, [SQLBindable]) {
         var joins: [String] = []
         var conditions: [String] = []
         var args: [SQLBindable] = []
@@ -197,6 +198,36 @@ extension MailStore {
         if query.hasAttachment == true { conditions.append("t.has_attachments = 1") }
         if query.isList == true {
             conditions.append("EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND \(isListMessage))")
+        }
+        if let invitation = query.invitation {
+            let file = "SELECT 1 FROM invitations i WHERE i.thread_id = t.id AND i.payload IS NOT NULL"
+            switch invitation {
+            case .any: conditions.append("EXISTS (\(file))")
+            case .request: conditions.append("EXISTS (\(file) AND i.method = 'REQUEST' AND i.sequence = 0)")
+            case .update: conditions.append("EXISTS (\(file) AND i.method = 'REQUEST' AND i.sequence > 0)")
+            case .cancel: conditions.append("EXISTS (\(file) AND i.method = 'CANCEL')")
+            case .reply: conditions.append("EXISTS (\(file) AND i.method = 'REPLY')")
+            case .pending:
+                // The waiting list's events (the app works them out by the answer rule), by their invitations' conversations.
+                conditions.append("EXISTS (\(file) AND i.method = 'REQUEST' AND i.uid IN (SELECT value FROM json_each(?)))")
+                args.append((try? json(query.waitingInvitationUIDs ?? [])) ?? "[]")
+            case .conflict:
+                // The events the app found overlapping something else you go to (`AgendaItem.overlappingUIDs`), by their
+                // invitations' conversations.
+                conditions.append("EXISTS (\(file) AND i.method = 'REQUEST' AND i.uid IN (SELECT value FROM json_each(?)))")
+                args.append((try? json(query.conflictingInvitationUIDs ?? [])) ?? "[]")
+            }
+        }
+        if query.organizedByMe == true {
+            // An invitation file whose event's organizer is one of your addresses.
+            let addresses = me.sorted()
+            if addresses.isEmpty {
+                conditions.append("0")
+            } else {
+                let placeholders = Array(repeating: "?", count: addresses.count).joined(separator: ", ")
+                conditions.append("t.id IN (SELECT i.thread_id FROM invitations i WHERE i.organizer IN (\(placeholders)))")
+                args += addresses.map { $0 as SQLBindable }
+            }
         }
         if let before = query.before {
             conditions.append("t.last_date < ?")
@@ -265,32 +296,35 @@ extension MailStore {
 
     public func threads(_ query: ThreadQuery) async throws -> [ThreadSummary] {
         if case .mailbox(.drafts) = query.scope { return try await draftSummaries() }
-        return try await read { db in try Self.threads(query, db) }
+        let me = selfAddresses
+        return try await read { db in try Self.threads(query, db, me: me) }
     }
 
-    static func threads(_ query: ThreadQuery, _ db: SQLiteDatabase) throws -> [ThreadSummary] {
-        let (sql, args) = threadQuerySQL(query, selecting: summaryColumns, paged: true)
+    static func threads(_ query: ThreadQuery, _ db: SQLiteDatabase, me: Set<String>) throws -> [ThreadSummary] {
+        let (sql, args) = threadQuerySQL(query, selecting: summaryColumns, paged: true, me: me)
         return try db.query(sql, args, summary)
     }
 
     public func count(_ query: ThreadQuery) async throws -> Int {
         if case .mailbox(.drafts) = query.scope { return try await read { db in try db.scalar("SELECT COUNT(*) FROM drafts") } }
+        let me = selfAddresses
         return try await read { db in
-            let (sql, args) = Self.threadQuerySQL(query, selecting: "COUNT(*)", paged: false)
+            let (sql, args) = Self.threadQuerySQL(query, selecting: "COUNT(*)", paged: false, me: me)
             return try db.scalar(sql, args)
         }
     }
 
     /// Counts for several queries in one read (sidebar and view tabs).
     public func counts(_ queries: [String: ThreadQuery]) async throws -> [String: Int] {
-        try await read { db in
+        let me = selfAddresses
+        return try await read { db in
             var result: [String: Int] = [:]
             for (key, query) in queries {
                 if case .mailbox(.drafts) = query.scope {
                     result[key] = try db.scalar("SELECT COUNT(*) FROM drafts")
                     continue
                 }
-                let (sql, args) = Self.threadQuerySQL(query, selecting: "COUNT(*)", paged: false)
+                let (sql, args) = Self.threadQuerySQL(query, selecting: "COUNT(*)", paged: false, me: me)
                 result[key] = try db.scalar(sql, args)
             }
             return result

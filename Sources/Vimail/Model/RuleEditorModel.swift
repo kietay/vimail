@@ -790,4 +790,6 @@ final class RuleEditorModel {
 struct RuleMatches: Equatable {
     var title: String
     var threadIDs: [String]
+    /// Listed from the calendar view, which has no conversation list: leaving goes back to the calendar.
+    var fromCalendar = false
 }

@@ -93,6 +93,31 @@ struct SettingsView: View {
                         toggle("Load remote images", detail: "Off blocks tracking pixels. Show per message from the reader.", isOn: $model.settings.loadRemoteImages)
                         toggle("Always show key hints", detail: "Otherwise hints appear on hover.", isOn: $model.settings.alwaysShowKeyHints)
 
+                        divider("CALENDAR")
+                        row("Calendar", detail: calendarDetail) {
+                            if model.services.isGmail {
+                                settingsButton(model.services.calendarEngine == nil ? "Connect Google Calendar" : "Connect again", key: nil) { model.connectCalendar() }
+                                    .frame(width: 200)
+                            }
+                        }
+                        toggle("Archive invitations after answering", detail: "Y, M or N also archives the invitation and moves to the next conversation. u undoes both.",
+                               isOn: $model.settings.archiveInvitationsAfterAnswer)
+                        row("Working hours", detail: "The day column on an invitation shows at least these hours.") {
+                            HStack(spacing: 6) {
+                                Picker("", selection: $model.settings.workdayStart) {
+                                    ForEach(Array(stride(from: 5 * 60, through: 12 * 60, by: 30)), id: \.self) { Text(Formatting.minuteTime($0)).tag($0) }
+                                }
+                                .labelsHidden()
+                                .frame(width: 90)
+                                Text("to").font(AppFonts.sans(11)).foregroundStyle(theme.mutedForeground)
+                                Picker("", selection: $model.settings.workdayEnd) {
+                                    ForEach(Array(stride(from: 13 * 60, through: 23 * 60, by: 30)), id: \.self) { Text(Formatting.minuteTime($0)).tag($0) }
+                                }
+                                .labelsHidden()
+                                .frame(width: 90)
+                            }
+                        }
+
                         divider("COMPOSE")
                         toggle("Show HTML preview", detail: "The exact email recipients get, next to the editor.", isOn: $model.settings.showComposePreview)
                         toggle("Archive on send", detail: "Sending a reply archives the conversation. Undo send brings it back.", isOn: $model.settings.archiveOnSend)
@@ -150,6 +175,14 @@ struct SettingsView: View {
         guard let section = model.settingsSection else { return }
         model.settingsSection = nil
         DispatchQueue.main.async { proxy.scrollTo(section, anchor: .top) }
+    }
+
+    private var calendarDetail: String {
+        if !model.services.isGmail { return "The dummy account has its own calendar." }
+        guard model.services.calendarEngine != nil else {
+            return "Not connected: Y, M and N answer invitations by email. Enable the Google Calendar API in your Cloud project, then connect."
+        }
+        return model.services.calendarCanChange ? "Connected. Answers and events sync with Google Calendar." : "Connected, read only."
     }
 
     private var accountDetail: String {

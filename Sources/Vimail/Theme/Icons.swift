@@ -3,7 +3,7 @@ import SwiftUI
 /// The design's line icons, drawn from the same SVG path data (24×24 viewBox, 1.5 stroke).
 nonisolated enum IconName: String, CaseIterable {
     case inbox, send, file, archive, trash, star, search, plus, arrow, reply, chevron, chevronLeft, down
-    case more, panel, command, settings, check, close, clock, link, pin, views, tag, folder, attach, spam, refresh, edit
+    case more, panel, command, settings, check, close, clock, link, pin, views, tag, folder, attach, spam, refresh, edit, calendar
     case unsubscribe
 }
 
@@ -80,6 +80,7 @@ nonisolated struct IconShape: Shape {
         case .edit: [.path("M4 20h4L19 9l-4-4L4 16Z M13 7l4 4")]
         // An envelope with a minus sign.
         case .unsubscribe: [.path("M21 12V5H3v14h9"), .path("m3 6 9 7 9-7"), .path("M15 18h6")]
+        case .calendar: [.rect(3, 5, 18, 16, 2), .path("M3 10h18 M8 3v4 M16 3v4")]
         }
     }
 }

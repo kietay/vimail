@@ -34,6 +34,52 @@ struct ReaderPayload: Encodable {
         var html: String?
         var attachments: [AttachmentItem]
         var sending: Bool
+        /// The message is the invitation the event page shows: it collapses to one line under the page.
+        var invitation = false
+    }
+
+    /// An event shown as a page: an invitation in mail, or an event in the calendar.
+    struct EventPage: Encodable, Equatable {
+        struct Chip: Encodable, Equatable { var text: String; var kind: String }
+        struct Fact: Encodable, Equatable { var label: String; var value: String; var key: String?; var link: String? }
+        struct Guest: Encodable, Equatable { var name: String; var answer: String; var kind: String }
+        struct Answer: Encodable, Equatable { var title: String; var key: String; var action: String; var selected: Bool }
+        /// One event in the day column. Minutes are after midnight; `kind`: mine, invite, clash, maybe, declined.
+        struct Block: Encodable, Equatable { var title: String; var time: String; var start: Int; var end: Int; var column: Int; var columns: Int; var kind: String }
+        struct Day: Encodable, Equatable {
+            var title: String
+            var startMinute: Int
+            var endMinute: Int
+            var allDay: [String]
+            var blocks: [Block]
+            var note: String?
+            var noteKind: String?
+            var nowMinute: Int?
+            /// Where a narrow reader scrolls the column to (the invitation's start).
+            var focusMinute: Int
+            /// The column shows another day than the event's ({ and }).
+            var peeking: Bool
+        }
+
+        var kicker: String
+        var title: String
+        var when: String
+        var relative: String?
+        var zone: String?
+        var repeats: String?
+        var chips: [Chip] = []
+        var facts: [Fact] = []
+        var guests: [Guest] = []
+        var guestSummary: String?
+        var agenda: String?
+        var changes: [String] = []
+        var answers: [Answer] = []
+        var footer: String?
+        var day: Day?
+        /// Shown instead of the day column, for example when the calendar is not connected.
+        var dayMessage: String?
+        /// One line for the collapsed original email.
+        var original: String?
     }
 
     var dark = true
@@ -52,6 +98,9 @@ struct ReaderPayload: Encodable {
     var showHints = false
     var menu: [MenuItem] = []
     var messages: [Message] = []
+    var event: EventPage?
+    /// "Next with Alex Morgan: Mon Oct 12 13:00 · 1:1 with Alex", under the conversation's header.
+    var nextWith: String?
 
     static func empty(_ text: String, dark: Bool) -> ReaderPayload {
         var payload = ReaderPayload()

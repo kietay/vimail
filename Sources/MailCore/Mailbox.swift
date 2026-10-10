@@ -121,15 +121,17 @@ public struct SavedView: Identifiable, Hashable, Codable, Sendable {
     }
 }
 
-/// What the list pane shows: a mailbox or a saved view.
+/// What the list pane shows: a mailbox, a saved view, or the calendar.
 public enum Destination: Hashable, Codable, Sendable {
     case mailbox(Mailbox)
     case view(String)
+    case calendar
 
     public var key: String {
         switch self {
         case .mailbox(let mailbox): "mailbox:\(mailbox.key)"
         case .view(let id): "view:\(id)"
+        case .calendar: "calendar"
         }
     }
 }
@@ -172,6 +174,16 @@ public struct ThreadQuery: Hashable, Sendable {
     public var hasAttachment: Bool?
     /// Some message has a List-Unsubscribe header (`is:list`).
     public var isList: Bool?
+    /// Calendar mail only (`has:invite`, `invite:pending`, ...).
+    public var invitation: SearchQuery.InvitationFilter?
+    /// For `invite:pending`: the events (iCalendar UIDs) waiting for your answer, as the app's waiting list has them by
+    /// the answer rule. The store lists the conversations with their invitations; nil lists none.
+    public var waitingInvitationUIDs: [String]?
+    /// For `invite:conflict`: the events (iCalendar UIDs) that overlap something else you go to, as the app works them
+    /// out from your time. The store lists the conversations with their invitations; nil lists none.
+    public var conflictingInvitationUIDs: [String]?
+    /// Calendar mail about events you organize (`organizer:me`).
+    public var organizedByMe: Bool?
     public var before: Date?
     public var after: Date?
     /// Restricts results to these conversation IDs (used to keep "sticky" rows in filtered lists).
@@ -213,6 +225,8 @@ public struct ThreadQuery: Hashable, Sendable {
         copy.excludedTerms += search.excluded
         if let hasAttachment = search.hasAttachment { copy.hasAttachment = hasAttachment }
         if let isList = search.isList { copy.isList = isList }
+        if let invitation = search.invitation { copy.invitation = invitation }
+        if let organizedByMe = search.organizedByMe { copy.organizedByMe = organizedByMe }
         if let before = search.before { copy.before = before }
         if let after = search.after { copy.after = after }
         return copy

@@ -135,6 +135,8 @@ struct LiveRuleEvalTests {
     static func archetype(of message: MailMessage, me: EmailAddress) -> Archetype? {
         let from = message.from.normalized
         guard from != me.normalized, !message.labelIDs.contains(SystemLabel.spam) else { return nil }
+        // Invitations come from their organizer, as Google sends them, with the event as an invite.ics file.
+        if message.attachments.contains(where: { $0.filename == "invite.ics" }) { return .invite }
         let services: [(DummyContent.Service, Archetype)] = [
             (DummyContent.stripe, .receipt), (DummyContent.theBrowser, .newsletter), (DummyContent.arena, .newsletter),
             (DummyContent.margins, .newsletter), (DummyContent.linear, .notification), (DummyContent.github, .notification),
