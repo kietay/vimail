@@ -84,13 +84,15 @@ them with one key, and you create events from one typed line. Everything works o
 - **Invitations.** When the cursor reaches an invitation, the reader shows the event instead of the email: time,
   join link, organizer, every guest's answer, the agenda, and your day beside it with the invitation dashed and
   overlaps in red. `{` `}` show the day before or after. A repeating invitation shows its next date and says how many
-  of its next 8 dates overlap. `Y` `M` `N` answer yes, maybe or no; `R` adds a note. An invitation to one changed date of a
-  series answers only that date. An invitation Google keeps off your calendar until you answer (from someone it
+  of its next 8 dates overlap. `Y` `M` `N` answer yes, maybe or no; `R` adds a note. On your calendar, an invitation to one
+  changed date of a series answers only that date. An invitation Google keeps off your calendar until you answer (from someone it
   does not know) is looked up when you answer it. An invitation that is not on your Google Calendar at all, or any
   invitation while the calendar is not connected, is answered by email: an iMIP reply (RFC 6047) to the organizer, in
   the invitation's conversation, from your address written as the invitation writes it. The organizer's calendar then
-  records your answer. Here the invitation stops waiting and says "you said yes by email"; a newer version of it waits
-  again. Like a send, the email leaves after the undo-send window, and `u` takes it back until then (once sent, it
+  records your answer. By email, one answer covers the whole event and every change its mail told so far; a date the
+  organizer changes after your answer waits again and is answered on its own, and a newer invitation to the whole event
+  waits again. Here the invitation stops waiting and says "you said yes by email", and a yes or maybe counts as your
+  time (next meeting, overlaps). Like a send, the email leaves after the undo-send window, and `u` takes it back until then (once sent, it
   cannot be unsent). Nothing is sent for a meeting cancelled since, or one the organizer took you off, nor when the
   organizer's address is not a plain `name@domain`.
   A join link is used only when it is a web link (`https://`).
@@ -99,7 +101,8 @@ them with one key, and you create events from one typed line. Everything works o
 - **Calendar view.** `gc` (from an invitation: at its event). Invitations waiting for your answer come first, then
   two weeks of days. Invitations that are only in mail (not on your Google Calendar) are marked "from mail". A repeating
   one is on each of its days (a day that later mail moved is at its new time, a cancelled day is gone, even when you
-  binned that mail) and waits once, at its next day; answering any of its days, `#` too, answers the whole series.
+  binned that mail) and waits once, at its first day that waits; answering any of its days, `#` too, answers the whole
+  series, except a day changed after your answer, which is answered on its own.
   `j` `k` move, `{` `}` `[` `]` change the day or week, `t` is today, `↵` edits your own event,
   `r` `a` email the organizer or the guests, `#` cancels your event or declines an invitation, `gm` opens the
   invitation mail, `gj` joins the meeting. The status bar shows your next meeting; `gj` joins it from the list or the reader too.
@@ -146,7 +149,8 @@ them with one key, and you create events from one typed line. Everything works o
   meanwhile, vimail merges changes to different fields (guests by address) and otherwise keeps Google's version and
   says so.
 - **Your own time.** A colleague's calendar shown beside yours lists their events, but your next meeting, overlaps,
-  free times, find a time and the invitations waiting for you count only your own calendars.
+  free times, find a time and the invitations waiting for you count only your own calendars, and the invitations only
+  in mail that you said yes or maybe to by email.
 
 ## Logs
 
@@ -202,7 +206,8 @@ In read-filtered lists (Unread tab, unread views) it stays visible until you ref
 
 **Search:** `from:` `to:` `subject:` `label:` `in:inbox|sent|trash|spam|snoozed|archive|anywhere`
 `is:unread|read|starred` `has:attachment` `before:` `after:` `older_than:` `newer_than:` `"phrases"` `-exclude`,
-and for calendar mail `has:invite` `invite:request|update|cancel|reply|pending|conflict` (pending: not answered yet;
+and for calendar mail `has:invite` `invite:request|update|cancel|reply|pending|conflict` (pending: not answered yet, on
+your own calendar or by email, as the calendar view's waiting list;
 conflict: overlaps an event you go to in the next 60 days) and `organizer:me` (events you organize; with `invite:reply`,
 your guests' answers).
 

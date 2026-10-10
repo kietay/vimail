@@ -21,8 +21,9 @@ private struct SamplesReview {
         message = try #require(try await mail.store.message(id: file.messageID))
     }
 
+    /// In the waiting list: only in mail, with a date that waits for your answer.
     func isWaiting(_ mail: Harness) async throws -> Bool {
-        try await mail.store.invitationsWithoutEvents().contains { $0.messageID == file.messageID }
+        try await mail.store.mailOnlyEvents().contains { $0.uid == invitation.uid && $0.event.waitingDate(now: Date(), answers: $0.answers) != nil }
     }
 }
 
@@ -160,7 +161,7 @@ struct InvitationReplySyncTests {
         #expect(reply.answer.sequence == 1 && reply.message.threadID == review.thread)
         let answer = try #require(reply.message.calendar.flatMap { ICalendar.invitations(from: $0.text).first })
         #expect(answer.sequence == 1 && answer.start.instant() == moved.start.instant())
-        #expect(try await mail.store.invitationsWithoutEvents().contains { $0.main?.uid == review.invitation.uid } == false)
+        #expect(try await review.isWaiting(mail) == false)
     }
 
     @Test func aMeetingCancelledSinceIsNotAnsweredByEmail() async throws {

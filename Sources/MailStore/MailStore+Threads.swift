@@ -183,9 +183,13 @@ extension MailStore {
             case .cancel: conditions.append("EXISTS (\(file) AND i.method = 'CANCEL')")
             case .reply: conditions.append("EXISTS (\(file) AND i.method = 'REPLY')")
             case .pending:
+                // As the waiting list: not answered on your own calendar, or, only in mail, by email (an answer to the
+                // whole event covers its dates up to its SEQUENCE).
                 conditions.append(
-                    "EXISTS (SELECT 1 FROM invitations i JOIN events e ON e.ical_uid = i.uid WHERE i.thread_id = t.id"
-                        + " AND i.method = 'REQUEST' AND e.self_response = 'needsAction' AND e.status != 'cancelled')")
+                    "EXISTS (\(file) AND i.method = 'REQUEST' AND (EXISTS (SELECT 1 FROM events e WHERE e.ical_uid = i.uid"
+                        + " AND e.calendar_id IN (\(Self.yourCalendars)) AND e.self_response = 'needsAction' AND e.status != 'cancelled')"
+                        + " OR (\(Self.withoutEvents()) AND NOT EXISTS (SELECT 1 FROM invitation_answers a WHERE a.uid = i.uid"
+                        + " AND a.recurrence_id IN ('', COALESCE(i.recurrence_id, '')) AND a.sequence >= i.sequence))))")
             case .conflict:
                 // An occurrence of the invitation's event in the next 60 days that overlaps a busy event you have not declined.
                 conditions.append(

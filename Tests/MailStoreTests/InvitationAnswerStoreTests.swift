@@ -49,12 +49,17 @@ private func queuedReplies(_ store: MailStore) async throws -> [Int64: Invitatio
     return replies
 }
 
+/// The invitations only in mail that still wait for your answer, as the waiting list has them: at the first date that waits.
+private func waitingInvitations(_ store: MailStore) async throws -> [Invitation] {
+    try await store.mailOnlyEvents().compactMap { $0.event.waitingDate(now: Date(), answers: $0.answers)?.invitation }
+}
+
 @Suite("Answers by email in the store")
 struct InvitationAnswerStoreTests {
     @Test func anAnswerStopsTheInvitationWaitingAndItsEmailWaitsInTheOutbox() async throws {
         let store = try await seededStore()
         try await save([invite("i1", thread: "ti")], in: store)
-        #expect(try await store.invitationsWithoutEvents().map(\.messageID) == ["i1"])
+        #expect(try await waitingInvitations(store).map(\.uid) == ["review@studio.co"])
 
         let outboxID = try await queue(.accepted, in: store)
         let queued = try #require(try await queuedReplies(store)[outboxID])
@@ -65,9 +70,11 @@ struct InvitationAnswerStoreTests {
         #expect(try await store.thread(id: "ti")?.messages.count == 2)
         #expect(try await store.threads(.mailbox(.sent)).map(\.id).contains("ti"))
 
-        #expect(try await store.invitationsWithoutEvents().isEmpty)
-        let answered = try #require(try await store.invitationsWithoutEvents(includingAnswered: true).first)
-        #expect(answered.messageID == "i1" && answered.answer?.response == .accepted && answered.answer?.outboxID == outboxID)
+        #expect(try await waitingInvitations(store).isEmpty)
+        let answered = try #require(try await store.mailOnlyEvents().first)
+        let answer = answered.event.answer(at: "", answers: answered.answers)
+        #expect(answered.uid == "review@studio.co" && answer?.response == .accepted && answer?.outboxID == outboxID)
+        #expect(try await store.mailOnlyEvent(uid: "review@studio.co") == answered)
         #expect(try await store.invitations(threadID: "ti").last?.answer?.response == .accepted)
         #expect(try await store.latestInvitations(threadIDs: ["ti"])["ti"]?.answer?.response == .accepted)
         #expect(try await store.invitationAnswer(uid: "review@studio.co")?.outboxID == outboxID)
@@ -78,20 +85,20 @@ struct InvitationAnswerStoreTests {
         try await save([invite("i1", thread: "ti")], in: store)
         _ = try await queue(.declined, in: store)
         try await save([invite("i2", thread: "tu", sequence: 1)], in: store)
-        let waiting = try await store.invitationsWithoutEvents()
-        #expect(waiting.map(\.messageID) == ["i2"])
-        #expect(waiting.first?.answer == nil)
+        #expect(try await waitingInvitations(store).map(\.sequence) == [1])
+        let known = try await store.mailOnlyEvent(uid: "review@studio.co")
+        #expect(known.event.answer(at: "", answers: known.answers) == nil)
         // The answer still covers the invitation it answered.
         #expect(try await store.invitations(threadID: "ti").last?.answer?.response == .declined)
 
         // Answering the newer one covers both.
         _ = try await queue(.accepted, in: store, thread: "tu", sequence: 1)
-        #expect(try await store.invitationsWithoutEvents().isEmpty)
+        #expect(try await waitingInvitations(store).isEmpty)
         #expect(try await store.invitations(uid: "review@studio.co").map { $0.answer?.response } == [.accepted, .accepted])
 
         // A later answer from the older mail still covers the newer one.
         _ = try await queue(.tentative, in: store)
-        #expect(try await store.invitationsWithoutEvents().isEmpty)
+        #expect(try await waitingInvitations(store).isEmpty)
         #expect(try await store.invitationAnswer(uid: "review@studio.co")?.sequence == 1)
         #expect(try await store.invitationAnswer(uid: "review@studio.co")?.response == .tentative)
     }
@@ -102,9 +109,9 @@ struct InvitationAnswerStoreTests {
         try await save([invite("i1", thread: "ti", recurrenceID: tuesday)], in: store)
         // An answer to the whole series does not answer one changed date of it.
         _ = try await queue(.accepted, in: store)
-        #expect(try await store.invitationsWithoutEvents().map(\.messageID) == ["i1"])
+        #expect(try await waitingInvitations(store).map { $0.recurrenceID?.occurrenceKey } == [tuesday.occurrenceKey])
         _ = try await queue(.declined, in: store, recurrenceID: tuesday.occurrenceKey)
-        #expect(try await store.invitationsWithoutEvents().isEmpty)
+        #expect(try await waitingInvitations(store).isEmpty)
         #expect(try await store.invitationAnswer(uid: "review@studio.co", recurrenceID: tuesday.occurrenceKey)?.response == .declined)
         #expect(try await store.invitationAnswer(uid: "review@studio.co")?.response == .accepted)
     }
@@ -117,7 +124,7 @@ struct InvitationAnswerStoreTests {
         #expect(try await store.outboxCount() == 0)
         #expect(try await store.thread(id: "ti")?.messages.map(\.id) == ["i1"])
         #expect(try await store.invitationAnswer(uid: "review@studio.co") == nil)
-        #expect(try await store.invitationsWithoutEvents().map(\.messageID) == ["i1"])
+        #expect(try await waitingInvitations(store).map(\.uid) == ["review@studio.co"])
         #expect(try await store.cancelInvitationReply(outboxID: outboxID) == false)
     }
 
@@ -130,7 +137,7 @@ struct InvitationAnswerStoreTests {
         #expect(try await store.cancelInvitationReply(outboxID: outboxID) == false)
         #expect(try await store.invitationAnswer(uid: "review@studio.co")?.response == .tentative)
         #expect(try await store.outboxCount() == 1)
-        #expect(try await store.invitationsWithoutEvents().isEmpty)
+        #expect(try await waitingInvitations(store).isEmpty)
     }
 
     @Test func undoingTheLaterOfTwoAnswersPutsBackTheEarlierOne() async throws {
@@ -173,7 +180,7 @@ struct InvitationAnswerStoreTests {
         try await store.restoreFailedInvitationReply(waiting, outboxID: no)
         #expect(try await store.invitationAnswer(uid: "review@studio.co") == nil)
         #expect(try await store.thread(id: "ti")?.messages.map(\.id) == ["i1"])
-        #expect(try await store.invitationsWithoutEvents().map(\.messageID) == ["i1"])
+        #expect(try await waitingInvitations(store).map(\.uid) == ["review@studio.co"])
     }
 
     @Test func yourOwnRepliesAreNotTheConversationsInvitation() async throws {

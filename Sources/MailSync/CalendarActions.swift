@@ -148,19 +148,22 @@ public final class CalendarActions: Sendable {
 
     /// Answers an invitation that is not on Google Calendar by email (iMIP): a reply to the organizer, in the conversation
     /// of the invitation's `mail`, that leaves through the mail outbox after the undo window, like a send. It answers the
-    /// newest version of the invitation, which may have come in another conversation. The answer is kept here, so the
-    /// invitation stops waiting and its pages say what you answered. Nil when the invitation cannot be answered by email
-    /// (no organizer to write to, or you organize it) or the account is not known yet. Throws `EmailAnswerError.withdrawn`
-    /// when the meeting is off since (cancelled, or you were taken off it): nothing is sent then.
+    /// newest version of the invitation, which may have come in another conversation (never one from Spam). The answer
+    /// is kept here, covering `covering` (the SEQUENCE it answers; for a whole event, `InvitedEvent.coveredSequence`), so
+    /// the invitation stops waiting and its pages say what you answered. Nil when the invitation cannot be answered by
+    /// email (no organizer to write to, or you organize it) or the account is not known yet. Throws
+    /// `EmailAnswerError.withdrawn` when the meeting is off since (cancelled, or you were taken off it): nothing is sent then.
     public func answerByEmail(
-        _ invitation: Invitation, mail: MailMessage, response: ResponseStatus, comment: String? = nil, undoWindow: TimeInterval
+        _ invitation: Invitation, mail: MailMessage, response: ResponseStatus, comment: String? = nil, covering: Int? = nil, undoWindow: TimeInterval
     ) async throws -> EmailAnswerRecord? {
         guard let account = try await store.account() else { return nil }
+        let invited = try await store.invitedEvent(uid: invitation.uid)
+        let invitation = invited.newest(invitation)
+        // Cancelled since, as the mail tells it (a cancellation can also be a REQUEST marked cancelled).
         let key = invitation.recurrenceID?.occurrenceKey
-        let newer = try await store.invitations(uid: invitation.uid).compactMap(\.main)
-            .filter { $0.method == .request && $0.recurrenceID?.occurrenceKey == key && $0.sequence > invitation.sequence }
-            .max { $0.sequence < $1.sequence }
-        let invitation = newer ?? invitation
+        if invited.main?.isCancellation == true || key.flatMap({ invited.changedDates[$0]?.isCancellation }) == true {
+            throw EmailAnswerError.withdrawn(summary: invitation.summary)
+        }
         if try await store.isWithdrawn(invitation) { throw EmailAnswerError.withdrawn(summary: invitation.summary) }
         let now = Date()
         guard let message = ICalendar.replyMail(
@@ -170,7 +173,7 @@ public final class CalendarActions: Sendable {
         let note = comment.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
         let answer = InvitationAnswer(
             uid: invitation.uid, recurrenceID: invitation.recurrenceID?.occurrenceKey ?? "", response: response, comment: note,
-            sequence: invitation.sequence, answeredAt: now
+            sequence: max(invitation.sequence, covering ?? invitation.sequence), answeredAt: now
         )
         let copy = MailMessage(
             id: "local-\(UUID().uuidString.lowercased())", threadID: mail.threadID, labelIDs: [SystemLabel.sent], from: message.from,

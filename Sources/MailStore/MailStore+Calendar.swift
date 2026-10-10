@@ -37,17 +37,34 @@ public struct StoredInvitation: Hashable, Sendable {
     public var date: Date
     /// Your answer by email to this invitation (its SEQUENCE or newer), for invitations that are not on Google Calendar.
     public var answer: InvitationAnswer?
+    /// The mail is in Trash or Spam.
+    public var isBinned: Bool
 
-    public init(messageID: String, threadID: String, invitations: [Invitation], date: Date, answer: InvitationAnswer? = nil) {
+    public init(messageID: String, threadID: String, invitations: [Invitation], date: Date, answer: InvitationAnswer? = nil, isBinned: Bool = false) {
         self.messageID = messageID
         self.threadID = threadID
         self.invitations = invitations
         self.date = date
         self.answer = answer
+        self.isBinned = isBinned
     }
 
     /// The event the file is about: the series or single event, before its exceptions.
     public var main: Invitation? { invitations.first { $0.recurrenceID == nil } ?? invitations.first }
+}
+
+/// An event known only from mail, with your answers by email to it by recurrence ID ("" for the whole event). Whether it
+/// still waits for an answer, and what an answer goes to, is `InvitedEvent`'s rule (`waitingDate`, `answerTarget`).
+public struct MailOnlyEvent: Hashable, Sendable {
+    public var event: InvitedEvent
+    public var answers: [String: InvitationAnswer]
+
+    public init(event: InvitedEvent, answers: [String: InvitationAnswer] = [:]) {
+        self.event = event
+        self.answers = answers
+    }
+
+    public var uid: String { event.uid }
 }
 
 /// One event's own answer before a change, so an undo puts back exactly that.
@@ -691,31 +708,28 @@ extension MailStore {
         return try await read { db in try Self.storedInvitations(where: "i.uid = ?", [uid], me: me, db) }
     }
 
-    /// Invitations (REQUEST) whose event is on no calendar: Google has not added them, or they arrived before calendar sync.
-    /// Left out: meetings cancelled since (a CANCEL as new or newer, for the whole event or that occurrence), meetings the
-    /// sync removed from your calendar (the organizer deleted them, or took you off), mail in Trash or Spam, and, unless
-    /// `includingAnswered`, invitations you answered by email (a newer invitation, with a higher SEQUENCE, waits again).
-    public func invitationsWithoutEvents(includingAnswered: Bool = false) async throws -> [StoredInvitation] {
-        let me = selfAddresses
-        return try await read { db in
-            try Self.storedInvitations(where: Self.withoutEvents + (includingAnswered ? "" : " AND a.uid IS NULL"), [], me: me, db)
-        }
-    }
-
-    /// Events known only from mail: those of `invitationsWithoutEvents` (the ones you answered by email too, with
-    /// `includingAnswered`), each as all its mail tells it (`invitedEvent`).
-    public func mailOnlyEvents(includingAnswered: Bool = false) async throws -> [InvitedEvent] {
+    /// Events known only from mail: invitations (REQUEST) on none of your calendars (Google has not added them, or they
+    /// arrived before calendar sync; with `ignoringStoredEvents`, while the calendar is not connected, any), each as all its
+    /// mail tells it, with your answers by email. Left out: meetings cancelled since (a CANCEL as new or newer, for the whole
+    /// event or that occurrence), meetings the sync removed from your calendar (the organizer deleted them, or took you
+    /// off), and mail in Trash or Spam. Whether one still waits for your answer is `InvitedEvent.waitingDate`.
+    public func mailOnlyEvents(ignoringStoredEvents: Bool = false) async throws -> [MailOnlyEvent] {
         let me = selfAddresses
         return try await read { db in
             let uids = try db.query(
                 """
                 SELECT DISTINCT i.uid FROM invitations i JOIN messages m ON m.id = i.message_id
-                LEFT JOIN invitation_answers a ON a.uid = i.uid AND a.recurrence_id = COALESCE(i.recurrence_id, '') AND a.sequence >= i.sequence
-                WHERE \(Self.withoutEvents) \(includingAnswered ? "" : "AND a.uid IS NULL") AND i.uid IS NOT NULL AND i.payload IS NOT NULL
+                WHERE \(Self.withoutEvents(ignoringStoredEvents: ignoringStoredEvents)) AND i.uid IS NOT NULL AND i.payload IS NOT NULL
                 """
             ) { $0.string(0) }
-            return try Self.invitedEvents(uids: uids, me: me, db)
+            return try Self.mailOnlyEvents(uids: uids, me: me, db)
         }
+    }
+
+    /// One event as its mail tells it (`invitedEvent`), with your answers by email to it.
+    public func mailOnlyEvent(uid: String) async throws -> MailOnlyEvent {
+        let me = selfAddresses
+        return try await read { db in try Self.mailOnlyEvents(uids: [uid], me: me, db).first ?? MailOnlyEvent(event: InvitedEvent([])) }
     }
 
     /// True when the meeting of an invitation is off since it was sent, as for the waiting list: a cancellation (CANCEL)
@@ -761,6 +775,22 @@ extension MailStore {
 
     // MARK: - Helpers
 
+    /// The events with these UIDs as their mail tells them, with your answers by email: one read for all of them.
+    static func mailOnlyEvents(uids: [String], me: Set<String>, _ db: SQLiteDatabase) throws -> [MailOnlyEvent] {
+        let events = try invitedEvents(uids: uids, me: me, db)
+        var answers: [String: [String: InvitationAnswer]] = [:]
+        for start in stride(from: 0, to: uids.count, by: 400) {
+            let chunk = Array(uids[start..<min(start + 400, uids.count)])
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            let rows = try db.query(
+                "SELECT uid, recurrence_id, response, comment, sequence, answered_at, outbox_id FROM invitation_answers WHERE uid IN (\(placeholders))",
+                chunk
+            ) { row in decodeInvitationAnswer(row, at: 0) }
+            for answer in rows.compactMap({ $0 }) { answers[answer.uid, default: [:]][answer.recurrenceID] = answer }
+        }
+        return events.map { MailOnlyEvent(event: $0, answers: answers[$0.uid] ?? [:]) }
+    }
+
     /// The events with these UIDs as their mail tells them (`invitedEvent`), each from its mail oldest first.
     static func invitedEvents(uids: [String], me: Set<String>, _ db: SQLiteDatabase) throws -> [InvitedEvent] {
         var files: [StoredInvitation] = []
@@ -779,9 +809,17 @@ extension MailStore {
         return InvitedEvent.events(from: files.sorted { $0.date < $1.date }.flatMap(\.invitations).filter { wanted.contains($0.uid) })
     }
 
-    /// `invitationsWithoutEvents`, as a condition on `invitations i`.
-    static let withoutEvents = """
-        i.method = 'REQUEST' AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ical_uid = i.uid)
+    /// `mailOnlyEvents`, as a condition on `invitations i`.
+    static func withoutEvents(ignoringStoredEvents: Bool = false) -> String {
+        "i.method = 'REQUEST' "
+            + (ignoringStoredEvents ? "" : "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ical_uid = i.uid AND e.calendar_id IN (\(yourCalendars))) ")
+            + afterEvents
+    }
+
+    /// Your own calendars: the primary one and those you own. On a colleague's calendar shown beside yours, an event is theirs.
+    static let yourCalendars = "SELECT id FROM calendars WHERE json_extract(payload, '$.isPrimary') = 1 OR json_extract(payload, '$.accessRole') = 'owner'"
+
+    static let afterEvents = """
         AND NOT EXISTS (
             SELECT 1 FROM invitations c WHERE c.uid = i.uid AND c.method = 'CANCEL' AND c.sequence >= i.sequence
                 AND (c.recurrence_id IS NULL OR c.recurrence_id = i.recurrence_id)
@@ -816,7 +854,8 @@ extension MailStore {
         try db.query(
             """
             SELECT i.message_id, i.thread_id, i.payload, m.date,
-                   a.uid, a.recurrence_id, a.response, a.comment, a.sequence, a.answered_at, a.outbox_id
+                   a.uid, a.recurrence_id, a.response, a.comment, a.sequence, a.answered_at, a.outbox_id,
+                   EXISTS (SELECT 1 FROM message_labels l WHERE l.message_id = i.message_id AND l.label_id IN ('TRASH', 'SPAM'))
             FROM invitations i JOIN messages m ON m.id = i.message_id
             LEFT JOIN invitation_answers a ON a.uid = i.uid AND a.recurrence_id = COALESCE(i.recurrence_id, '') AND a.sequence >= i.sequence
             WHERE \(condition) AND i.payload IS NOT NULL
@@ -828,7 +867,7 @@ extension MailStore {
             StoredInvitation(
                 messageID: row.string(0), threadID: row.string(1),
                 invitations: try decoder.decode([Invitation].self, from: Data(row.string(2).utf8)), date: row.date(3),
-                answer: decodeInvitationAnswer(row, at: 4)
+                answer: decodeInvitationAnswer(row, at: 4), isBinned: row.bool(11)
             )
         }
     }

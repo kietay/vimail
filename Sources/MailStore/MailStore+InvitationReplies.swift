@@ -1,33 +1,6 @@
 import Foundation
 import MailCore
 
-/// Your answer to an invitation that is not on Google Calendar, sent to its organizer by email (iMIP).
-public struct InvitationAnswer: Hashable, Codable, Sendable {
-    public var uid: String
-    /// The occurrence key when the invitation is for one occurrence of a series; "" for the whole event.
-    public var recurrenceID: String
-    public var response: ResponseStatus
-    public var comment: String?
-    /// The SEQUENCE of the invitation answered: a newer invitation (higher) waits for an answer again.
-    public var sequence: Int
-    public var answeredAt: Date
-    /// The mail outbox entry of the email that carries it. The store sets it.
-    public var outboxID: Int64?
-
-    public init(
-        uid: String, recurrenceID: String = "", response: ResponseStatus, comment: String? = nil, sequence: Int = 0,
-        answeredAt: Date = Date(), outboxID: Int64? = nil
-    ) {
-        self.uid = uid
-        self.recurrenceID = recurrenceID
-        self.response = response
-        self.comment = comment
-        self.sequence = sequence
-        self.answeredAt = answeredAt
-        self.outboxID = outboxID
-    }
-}
-
 /// An answer by email waiting in the mail outbox: the email, its copy in Sent, and the answer it records. The answer it
 /// replaced comes back when the email is taken back or refused.
 public struct InvitationReply: Hashable, Codable, Sendable {

@@ -108,13 +108,6 @@ public struct InvitedEvent: Hashable, Sendable {
         changedDates[key] ?? main
     }
 
-    /// The invitation an answer is for: the whole event's, so a series is answered as a whole from any of its dates;
-    /// the date's own when the mail is only about some dates. Nil when that was cancelled.
-    public func invitationToAnswer(at key: String) -> Invitation? {
-        guard let invitation = main ?? changedDates[key], !invitation.isCancellation else { return nil }
-        return invitation
-    }
-
     /// Invitations, updates and cancellations. Not guests' answers and proposals, nor ADD (its extra dates would read
     /// as the whole event).
     private static func isOrganizersWord(_ invitation: Invitation) -> Bool {
