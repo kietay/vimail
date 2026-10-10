@@ -711,6 +711,12 @@ final class RuleEditorModel {
             field = .when
             return
         }
+        // With neither a filter nor a question, the rule would label every message you receive.
+        if draft.when.trimmingCharacters(in: .whitespaces).isEmpty, !draft.asksClaude {
+            notice = "Describe which emails match under ASK, or filter them under WHEN: this rule would label all your mail."
+            field = .ask
+            return
+        }
         if draft.asksClaude, !asTested, RuleEditorText.untested(examples, tested: draft.promptExampleIDs) > 0 {
             prompt = .saveUntested(marks: RuleEditorText.untested(examples, tested: draft.promptExampleIDs))
             return
