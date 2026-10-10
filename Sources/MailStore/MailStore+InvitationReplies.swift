@@ -81,7 +81,9 @@ extension MailStore {
             try Self.refreshThreads(change.threadIDs, db, selfAddresses: me)
             let answer = reply.answer
             if let known = try Self.mailOnlyEvents(uids: [answer.uid], me: me, db).first {
-                if known.event.answerTarget(at: answer.recurrenceID, answers: known.answers) == nil { return .cancelledSince }
+                if known.event.main?.isCancellation == true || known.event.changedDates[answer.recurrenceID]?.isCancellation == true {
+                    return .cancelledSince
+                }
                 return known.event.answer(at: answer.recurrenceID, answers: known.answers) != nil ? .answerStands : .waitsAgain
             }
             // No mail tells the event here: the answer kept must be for this version or a newer one.

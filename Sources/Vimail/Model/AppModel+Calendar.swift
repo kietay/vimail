@@ -226,7 +226,11 @@ extension AppModel {
             if invitation.isCancellation { return InvitationChip(text: "\(time) · cancelled", colorIndex: 6) }
             let event = await calendarEvent(for: invitation)
             var emailed: InvitationAnswer?
-            if event == nil, inSpam { return InvitationChip(text: "\(time) · in Spam", colorIndex: 5) }
+            if event == nil, inSpam {
+                // A cancellation counts even in Spam.
+                let cancelled = (try? await services.store.isWithdrawn(invitation)) == true
+                return cancelled ? InvitationChip(text: "\(time) · cancelled", colorIndex: 6) : InvitationChip(text: "\(time) · in Spam", colorIndex: 5)
+            }
             if event == nil {
                 let known = await mailOnly(uid: invitation.uid, else: invitation)
                 let key = invitation.recurrenceID?.occurrenceKey ?? ""
@@ -264,8 +268,10 @@ extension AppModel {
         guard event == nil else { return await eventPage(event: event, invitation: invitation, previous: previous, mail: message) }
         // In Spam: mail there does not count for the event and is not answered (an answer would tell the sender your
         // address works). The page shows the invitation as it is.
-        if file.isSpam {
-            return await eventPage(event: nil, invitation: invitation, previous: previous, mail: message, inSpam: true)
+        if file.isSpam, invitation.method == .request {
+            // A cancellation counts even in Spam.
+            let withdrawn = (try? await services.store.isWithdrawn(invitation)) == true
+            return await eventPage(event: nil, invitation: invitation, previous: previous, mail: message, withdrawn: withdrawn, inSpam: true)
         }
         // Not on Google Calendar: the event as all its mail tells it, and what you answered by email.
         let known = await mailOnly(uid: invitation.uid, else: invitation)
@@ -364,8 +370,9 @@ extension AppModel {
         // A colleague's copy (shown beside yours) has their answer, not yours. Not on Google Calendar: only an answer by email
         // counts; the file's own PARTSTAT may be from before a newer invitation.
         let yourCopy = event.map(isYourCopy) ?? false
-        // "self" on a colleague's copy is that colleague; in mail, you are your addresses.
-        func isYou(_ person: Attendee) -> Bool { me.contains(person.normalized) || (person.isSelf && (event == nil || yourCopy)) }
+        // "self" on a colleague's copy is that colleague; on your own calendars (a secondary one you own too) and in mail, you.
+        let selfIsYou = event.map { yourCopy || isYourCalendar($0.calendarID) } ?? true
+        func isYou(_ person: Attendee) -> Bool { me.contains(person.normalized) || (person.isSelf && selfIsYou) }
         // An event shown as free takes nobody's time: it overlaps nothing.
         let busy = event?.isBusy ?? (invitation?.showsAsFree != true)
         let selfResponse = (yourCopy ? event?.selfResponse : nil)
@@ -410,7 +417,7 @@ extension AppModel {
         }
 
         // State chips and the answer keys. Your own events have nothing to answer.
-        let isOrganizer = (yourCopy && event?.organizerIsSelf == true) || organizer.map(isYou) == true
+        let isOrganizer = (selfIsYou && event?.organizerIsSelf == true) || organizer.map(isYou) == true
         // An invitation not on the calendar here can still be answered: on Google Calendar when it names you (Google may be
         // keeping it hidden), else by email to its organizer.
         let invitedByMail = event == nil && invitation?.method == .request && services.calendarEngine != nil && invitation?.attendee(matching: me) != nil
@@ -467,7 +474,7 @@ extension AppModel {
             }
         }
 
-        if mail != nil, inSpam {
+        if mail != nil, inSpam, !cancelled {
             page.footer = "In Spam, so it is not answered by email. Move it out of Spam first (! in the Spam list)."
             page.original = "Original email from \(mail!.from.displayName)"
         } else if mail != nil {
@@ -605,6 +612,9 @@ extension AppModel {
         if let overlap = overlaps.first {
             note = "Overlap \(Formatting.minuteTime(overlap.from))–\(Formatting.minuteTime(overlap.to)) with \(overlap.title)" + (overlaps.count > 1 ? " and \(overlaps.count - 1) more" : "")
             noteKind = "clash"
+        } else if showsEvent, !busy {
+            note = "Shows as free: it takes none of your time"
+            noteKind = "ok"
         } else if showsEvent {
             note = "Nothing else at \(Formatting.minuteTime(eventStart))–\(Formatting.minuteTime(eventEnd))"
             noteKind = "ok"
@@ -1000,7 +1010,8 @@ extension AppModel {
                 let known = await mailOnly(uid: uid)
                 invitation = known.event.answerTarget(at: Self.occurrenceKey(of: item), answers: known.answers)
             }
-            guard let file = Self.mailFile(of: invitation, in: files) ?? files.last else {
+            // To open it, mail in Spam will do (answers never go there).
+            guard let file = Self.mailFile(of: invitation, in: files) ?? files.last(where: { $0.main?.method == .request }) ?? files.last else {
                 showToast("No invitation mail for this event.")
                 return
             }

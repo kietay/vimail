@@ -166,6 +166,18 @@ struct InvitationAnswerStoreTests {
         #expect(try await store.restoreFailedInvitationReply(third, outboxID: late) == .cancelledSince)
     }
 
+    @Test func aRefusedAnswerIsCancelledSinceOnlyWhenTheMailCancelsIt() async throws {
+        let store = try await seededStore()
+        let tuesday = EventTime.timed(Date().addingTimeInterval(3 * 86_400), timeZone: nil)
+        try await save([invite("i1", thread: "ti"), invite("i2", thread: "tu", sequence: 1, recurrenceID: tuesday)], in: store)
+        let yes = try await queue(.accepted, in: store)
+        let refused = try #require(try await queuedReplies(store)[yes])
+        // The mail of the whole event goes before the provider refuses; Tuesday's mail still tells a date that waits.
+        try await store.deleteMessages(["i1"])
+        _ = try await store.cancelOutboxItems([yes])
+        #expect(try await store.restoreFailedInvitationReply(refused, outboxID: yes) == .waitsAgain)
+    }
+
     @Test func mailInSpamDoesNotCount() async throws {
         let store = try await seededStore()
         let (mail, invitation) = invite("i1", thread: "ti")
