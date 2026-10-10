@@ -159,6 +159,20 @@ extension AppModel {
             OmniItem(id: "undo", title: "Undo last action", group: "Message actions", icon: .refresh, shortcut: "u", disabled: undoStack.isEmpty) { self.undo() },
         ]
 
+        let quickList = contactLists.first?.name ?? Self.defaultListName
+        items += [
+            OmniItem(id: "people-quick", title: "Add or remove the sender: \(quickList)", group: "People", icon: .star,
+                     keywords: "vip important contact list person people", shortcut: "i", disabled: !hasCursor) { self.toggleQuickList() },
+            OmniItem(id: "people-pick", title: "Put the sender on a list…", group: "People", icon: .tag,
+                     keywords: "vip important contact lists person people group", shortcut: "P", disabled: !hasCursor) { self.openPeoplePicker() },
+            OmniItem(id: "people-manage", title: "Manage people and lists", group: "People", icon: .views,
+                     keywords: "vip important contacts lists groups senders", shortcut: "gp") { self.managePeople() },
+        ]
+        for list in contactLists {
+            items.append(OmniItem(id: "people-mail-\(list.id)", title: "Show mail from list: \(list.name)", subtitle: list.term, group: "People", icon: .search,
+                                  keywords: "people contacts vip filter") { self.showMail(search: list.term) })
+        }
+
         let paused = settings.ai.pauseAll
         items += [
             OmniItem(id: "rules-manage", title: "Manage rules", group: "Rules", icon: .views, keywords: "filters claude activity runs", shortcut: "gr") {
@@ -342,6 +356,7 @@ extension AppModel {
         case .snooze: return "Snooze until\(suffix)"
         case .goToLabel: return "Go to label"
         case .answerNote: return "Answer with a note"
+        case .people: return "Lists · \(Self.peopleText(pickerPeople))"
         }
     }
 
@@ -352,6 +367,7 @@ extension AppModel {
         case .snooze: "2h, 3d, tomorrow 9am, mon…"
         case .goToLabel: "Find a label…"
         case .answerNote: "A note for the organizer…"
+        case .people: "Find or create a list…"
         }
     }
 
@@ -420,6 +436,8 @@ extension AppModel {
                 }
             }
             return items
+        case .people:
+            return peoplePickerItems(query: query, matches: matches)
         case .answerNote:
             let note = query.isEmpty ? nil : query
             return [(ResponseStatus.accepted, "Yes"), (.tentative, "Maybe"), (.declined, "No")].map { response, title in
@@ -469,6 +487,12 @@ extension AppModel {
             ("gr", "Rules manager and Activity"), ("T", "New rule from this conversation"), (": rule …", "Draft a rule from a sentence"),
             ("g?", "Why these labels?"), ("x / a", "…the rule was wrong / should have matched (teaches it)"),
             ("s / e / d / u", "…sender rule / edit the rule / turn it off / undo its run"), ("=", "Run rules on the selection now (u undoes)"),
+        ]),
+        ("People", [
+            ("i", "Sender on or off the quick list (the first list)"), ("P", "Tick the lists the sender is on"),
+            ("gp", "People manager"), ("list:vip", "In search, a view or a rule's WHEN: mail from the list"),
+            ("n / r / dd", "Manager: new list / rename / delete"), ("J / K", "Manager: reorder (first = quick list)"),
+            ("a / dd / ↵", "Manager: add a person or @domain / remove / their mail"),
         ]),
         ("Rules manager (gr)", [
             ("↵ / n / x", "Edit / new / turn on or off"), ("J / K", "Run later / earlier"), ("B", "Apply to mail already here"),

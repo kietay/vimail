@@ -54,6 +54,8 @@ struct OverlayHost: View {
         case .backfill:
             if let sheet = model.backfill { BackfillView(sheet: sheet) }
         case .quickAdd: QuickAddView()
+        case .people:
+            if let manager = model.peopleManager { PeopleManagerView(manager: manager) }
         case .eventEditor: EventEditorView()
         }
     }
@@ -199,7 +201,7 @@ struct PickerView: View {
                         ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                             pickerRow(item, highlighted: index == highlighted)
                                 .onHover { if $0 { model.pickerHighlighted = index } }
-                                .onTapGesture { item.run(kind == .label) }
+                                .onTapGesture { item.run(kind == .label || kind == .people) }
                         }
                         if items.isEmpty {
                             Text(kind == .snooze ? "Type a time like 2h, 3d, tomorrow 9am or mon." : "No matches.")
@@ -218,7 +220,7 @@ struct PickerView: View {
 
     private var footer: String {
         switch kind {
-        case .label: "↵ toggle and close · tab toggle and stay · esc close"
+        case .label, .people: "↵ toggle and close · tab toggle and stay · esc close"
         case .snooze: "press a letter for a preset · ↵ choose · esc close"
         case .answerNote: "type a note · ↵ yes · ↓ maybe or no · esc close"
         default: "↵ choose · esc close"

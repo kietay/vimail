@@ -246,6 +246,8 @@ extension AppModel {
                     showToast("Could not undo: \(error.localizedDescription)", isError: true)
                 }
             }
+        case .contacts(let edit, let runID):
+            undoContacts(edit, runID: runID)
         case .answer(let records, let archive):
             undoAnswer(records, archive: archive)
         case .answerByEmail(let emailed, let records, let archive):

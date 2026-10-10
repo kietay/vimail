@@ -366,9 +366,11 @@ extension RuleEngine {
     /// `=`: every enabled rule on these messages now, ahead of other runs and behind live mail.
     /// Cached verdicts are reused. Above 5¢ nothing starts until you confirm: the result has no run
     /// ID; ask, then call again with `confirmed`.
-    public func runRules(on messageIDs: [String], confirmed: Bool = false) async throws -> ManualRun {
+    /// - Parameter ruleIDs: only these of the enabled rules (after someone joins a list: the rules
+    ///   that name the list); nil for all of them.
+    public func runRules(on messageIDs: [String], only ruleIDs: Set<String>? = nil, confirmed: Bool = false) async throws -> ManualRun {
         try await loadIfNeeded()
-        let rules = enabledRules
+        let rules = enabledRules.filter { ruleIDs?.contains($0.id) ?? true }
         let calls = try await claudeCalls(rules: rules, messageIDs: messageIDs)
         let estimate = await priced(
             plan: nil, counts: nil, window: nil, messages: messageIDs.count, needClaude: calls, price: try await callPrice(),

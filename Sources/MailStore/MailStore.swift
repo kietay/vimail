@@ -12,13 +12,15 @@ public struct StoreChange: Hashable, Sendable {
     public var rules = false
     /// Calendars, events, occurrences or invitations changed.
     public var calendar = false
+    /// Lists of people or who is on them.
+    public var contacts = false
     /// Large or unspecific change (initial sync, reset): reload everything.
     public var reset = false
 
     public init() {}
 
     public var isEmpty: Bool {
-        threadIDs.isEmpty && !labels && !drafts && !outbox && !views && !snoozes && !rules && !calendar && !reset
+        threadIDs.isEmpty && !labels && !drafts && !outbox && !views && !snoozes && !rules && !calendar && !contacts && !reset
     }
 
     public mutating func formUnion(_ other: StoreChange) {
@@ -30,6 +32,7 @@ public struct StoreChange: Hashable, Sendable {
         snoozes = snoozes || other.snoozes
         rules = rules || other.rules
         calendar = calendar || other.calendar
+        contacts = contacts || other.contacts
         reset = reset || other.reset
     }
 }
@@ -273,7 +276,7 @@ public final class MailStore: @unchecked Sendable {
         }
     }
 
-    /// Deletes all mail data and sync state. Local-only state (drafts, views, rules, answers sent by email) is kept
+    /// Deletes all mail data and sync state. Local-only state (drafts, views, rules, lists of people, answers sent by email) is kept
     /// unless `everything`; answers whose email had not left go with the outbox.
     ///
     /// Rules keep what they learned (examples, sender overrides, Claude's verdicts) but lose their
@@ -302,11 +305,13 @@ public final class MailStore: @unchecked Sendable {
                     DELETE FROM drafts; DELETE FROM saved_views; DELETE FROM event_drafts; DELETE FROM invitation_answers; DELETE FROM meta;
                     DELETE FROM rules; DELETE FROM rule_revisions; DELETE FROM rule_examples;
                     DELETE FROM rule_overrides; DELETE FROM verdicts; DELETE FROM rule_call_costs;
+                    DELETE FROM contact_lists; DELETE FROM contact_list_members;
                     """)
             } else {
                 for label in targeted { try Self.upsertLabel(label, db) }
             }
             change.reset = true
+            change.contacts = everything
         }
         setSelfAddresses([])
     }

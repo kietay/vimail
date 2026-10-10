@@ -203,6 +203,7 @@ Vim-first. `?` shows everything in the app. The essentials:
 | `H` `L` · `⌘⇧[` `⌘⇧]` · `gv` | Cycle Inbox + pinned views · manage views |
 | `/` · `:`/`⌘K` · `^l` | Search (Gmail syntax) · omnibox · refresh + sync |
 | `gr` · `T` | Rules manager · new rule from this conversation (see [Rules](#rules)) |
+| `i` · `P` · `gp` | Sender on or off the quick list of people · tick the lists the sender is on · people manager (see [People](#people)) |
 | `g?` · `=` | Why these labels? (`x` wrong, `a` should match, `s` sender rule, `d` turn the rule off, `u` undo its run) · run rules on the selection now (`u` undoes) |
 | `Y` `M` `N` `R` · `C` · `gc` `gj` | Answer an invitation (R: with a note) · new event · calendar, join meeting |
 
@@ -226,13 +227,37 @@ compose panel, with your normal config. `:w` updates the preview, `:wq` returns 
 **Read state:** a conversation is marked read after it stays selected for 1 second (Settings).
 In read-filtered lists (Unread tab, unread views) it stays visible until you refresh (`^l`, switch tab/view).
 
-**Search:** `from:` `-from:` `to:` `subject:` `label:` `-label:` `in:inbox|sent|trash|spam|snoozed|archive|anywhere`
+**Search:** `from:` `-from:` `to:` `subject:` `label:` `-label:` `list:` `-list:` (the sender is on a
+[list of people](#people)) `in:inbox|sent|trash|spam|snoozed|archive|anywhere`
 `is:unread|read|starred|list` (`is:list`: has an unsubscribe header) `has:attachment` `before:` `after:` `older_than:`
 `newer_than:` `"phrases"` `-exclude`,
 and for calendar mail `has:invite` `invite:request|update|cancel|reply|pending|conflict` (pending: the conversations of
 the calendar view's waiting list, not answered yet on your calendar or by email; conflict: invitations, on your
 calendar or only in mail, with a date in the next 60 days that overlaps something else you go to) and `organizer:me`
 (events you organize; with `invite:reply`, your guests' answers).
+
+## People
+
+Lists of people, such as VIP or Investors. They are local: nothing about them goes to Gmail. An entry is an
+address, or a whole domain (`@studio.co`).
+
+| Keys | Action |
+|---|---|
+| `i` | Puts the sender of each selected conversation on the quick list (the first list; `VIP` is made on first use), or takes them off when all are on it. No picker; `u` undoes it |
+| `P` | The lists, ticked where the sender is on them: `↵` toggle and close, `tab` toggle and stay, type a new name to create a list with the sender on it |
+| `gp` | People manager. Lists: `n` new, `r` rename, `J` `K` reorder (the first is the quick list), `dd` delete, `s` its mail. People (`l`): `a` add a name, address or `@domain` (suggestions from people you write with; commas between several), `dd` remove, `↵` their mail |
+
+The sender is the person who wrote the newest message that is not yours. In a conversation with only your own
+messages it is the people you wrote to.
+
+**Using a list.** `list:vip` matches mail whose sender is on the list, `-list:vip` mail whose sender is not
+(`list:"close friends"` for a name with a space). It works in search (`/`), in a saved view ("Sender is on
+list": pin it for a VIP inbox), and in a rule's WHEN: `list:vip` with THEN `vip` labels mail from those people as
+it arrives, and `list:investors` with an ASK sends only their mail to Claude. A rule reads the list when it looks
+at a message, so a person added today counts for mail from now on. When `i` or `P` adds someone, the rules that
+name the list also run on the selected conversations at once (`u` takes that back too). A list that does not
+exist matches no mail, with or without the minus; the rule editor refuses such a WHEN. Renaming a list updates the
+rules and views that name it.
 
 ## Rules
 

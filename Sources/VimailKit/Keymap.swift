@@ -84,6 +84,12 @@ public enum KeyCommand: Hashable, Sendable {
     case manageRules
     /// A new rule from the conversation under the cursor.
     case ruleFromThread
+    /// The sender on or off the quick list of people (the first list).
+    case quickList
+    /// Lists of people: tick the ones the sender is on.
+    case listPicker
+    /// The people manager.
+    case managePeople
     // Calendar: answer an invitation (Y M N, R with a note), the calendar view, joining, moving by day and week.
     case answer(ResponseStatus), answerWithNote
     case calendar, joinMeeting, openInvitationMail, newEvent
@@ -123,6 +129,8 @@ public enum Keymap {
         ("go", .openAttachments),
         // Rules
         ("g?", .explainLabels), ("=", .runRules), ("gr", .manageRules), ("T", .ruleFromThread),
+        // People
+        ("i", .quickList), ("P", .listPicker), ("gp", .managePeople),
         // Calendar
         ("Y", .answer(.accepted)), ("M", .answer(.tentative)), ("N", .answer(.declined)), ("R", .answerWithNote),
         ("gc", .calendar), ("gj", .joinMeeting), ("gm", .openInvitationMail), ("C", .newEvent),

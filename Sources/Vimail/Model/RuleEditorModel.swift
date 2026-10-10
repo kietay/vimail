@@ -414,7 +414,7 @@ final class RuleEditorModel {
     }
 
     private func loadPreview(_ draft: Rule, sample: PreviewSample, keepOrder: Bool) async {
-        whenProblem = Self.problem(with: draft.when)
+        whenProblem = problem(withWhen: draft.when)
         guard whenProblem == nil else { return }
         loadingPreview = true
         defer { loadingPreview = false }
@@ -434,6 +434,15 @@ final class RuleEditorModel {
         guard !Task.isCancelled else { return }
         show(incoming, keepOrder: keepOrder)
         await refreshFigures(draft, sample: sample)
+    }
+
+    /// Why a WHEN can't be used here, or nil: its syntax, or a `list:` that names no list of people.
+    func problem(withWhen when: String) -> String? {
+        if let problem = Self.problem(with: when) { return problem }
+        guard let app else { return nil }
+        let known = Set(app.contactLists.map(\.key))
+        guard let missing = RuleFilter.lists(in: when).subtracting(known).sorted().first else { return nil }
+        return "There is no list of people named \(missing). Make it with gp, or P on a message"
     }
 
     /// Why a WHEN can't be used, or nil.
@@ -705,7 +714,7 @@ final class RuleEditorModel {
             return
         }
         // WHEN as typed: the preview checks it only after a pause.
-        if let problem = Self.problem(with: draft.when) {
+        if let problem = problem(withWhen: draft.when) {
             whenProblem = problem
             notice = "Fix WHEN first: \(problem)"
             field = .when

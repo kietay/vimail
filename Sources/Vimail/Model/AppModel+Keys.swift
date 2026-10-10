@@ -90,7 +90,7 @@ extension AppModel {
                 snooze(until: preset.date)
                 return true
             }
-            if case .tab = stroke.key, kind == .label {
+            if case .tab = stroke.key, kind == .label || kind == .people {
                 runPickerHighlighted(keepOpen: true)
                 return true
             }
@@ -109,6 +109,9 @@ extension AppModel {
         case .rules:
             guard let manager = rulesManager else { overlay = nil; return true }
             return handleRulesManagerKey(stroke, manager: manager)
+        case .people:
+            guard let manager = peopleManager else { overlay = nil; return true }
+            return handlePeopleKey(stroke, manager: manager, context: context)
         case .ruleEditor:
             guard let editor = ruleEditor else { overlay = nil; return true }
             return handleRuleEditorKey(stroke, editor: editor, context: context)
@@ -159,6 +162,75 @@ extension AppModel {
             editExplainedRule()
         } else if stroke.isChar("u") {
             undoExplainedRun()
+        }
+        return !stroke.command
+    }
+
+    /// The people manager. Lists: j/k move, l or ↵ its people, n new, r rename, J/K reorder, dd delete,
+    /// s its mail. People: j/k move, a add, dd remove, ↵ their mail, h back. While you type: ↵ takes
+    /// it, ↑/↓ choose a suggestion, Esc stops.
+    private func handlePeopleKey(_ stroke: KeyStroke, manager: PeopleManagerModel, context: KeyContext) -> Bool {
+        if manager.input != nil {
+            if stroke.isEscape {
+                manager.endInput()
+            } else if stroke.isEnter {
+                manager.commitInput()
+            } else if stroke.isDown || stroke.isControl("n") {
+                manager.moveSuggestion(1)
+            } else if stroke.isUp || stroke.isControl("p") {
+                manager.moveSuggestion(-1)
+            } else if stroke.isTab {
+                return true
+            } else {
+                return !context.textFocused && !stroke.command
+            }
+            return true
+        }
+        if let prompt = manager.prompt {
+            switch prompt {
+            case .deleteList(let id, _, _):
+                if stroke.isChar("y") || stroke.isEnter { manager.delete(id) } else if stroke.isEscape || stroke.isChar("n") || stroke.isChar("q") { manager.prompt = nil }
+            }
+            return !stroke.command
+        }
+        let deleting = manager.pendingDelete
+        manager.pendingDelete = false
+        if stroke.isEscape || stroke.isChar("q") {
+            if manager.focus == .members, stroke.isEscape { manager.focus = .lists } else { overlay = nil }
+        } else if stroke.isChar("j") || stroke.isDown || stroke.isControl("n") {
+            manager.move(1)
+        } else if stroke.isChar("k") || stroke.isUp || stroke.isControl("p") {
+            manager.move(-1)
+        } else if stroke.isTab {
+            manager.focus = manager.focus == .lists ? .members : .lists
+        } else if stroke.isChar("h") || stroke.key == .left {
+            manager.focus = .lists
+        } else if stroke.isChar("l") || stroke.key == .right {
+            manager.focus = .members
+        } else if stroke.isChar("n") {
+            manager.beginInput(.newList)
+        } else if stroke.isChar("a") {
+            manager.beginAdd()
+        } else if stroke.isChar("s") {
+            manager.showMail(ofList: true)
+        } else if stroke.isChar("?") {
+            overlay = .help
+        } else if stroke.isChar("u") {
+            undo()
+        } else if stroke.isChar("d") {
+            if deleting { manager.deleteHighlighted() } else { manager.pendingDelete = true }
+        } else if manager.focus == .lists {
+            if stroke.isEnter {
+                manager.focus = .members
+            } else if stroke.isChar("r") {
+                manager.beginRename()
+            } else if stroke.isChar("J") {
+                manager.reorder(1)
+            } else if stroke.isChar("K") {
+                manager.reorder(-1)
+            }
+        } else if stroke.isEnter || stroke.isChar("o") {
+            manager.showMail(ofList: false)
         }
         return !stroke.command
     }
@@ -647,6 +719,9 @@ extension AppModel {
         case .runRules: runRulesOnSelection()
         case .manageRules: manageRules()
         case .ruleFromThread: newRuleFromThread()
+        case .quickList: toggleQuickList()
+        case .listPicker: openPeoplePicker()
+        case .managePeople: managePeople()
         case .answer(let response): answer(response)
         case .answerWithNote: answerWithNote()
         case .calendar: openCalendar()

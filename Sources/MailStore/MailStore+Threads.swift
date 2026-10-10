@@ -144,6 +144,24 @@ extension MailStore {
         ("(unicode_lower(m.from_email) LIKE ? ESCAPE '\\' OR ifnull(unicode_lower(m.from_name), '') LIKE ? ESCAPE '\\')", [likePattern(sender), likePattern(sender)])
     }
 
+    /// The message `m` is from a person on the list named `name`: its address is on the list, or its
+    /// domain is (`@b.com`).
+    static func senderOnList(_ name: String) -> (String, [SQLBindable]) {
+        (
+            """
+            EXISTS (SELECT 1 FROM contact_lists cl JOIN contact_list_members cm ON cm.list_id = cl.id
+                    WHERE cl.key = ? AND cm.address IN (unicode_lower(m.from_email), substr(unicode_lower(m.from_email), instr(unicode_lower(m.from_email), '@'))))
+            """,
+            [ContactList.key(name)]
+        )
+    }
+
+    /// There is a list named `name`. `-list:` needs it: a list that is gone (or a typing error)
+    /// matches no mail either way, so a rule never falls back to "everyone".
+    static func listExists(_ name: String) -> (String, [SQLBindable]) {
+        ("EXISTS (SELECT 1 FROM contact_lists cl WHERE cl.key = ?)", [ContactList.key(name)])
+    }
+
     /// The message `m` has an attachment listed as a file (not an inline image).
     static let hasFileAttachment = "instr(m.attachments_json, '\"isInline\":false') > 0"
 
@@ -260,6 +278,18 @@ extension MailStore {
             conditions.append("NOT EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND \(match))")
             args += values
         }
+        for list in query.senderLists {
+            let (match, values) = senderOnList(list)
+            conditions.append("EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND \(match))")
+            args += values
+        }
+        // Like `-from:`: the conversation goes when any of its messages is from a person on the list.
+        for list in query.excludedSenderLists {
+            let (exists, name) = listExists(list)
+            let (match, values) = senderOnList(list)
+            conditions.append("(\(exists) AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND \(match)))")
+            args += name + values
+        }
         for recipient in query.recipients {
             conditions.append("EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND (unicode_lower(m.to_json) LIKE ? ESCAPE '\\' OR unicode_lower(m.cc_json) LIKE ? ESCAPE '\\'))")
             args.append(likePattern(recipient))
@@ -355,7 +385,7 @@ extension MailStore {
     /// SQL for messages that pass a search one message at a time, as a rule's WHEN does. `selecting`
     /// is a column list or `COUNT(*)`; `ordered` lists the newest first.
     ///
-    /// Unlike conversation search, each operator tests the message itself: `from:` its sender, `to:`
+    /// Unlike conversation search, each operator tests the message itself: `from:` and `list:` its sender, `to:`
     /// the addresses and names in its To and Cc, `subject:` its own subject, `label:` its own labels,
     /// `before:`/`after:` its date. A negation drops only the matching message, not its conversation.
     /// `in:` and `is:read|unread|starred` are ignored; `newer_than:`/`older_than:` arrive as `after`/
@@ -389,6 +419,17 @@ extension MailStore {
             let (match, values) = senderMatches(sender)
             conditions.append("NOT \(match)")
             args += values
+        }
+        for list in search.lists {
+            let (match, values) = senderOnList(list)
+            conditions.append(match)
+            args += values
+        }
+        for list in search.excludedLists {
+            let (exists, name) = listExists(list)
+            let (match, values) = senderOnList(list)
+            conditions.append("(\(exists) AND NOT \(match))")
+            args += name + values
         }
         for recipient in search.to {
             let address = "unicode_lower(json_extract(a.value, '$.email')) LIKE ? ESCAPE '\\' OR ifnull(unicode_lower(json_extract(a.value, '$.name')), '') LIKE ? ESCAPE '\\'"

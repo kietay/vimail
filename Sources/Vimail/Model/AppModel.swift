@@ -20,11 +20,12 @@ enum FocusTarget: Hashable {
     case consentBudget
     case ruleName, ruleWhen, ruleAsk, ruleLabel
     case quickAdd
+    case peopleInput
     /// The event editor's fields.
     case eventTitle, eventWhen, eventGuests, eventWhere, eventRepeats, eventNotes
 }
 
-enum PickerKind: Equatable { case label, move, snooze, goToLabel, answerNote }
+enum PickerKind: Equatable { case label, move, snooze, goToLabel, answerNote, people }
 
 enum Overlay: Equatable {
     case omnibox
@@ -46,6 +47,8 @@ enum Overlay: Equatable {
     case backfill
     /// C: one line that becomes an event.
     case quickAdd
+    /// Lists of people and who is on them (`gp`).
+    case people
     /// The event editor (Tab from quick add, Enter on your own event).
     case eventEditor
 }
@@ -103,11 +106,14 @@ enum UndoEntry {
     /// Calendar changes made together, undone last first: "this and following" ends a series and starts the one after it.
     case eventChanges([CalendarActions.ChangeRecord])
 
+    /// People put on a list or taken off, and the rules run that followed. There is no redo.
+    case contacts(ContactListEdit, runID: Int64?)
+
     /// Answers to invitations, which `.` repeats on the next one.
     var isAnswer: Bool {
         switch self {
         case .answer, .answerByEmail: true
-        case .action, .send, .unsubscribe, .ruleRun, .teaching, .eventChange, .eventChanges: false
+        case .action, .send, .unsubscribe, .ruleRun, .teaching, .eventChange, .eventChanges, .contacts: false
         }
     }
 }
@@ -274,6 +280,13 @@ final class AppModel {
     var backfill: BackfillModel?
     var ruleMatches: RuleMatches?
 
+    // People: the lists in order (the first is the quick list), the manager, and who the list
+    // picker is open for with the lists each of them is on.
+    var contactLists: [ContactList] = []
+    var peopleManager: PeopleManagerModel?
+    var pickerPeople: [EmailAddress] = []
+    var pickerMemberships: [String: Set<String>] = [:]
+
     // MARK: Internals
 
     @ObservationIgnored var parser = KeySequenceParser()
@@ -358,6 +371,7 @@ final class AppModel {
     private func bootstrap() async {
         await reloadLabels()
         await reloadViews()
+        await reloadContactLists()
         await reloadAccount()
         cursorID = session.cursors[session.destination.key]
         await reloadList()
@@ -428,6 +442,8 @@ final class AppModel {
         ruleEditor = nil
         backfill = nil
         rulesManager = nil
+        peopleManager = nil
+        contactLists = []
         ruleMatches = nil
         if [.rules, .ruleEditor, .backfill].contains(overlay) { overlay = nil }
         let old = services
@@ -561,6 +577,7 @@ final class AppModel {
     private func apply(_ change: StoreChange) async {
         if change.labels || change.reset { await reloadLabels() }
         if change.views || change.reset { await reloadViews() }
+        if change.contacts || change.reset { await contactListsChanged() }
         for id in change.threadIDs {
             threadCache[id] = nil
             explanationCache[id] = nil
@@ -1254,6 +1271,9 @@ final class AppModel {
             focusTarget = .picker
         case .viewEditor:
             focusTarget = .viewName
+        case .people:
+            focusTarget = peopleManager?.input != nil ? .peopleInput : nil
+            if focusTarget == nil { blurTextInput() }
         case .ruleEditor:
             focusTarget = ruleEditor?.field.focusTarget
             if focusTarget == nil { blurTextInput() }
@@ -1300,6 +1320,7 @@ final class AppModel {
         case .picker, .viewEditor, .quickAdd: return .insert
         case .aiConsent where focusTarget == .consentBudget: return .insert
         case .ruleEditor where ruleEditor?.field.isText == true: return .insert
+        case .people where peopleManager?.input != nil: return .insert
         default: break
         }
         if focusTarget == .search { return .search }
