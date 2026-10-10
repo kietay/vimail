@@ -785,3 +785,172 @@ struct RecurrenceEditTests {
         #expect(london.start == .timed(at(2026, 10, 15, 23), timeZone: "Europe/London"))
     }
 }
+
+@Suite("Recurrence splits")
+struct RecurrenceSplitTests {
+    /// The old series' lines and the new one's, when the series is cut in two.
+    func split(_ recurrence: [String], first: EventTime, at: EventTime) -> (before: [String], after: [String])? {
+        guard case .split(let before, let after)? = Recurrence.split(recurrence: recurrence, seriesStart: first, at: at, calendar: la) else { return nil }
+        return (before, after)
+    }
+
+    @Test func aTimedSeriesEndsTheSecondBeforeTheDay() throws {
+        // Tuesdays at 09:00 from Oct 6, cut at Oct 20: 09:00 is 16:00 UTC in daylight time.
+        let first = at(2026, 10, 6, 9)
+        let parts = try #require(split(["RRULE:FREQ=WEEKLY;BYDAY=TU"], first: .timed(first, timeZone: laID), at: .timed(at(2026, 10, 20, 9), timeZone: laID)))
+        #expect(parts.before == ["RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261020T155959Z"])
+        #expect(parts.after == ["RRULE:FREQ=WEEKLY;BYDAY=TU"])
+        #expect(starts(parts.before, first: first, from: at(2026, 10, 1), to: at(2027, 1, 1)) == [utc("2026-10-06T16:00:00Z"), utc("2026-10-13T16:00:00Z")])
+        #expect(starts(parts.after, first: at(2026, 10, 20, 9), from: at(2026, 10, 1), to: at(2026, 11, 1)) == [utc("2026-10-20T16:00:00Z"), utc("2026-10-27T16:00:00Z")])
+    }
+
+    @Test func anAllDaySeriesEndsTheDayBefore() throws {
+        let parts = try #require(split(["RRULE:FREQ=WEEKLY"], first: .allDay(day("2026-10-02")), at: .allDay(day("2026-10-23"))))
+        #expect(parts.before == ["RRULE:FREQ=WEEKLY;UNTIL=20261022"])
+        #expect(parts.after == ["RRULE:FREQ=WEEKLY"])
+        #expect(days(parts.before, first: day("2026-10-02"), from: at(2026, 10, 1), to: at(2027, 1, 1)) == ["2026-10-02", "2026-10-09", "2026-10-16"].map(day))
+        #expect(days(parts.after, first: day("2026-10-23"), from: at(2026, 10, 1), to: at(2026, 11, 7)) == ["2026-10-23", "2026-10-30", "2026-11-06"].map(day))
+        // A whole-day exception list moves by date.
+        let skipped = try #require(split(
+            ["RRULE:FREQ=DAILY;COUNT=10", "EXDATE;VALUE=DATE:20261003,20261008"], first: .allDay(day("2026-10-01")), at: .allDay(day("2026-10-05"))
+        ))
+        #expect(skipped.before == ["RRULE:FREQ=DAILY;UNTIL=20261004", "EXDATE;VALUE=DATE:20261003"])
+        #expect(skipped.after == ["RRULE:FREQ=DAILY;COUNT=6", "EXDATE;VALUE=DATE:20261008"])
+    }
+
+    @Test func countIsSharedBetweenTheTwoSeries() throws {
+        // Ten days from Oct 1; Oct 2 is skipped but still counts. Cut at Oct 4: three before, seven from then on.
+        let rules = ["RRULE:FREQ=DAILY;COUNT=10", "EXDATE;TZID=America/Los_Angeles:20261002T090000"]
+        let first = at(2026, 10, 1, 9)
+        let parts = try #require(split(rules, first: .timed(first, timeZone: laID), at: .timed(at(2026, 10, 4, 9), timeZone: laID)))
+        #expect(parts.before == ["RRULE:FREQ=DAILY;UNTIL=20261004T155959Z", "EXDATE;TZID=America/Los_Angeles:20261002T090000"])
+        #expect(parts.after == ["RRULE:FREQ=DAILY;COUNT=7"])
+        let old = starts(parts.before, first: first, from: at(2026, 9, 1), to: at(2027, 1, 1))?.map { DayDate($0, in: la) }
+        let new = starts(parts.after, first: at(2026, 10, 4, 9), from: at(2026, 9, 1), to: at(2027, 1, 1))?.map { DayDate($0, in: la) }
+        #expect(old == ["2026-10-01", "2026-10-03"].map(day))
+        #expect(new == (4...10).map { day(String(format: "2026-10-%02d", $0)) })
+        #expect(old.map { $0 + (new ?? []) } == starts(rules, first: first, from: at(2026, 9, 1), to: at(2027, 1, 1))?.map { DayDate($0, in: la) })
+    }
+
+    @Test func untilStaysAsItWas() throws {
+        let line = "RRULE:FREQ=WEEKLY;WKST=SU;BYDAY=MO,WE;UNTIL=20261218T075959Z"
+        let parts = try #require(split([line], first: .timed(at(2026, 10, 5, 10), timeZone: laID), at: .timed(at(2026, 11, 4, 10), timeZone: laID)))
+        #expect(parts.after == [line])
+        // Nov 4 is after the clocks went back: 10:00 is 18:00 UTC.
+        #expect(parts.before == ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE;WKST=SU;UNTIL=20261104T175959Z"])
+    }
+
+    @Test func skippedAndAddedDaysGoWithTheirSide() throws {
+        let rules = [
+            "RRULE:FREQ=WEEKLY;BYDAY=TU",
+            "EXDATE;TZID=America/Los_Angeles:20261013T090000,20261027T090000",
+            "EXDATE;VALUE=DATE:20261103",
+            "RDATE:20261015T160000Z",
+            "RDATE;TZID=America/Los_Angeles:20261029T090000,20261105T090000",
+        ]
+        let first = at(2026, 10, 6, 9)
+        let parts = try #require(split(rules, first: .timed(first, timeZone: laID), at: .timed(at(2026, 10, 20, 9), timeZone: laID)))
+        #expect(parts.before == [
+            "RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261020T155959Z",
+            "EXDATE;TZID=America/Los_Angeles:20261013T090000",
+            "RDATE:20261015T160000Z",
+        ])
+        #expect(parts.after == [
+            "RRULE:FREQ=WEEKLY;BYDAY=TU",
+            "EXDATE;TZID=America/Los_Angeles:20261027T090000",
+            "EXDATE;VALUE=DATE:20261103",
+            "RDATE;TZID=America/Los_Angeles:20261029T090000,20261105T090000",
+        ])
+        let old = starts(parts.before, first: first, from: at(2026, 10, 1), to: at(2026, 12, 1)) ?? []
+        let new = starts(parts.after, first: at(2026, 10, 20, 9), from: at(2026, 10, 1), to: at(2026, 12, 1)) ?? []
+        #expect(old.map { DayDate($0, in: la) } == ["2026-10-06", "2026-10-15"].map(day))
+        #expect(old + new == starts(rules, first: first, from: at(2026, 10, 1), to: at(2026, 12, 1)))
+    }
+
+    @Test func aDateAtTheCutGoesWithTheNewSeries() throws {
+        // Oct 20 09:00 is 16:00 UTC: a second earlier stays with the old series.
+        let rules = ["RRULE:FREQ=WEEKLY;BYDAY=TU", "RDATE:20261020T155959Z,20261020T160000Z"]
+        let parts = try #require(split(rules, first: .timed(at(2026, 10, 6, 9), timeZone: laID), at: .timed(at(2026, 10, 20, 9), timeZone: laID)))
+        #expect(parts.before.last == "RDATE:20261020T155959Z")
+        #expect(parts.after.last == "RDATE:20261020T160000Z")
+    }
+
+    @Test func theFirstDayIsTheWholeSeries() {
+        let first = EventTime.timed(at(2026, 10, 6, 9), timeZone: laID)
+        #expect(Recurrence.split(recurrence: ["RRULE:FREQ=WEEKLY;BYDAY=TU"], seriesStart: first, at: first, calendar: la) == .wholeSeries)
+        // With the first day skipped, the second is the first event.
+        let skipped = ["RRULE:FREQ=WEEKLY;BYDAY=TU", "EXDATE;TZID=America/Los_Angeles:20261006T090000"]
+        #expect(Recurrence.split(recurrence: skipped, seriesStart: first, at: .timed(at(2026, 10, 13, 9), timeZone: laID), calendar: la) == .wholeSeries)
+        #expect(split(skipped, first: first, at: .timed(at(2026, 10, 20, 9), timeZone: laID))?.before.first == "RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261020T155959Z")
+        let allDay = EventTime.allDay(day("2026-10-02"))
+        #expect(Recurrence.split(recurrence: ["RRULE:FREQ=WEEKLY"], seriesStart: allDay, at: allDay, calendar: la) == .wholeSeries)
+    }
+
+    /// A 09:00 Los Angeles series cut after the clocks went back on Nov 1: 09:00 is 17:00 UTC there, not 16:00.
+    @Test func aSeriesCutAfterTheEndOfDaylightTime() throws {
+        let first = at(2026, 10, 26, 9)
+        let parts = try #require(split(["RRULE:FREQ=DAILY;COUNT=20"], first: .timed(first, timeZone: laID), at: .timed(at(2026, 11, 5, 9), timeZone: laID)))
+        #expect(parts.before == ["RRULE:FREQ=DAILY;UNTIL=20261105T165959Z"])
+        #expect(parts.after == ["RRULE:FREQ=DAILY;COUNT=10"])
+        let old = try #require(starts(parts.before, first: first, from: at(2026, 10, 1), to: at(2027, 1, 1)))
+        #expect(old.count == 10)
+        #expect(old.first == utc("2026-10-26T16:00:00Z"))
+        #expect(old.last == utc("2026-11-04T17:00:00Z"))
+        let new = try #require(starts(parts.after, first: at(2026, 11, 5, 9), from: at(2026, 10, 1), to: at(2027, 1, 1)))
+        #expect(new.count == 10)
+        #expect(new.first == utc("2026-11-05T17:00:00Z"))
+        #expect(new.allSatisfy { la.component(.hour, from: $0) == 9 })
+        // Mondays from before the change: the last Monday before the cut stays, at 09:00 in winter time.
+        let mondays = try #require(split(["RRULE:FREQ=WEEKLY;BYDAY=MO"], first: .timed(at(2026, 10, 5, 9), timeZone: laID), at: .timed(at(2026, 11, 9, 9), timeZone: laID)))
+        #expect(mondays.before == ["RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20261109T165959Z"])
+        #expect(starts(mondays.before, first: at(2026, 10, 5, 9), from: at(2026, 10, 1), to: at(2027, 1, 1))?.last == utc("2026-11-02T17:00:00Z"))
+    }
+
+    @Test func aCountThatCannotBeCountedHereIsRefused() {
+        // The last weekday of each month: only Google expands it.
+        let lastWeekday = "RRULE:FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1"
+        let first = EventTime.timed(at(2026, 10, 30, 9), timeZone: laID)
+        let cut = EventTime.timed(at(2026, 12, 31, 9), timeZone: laID)
+        #expect(Recurrence.split(recurrence: [lastWeekday + ";COUNT=6"], seriesStart: first, at: cut, calendar: la) == nil)
+        // Without COUNT only its end moves, which needs no counting.
+        let parts = split([lastWeekday], first: first, at: cut)
+        #expect(parts?.before == [lastWeekday + ";UNTIL=20261231T165959Z"])
+        #expect(parts?.after == [lastWeekday])
+    }
+
+    @Test func aRuleThatEndedBeforeTheDayStaysWithTheOldSeries() throws {
+        // Mondays, two Wednesdays (the first day counts as one) and Fridays until Nov 7, cut at Monday Nov 16.
+        let rules = ["RRULE:FREQ=WEEKLY;BYDAY=MO", "RRULE:FREQ=WEEKLY;BYDAY=WE;COUNT=2", "RRULE:FREQ=WEEKLY;BYDAY=FR;UNTIL=20261107T000000Z"]
+        let parts = try #require(split(rules, first: .timed(at(2026, 11, 2, 10), timeZone: laID), at: .timed(at(2026, 11, 16, 10), timeZone: laID)))
+        #expect(parts.before == ["RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20261116T175959Z", rules[1], rules[2]])
+        #expect(parts.after == ["RRULE:FREQ=WEEKLY;BYDAY=MO"])
+    }
+
+    /// Cut anywhere, the two series together have the days the series had, at the same times.
+    @Test(arguments: [
+        (["RRULE:FREQ=DAILY;COUNT=30"], "2026-10-06", 12),
+        (["RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE,FR"], "2026-10-05", 5),
+        (["RRULE:FREQ=MONTHLY;BYDAY=-1FR;COUNT=8"], "2026-10-30", 3),
+        (["RRULE:FREQ=WEEKLY;BYDAY=TU,TH;UNTIL=20270301T000000Z", "EXDATE;TZID=America/Los_Angeles:20261124T090000,20270105T090000"], "2026-10-06", 9),
+        (["RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=4TH"], "2026-11-26", 2),
+        (["RRULE:FREQ=MONTHLY;BYMONTHDAY=31;COUNT=6", "RDATE;TZID=America/Los_Angeles:20261130T090000"], "2026-10-31", 2),
+    ])
+    func theTwoSeriesTogetherAreTheOldOne(rules: [String], firstDay: String, index: Int) throws {
+        let first = day(firstDay)
+        let start = at(first.year, first.month, first.day, 9)
+        func occurrences(_ lines: [String], from start: Date) -> [Occurrence]? {
+            Recurrence.occurrences(
+                start: .timed(start, timeZone: laID), end: .timed(start.addingTimeInterval(3600), timeZone: laID), recurrence: lines,
+                from: at(2026, 1, 1), to: at(2031, 1, 1), calendar: la
+            )
+        }
+        let whole = try #require(occurrences(rules, from: start))
+        let cut = try #require(whole[index].originalStart)
+        let cutStart = try #require(whole[index].start.date)
+        let parts = try #require(split(rules, first: .timed(start, timeZone: laID), at: cut))
+        let old = try #require(occurrences(parts.before, from: start))
+        let new = try #require(occurrences(parts.after, from: cutStart))
+        #expect(old + new == whole)
+        #expect(old.count == index)
+    }
+}
