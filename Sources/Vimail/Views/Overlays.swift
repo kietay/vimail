@@ -324,7 +324,7 @@ struct ToastView: View {
                 if let deadline = toast.countdownTo {
                     TimelineView(.periodic(from: .now, by: 0.25)) { context in
                         let seconds = max(1, Int(deadline.timeIntervalSince(context.date).rounded(.up)))
-                        Text("\(toast.text) in \(seconds)s.\(detail)")
+                        Text("\(toast.text) \(toast.countdownLead) \(seconds)s.\(detail)")
                     }
                 } else {
                     Text(toast.text + detail)

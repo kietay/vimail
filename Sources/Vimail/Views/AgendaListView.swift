@@ -183,6 +183,8 @@ private struct AgendaRow: View {
     private var isWaiting: Bool { item.originalStart.hasPrefix("waiting:") }
     private var fromMail: Bool { item.calendarID == AppModel.mailOnlyCalendarID }
     private var response: ResponseStatus? { item.event.selfResponse }
+    /// An invitation only in mail that you answered by email.
+    private var answeredByEmail: Bool { fromMail && response != nil && response != .needsAction }
 
     private var timeText: String {
         if isWaiting { return Formatting.eventShort(item.start) }
@@ -196,7 +198,7 @@ private struct AgendaRow: View {
         if let organizer = item.event.organizer, !organizer.isSelf { parts.append(organizer.name ?? organizer.email) }
         parts += others.prefix(2).map { $0.name ?? $0.email }
         if others.count > 2 { parts.append("+\(others.count - 2)") }
-        if fromMail { parts.append("from mail, not on Google Calendar") }
+        if fromMail { parts.append(answeredByEmail ? "answered by email" : "from mail, not on Google Calendar") }
         if parts.isEmpty, item.event.conferenceURL != nil { parts.append("video call") }
         return parts.joined(separator: ", ")
     }
@@ -243,7 +245,7 @@ private struct AgendaRow: View {
     private var stateChip: some View {
         if item.event.status == .cancelled {
             LabelChip(name: "cancelled", colorIndex: 6)
-        } else if response == .needsAction || fromMail {
+        } else if response == .needsAction || (fromMail && !answeredByEmail) {
             LabelChip(name: "needs answer", colorIndex: 3)
         } else if response == .tentative {
             LabelChip(name: "maybe", colorIndex: 3)

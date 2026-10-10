@@ -23,31 +23,6 @@ public enum ICalendar {
     public static func invitations(from data: Data, defaultTimeZone: TimeZone = .current) -> [Invitation] {
         invitations(from: text(of: data), defaultTimeZone: defaultTimeZone)
     }
-
-    /// An iMIP reply (METHOD:REPLY, RFC 5546) that answers `invitation` as `attendee`: the file to mail
-    /// to the organizer. Times are written in UTC and all-day dates as dates, so it needs no VTIMEZONE.
-    /// Lines end in CRLF and are folded at 75 octets.
-    public static func reply(to invitation: Invitation, as attendee: Attendee, response: ResponseStatus, comment: String?, stamp: Date) -> String {
-        var lines = [
-            "BEGIN:VCALENDAR", "PRODID:-//vimail//EN", "VERSION:2.0", "METHOD:REPLY", "BEGIN:VEVENT",
-            "UID:" + escapedText(invitation.uid),
-            "SEQUENCE:\(invitation.sequence)",
-            "DTSTAMP:" + utcText(stamp),
-        ]
-        if let recurrenceID = invitation.recurrenceID { lines.append("RECURRENCE-ID" + timeValue(recurrenceID)) }
-        lines.append("DTSTART" + timeValue(invitation.start))
-        if let end = invitation.end { lines.append("DTEND" + timeValue(end)) }
-        lines.append("SUMMARY:" + escapedText(invitation.summary))
-        if let organizer = invitation.organizer {
-            lines.append("ORGANIZER" + nameParameter(organizer.name) + ":mailto:" + addressText(organizer.email))
-        }
-        lines.append("ATTENDEE;PARTSTAT=" + response.partstat + nameParameter(attendee.name) + ":mailto:" + addressText(attendee.email))
-        if let comment = comment?.trimmingCharacters(in: .whitespacesAndNewlines), !comment.isEmpty {
-            lines.append("COMMENT:" + escapedText(comment))
-        }
-        lines += ["END:VEVENT", "END:VCALENDAR"]
-        return lines.map(folded).joined(separator: "\r\n") + "\r\n"
-    }
 }
 
 // MARK: - Lines
@@ -684,30 +659,6 @@ extension ICalendar {
         )
     }
 
-    /// What follows a time property's name: `;VALUE=DATE:20261012` or `:20261012T210000Z`.
-    static func timeValue(_ time: EventTime) -> String {
-        switch time {
-        case .allDay(let day): String(format: ";VALUE=DATE:%04d%02d%02d", day.year, day.month, day.day)
-        case .timed(let date, _): ":" + utcText(date)
-        }
-    }
-
-    /// TEXT escaping: backslashes, semicolons, commas and line breaks, with other control characters
-    /// except tabs dropped, as TEXT does not allow them.
-    static func escapedText(_ text: String) -> String {
-        var result = ""
-        for scalar in text.replacingOccurrences(of: "\r\n", with: "\n").unicodeScalars {
-            switch scalar {
-            case "\\": result += "\\\\"
-            case ";": result += "\\;"
-            case ",": result += "\\,"
-            case "\n", "\r": result += "\\n"
-            default: if scalar == "\t" || scalar.properties.generalCategory != .control { result.unicodeScalars.append(scalar) }
-            }
-        }
-        return result
-    }
-
     /// A parameter value as written: RFC 6868 escapes for carets, double quotes and line breaks, other
     /// control characters dropped, and quotes around values with `;`, `:` or `,`.
     static func parameterValue(_ value: String) -> String {
@@ -721,35 +672,5 @@ extension ICalendar {
             }
         }
         return encoded.contains(where: { ";:,".contains($0) }) ? "\"" + encoded + "\"" : encoded
-    }
-
-    /// `;CN=Jamie Chen`, or nothing without a name.
-    static func nameParameter(_ name: String?) -> String {
-        guard let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return "" }
-        return ";CN=" + parameterValue(name)
-    }
-
-    /// An address for a `mailto:` value, without characters that could start a new line in the file.
-    static func addressText(_ email: String) -> String {
-        let kept = email.unicodeScalars.filter { $0.properties.generalCategory != .control }
-        return String(String.UnicodeScalarView(kept)).trimmingCharacters(in: .whitespaces)
-    }
-
-    /// Folds a content line so no physical line is longer than 75 octets, breaking only between Unicode
-    /// scalars so that no UTF-8 sequence is split.
-    static func folded(_ line: String) -> String {
-        guard line.utf8.count > 75 else { return line }
-        var result = String.UnicodeScalarView()
-        var length = 0
-        for scalar in line.unicodeScalars {
-            let size = UTF8.width(scalar)
-            if length + size > 75 {
-                result.append(contentsOf: "\r\n ".unicodeScalars)
-                length = 1
-            }
-            result.append(scalar)
-            length += size
-        }
-        return String(result)
     }
 }

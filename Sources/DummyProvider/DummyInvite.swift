@@ -19,6 +19,9 @@ public struct DummyInvite: Codable, Hashable, Sendable {
     public var sequence: Int
     /// When the invitation was sent.
     public var sent: Date
+    /// False for an invitation Google Calendar did not add (a setting adds invitations only once you answer them in
+    /// Gmail): the dummy calendar leaves it off, so it is answered by email. Nil (older dummy data) means it is added.
+    public var onCalendar: Bool?
 
     public var end: Date { start.addingTimeInterval(Double(minutes) * 60) }
 

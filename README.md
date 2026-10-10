@@ -64,7 +64,7 @@ in your browser; vimail receives the answer on `http://127.0.0.1:<random port>` 
 
 - they only ever ask Google for `gmail.readonly`, so Google rejects any change;
 - every change, send and unsubscribe goes to a dry-run log instead of Gmail or the list
-  (`accounts/<key>/dry-run/changes.log`, sent messages as `.eml` files);
+  (`accounts/<key>/dry-run/changes.log`, sent messages as `.eml` files, answers to invitations by email included);
 - they keep their data in `~/Library/Application Support/vimail-debug`, apart from the installed app;
 - calendar access is read-only too, and answers, creates, edits and removals go to `dry-run/calendar.log`.
 
@@ -86,7 +86,14 @@ them with one key, and you create events from one typed line. Everything works o
   overlaps in red. `{` `}` show the day before or after. A repeating invitation shows its next date and says how many
   of its next 8 dates overlap. `Y` `M` `N` answer yes, maybe or no; `R` adds a note. An invitation to one changed date of a
   series answers only that date. An invitation Google keeps off your calendar until you answer (from someone it
-  does not know) is looked up when you answer it. A join link is used only when it is a web link (`https://`).
+  does not know) is looked up when you answer it. An invitation that is not on your Google Calendar at all, or any
+  invitation while the calendar is not connected, is answered by email: an iMIP reply (RFC 6047) to the organizer, in
+  the invitation's conversation, from your address written as the invitation writes it. The organizer's calendar then
+  records your answer. Here the invitation stops waiting and says "you said yes by email"; a newer version of it waits
+  again. Like a send, the email leaves after the undo-send window, and `u` takes it back until then (once sent, it
+  cannot be unsent). Nothing is sent for a meeting cancelled since, or one the organizer took you off, nor when the
+  organizer's address is not a plain `name@domain`.
+  A join link is used only when it is a web link (`https://`).
   With *Archive invitations after answering* on (Settings → Calendar), the mail is archived and the cursor moves on,
   and one `u` takes back both. The answer leaves after the undo-send window. `O` shows the original email.
 - **Calendar view.** `gc` (from an invitation: at its event). Invitations waiting for your answer come first, then
@@ -223,7 +230,8 @@ Everything is local:
     google-oauth-client.json      your Google Cloud OAuth client (mode 600)
     accounts/<account>/mail.sqlite   mail cache + full-text index, outbox, drafts, snoozes,
                                   saved views, local labels, processor results, contacts,
-                                  calendars, events, invitations, calendar outbox
+                                  calendars, events, invitations, answers sent by email,
+                                  calendar outbox
     accounts/<account>/drafts/    draft attachments and vim buffers
     accounts/gmail-<email>/google-credential.json   Gmail refresh token (mode 600)
     dummy/server.json             the fake Gmail server's state
@@ -245,7 +253,7 @@ the Keychain once the app has a stable signing identity (ad-hoc signatures chang
 ```
 Sources/
   MailCore       Models, MailProvider protocol, search parser, reply rules, MessageProcessor API;
-                 Calendar/: event models, CalendarProvider protocol, iCalendar parser, recurrence, quick add
+                 Calendar/: event models, CalendarProvider protocol, iCalendar parser and iMIP replies, recurrence, quick add
   MailStore      SQLite (WAL, separate reader/writer queues), FTS5 search, outbox, local-only state
   MailSync       MailActions (optimistic, undoable), SyncEngine (push outbox, pull changes), ProcessingCoordinator;
                  CalendarSyncEngine, CalendarActions, InvitationIndexer

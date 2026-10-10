@@ -212,10 +212,12 @@ public final class MailStore: @unchecked Sendable {
         }
     }
 
-    /// Deletes all mail data and sync state. Local-only state (drafts, views) is kept unless `everything`.
+    /// Deletes all mail data and sync state. Local-only state (drafts, views, answers sent by email) is kept unless
+    /// `everything`; answers whose email had not left go with the outbox.
     public func resetMailData(everything: Bool = false) async throws {
         try await write { db, change in
             try db.execute("""
+                DELETE FROM invitation_answers WHERE outbox_id IN (SELECT id FROM outbox);
                 DELETE FROM threads; DELETE FROM messages; DELETE FROM message_labels;
                 DELETE FROM thread_labels; DELETE FROM message_search; DELETE FROM outbox;
                 DELETE FROM labels; DELETE FROM annotations; DELETE FROM processing_log;
@@ -226,7 +228,7 @@ public final class MailStore: @unchecked Sendable {
                 DELETE FROM calendar_outbox; DELETE FROM meta WHERE key LIKE 'calendar_%';
                 """)
             if everything {
-                try db.execute("DELETE FROM drafts; DELETE FROM saved_views; DELETE FROM event_drafts; DELETE FROM meta;")
+                try db.execute("DELETE FROM drafts; DELETE FROM saved_views; DELETE FROM event_drafts; DELETE FROM invitation_answers; DELETE FROM meta;")
             }
             change.reset = true
         }

@@ -277,12 +277,13 @@ public actor DummyCalendarProvider: CalendarProvider {
         scheduleSave(immediately: true)
     }
 
-    /// Puts the mailbox's new invitations on the calendar, as Google does for organizers you know.
+    /// Puts the mailbox's new invitations on the calendar, as Google does for organizers you know. Invitations Google
+    /// did not add (`DummyInvite.onCalendar` false) stay off it.
     private func addMailboxInvitations() async {
         let invites = await invitations()
         guard state != nil else { return }
         let calendarID = state!.calendars.first(where: \.isPrimary)?.id ?? account.email
-        for invite in invites.sorted(by: { $0.sent < $1.sent }) where !state!.addedInvites.contains(invite.uid) {
+        for invite in invites.sorted(by: { $0.sent < $1.sent }) where !state!.addedInvites.contains(invite.uid) && invite.onCalendar != false {
             state!.addedInvites.insert(invite.uid)
             let attendees = invite.guests.map { guest in
                 Attendee(

@@ -470,6 +470,15 @@ struct DummyGenerator {
             ]
         ))
 
+        // An invitation Google Calendar did not add: Y M N answer it by email.
+        let elena = DummyContent.person("Elena Rossi").address
+        let wednesday = calendar.date(byAdding: .day, value: 2, to: Self.nextMonday(after: now, hour: 11, calendar: calendar))!
+        result.append(invitation(DummyInvite(
+            uid: "samples-review-\(newID())@vimail.dummy", messageID: "", title: "Material samples review", start: wednesday,
+            minutes: 60, organizer: elena, guests: [elena, me, jamie], accepted: [jamie.normalized], conference: nil,
+            agenda: "Stone and timber samples for the lobby. Bring the facade options.", sequence: 0, sent: yesterday(10, 10), onCalendar: false
+        ), labels: [SystemLabel.inbox, DummyContent.work, SystemLabel.categoryPersonal]))
+
         result.append(message(
             thread: nil, from: DummyContent.arena.address, to: [me], subject: "New connections in your channels", text: nil,
             html: DummyContent.newsletterHTML(name: "Are.na", issue: "Your weekly digest", intro: "A collection of ideas, slowly coming together.", items: [

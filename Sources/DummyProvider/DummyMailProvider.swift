@@ -320,6 +320,14 @@ public actor DummyMailProvider: MailProvider {
             }
             attachments.append(MailAttachment(id: attachmentID, filename: attachment.filename, mimeType: attachment.mimeType, size: attachment.size))
         }
+        // An answer to an invitation: Gmail lists its text/calendar part as invite.ics.
+        if let calendar = outgoing.calendar {
+            let attachmentID = "att-\(newID())"
+            let data = Data(calendar.text.utf8)
+            try? FileManager.default.createDirectory(at: attachmentsDirectory, withIntermediateDirectories: true)
+            try? data.write(to: attachmentsDirectory.appendingPathComponent(attachmentID))
+            attachments.append(MailAttachment(id: attachmentID, filename: "invite.ics", mimeType: "text/calendar", size: data.count))
+        }
 
         var labels: Set<String> = [SystemLabel.sent]
         let me = state!.account.normalized
@@ -336,7 +344,8 @@ public actor DummyMailProvider: MailProvider {
         )
         state!.messages[id] = message
         record(.added, [id])
-        scheduleReply(to: message)
+        // The organizer's calendar reads an answer to an invitation; nobody writes back.
+        if outgoing.calendar == nil { scheduleReply(to: message) }
         return message
     }
 

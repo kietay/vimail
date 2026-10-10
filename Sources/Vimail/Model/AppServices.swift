@@ -100,7 +100,7 @@ final class AppServices {
         let calendarEngine: CalendarSyncEngine?
         if let calendarProvider { calendarEngine = CalendarSyncEngine(provider: calendarProvider, store: store) } else { calendarEngine = nil }
         self.calendarEngine = calendarEngine
-        calendarActions = CalendarActions(store: store, changed: { calendarEngine?.wake() })
+        calendarActions = CalendarActions(store: store, changed: { calendarEngine?.wake() }, mailChanged: { engine.wake() })
         invitations = InvitationIndexer(store: store, provider: provider, found: { calendarEngine?.wake() })
     }
 

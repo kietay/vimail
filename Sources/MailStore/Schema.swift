@@ -219,6 +219,19 @@ enum Schema {
             sequence INTEGER NOT NULL DEFAULT 0
         );
 
+        -- Your answers to invitations that are not on Google Calendar, sent to the organizer by email (iMIP). An answer
+        -- covers its invitation and older ones (SEQUENCE); a newer invitation waits for an answer again.
+        CREATE TABLE invitation_answers (
+            uid TEXT NOT NULL,
+            recurrence_id TEXT NOT NULL DEFAULT '',   -- the occurrence key when the invitation is for one occurrence
+            response TEXT NOT NULL,
+            comment TEXT,
+            sequence INTEGER NOT NULL DEFAULT 0,
+            answered_at INTEGER NOT NULL,
+            outbox_id INTEGER,                        -- the mail outbox entry of the email that carries it
+            PRIMARY KEY (uid, recurrence_id)
+        ) WITHOUT ROWID;
+
         -- Local-only event drafts (the event editor).
         CREATE TABLE event_drafts (
             id TEXT PRIMARY KEY,

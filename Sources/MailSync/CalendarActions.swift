@@ -3,10 +3,12 @@ import MailCore
 import MailStore
 
 /// Calendar changes, applied to the local store at once and queued for the provider, like `MailActions`.
-/// Changes that email guests wait for an undo window (the same as undo send) before they leave.
+/// Changes that email guests wait for an undo window (the same as undo send) before they leave. Invitations
+/// that are not on Google Calendar are answered by email, through the mail outbox.
 public final class CalendarActions: Sendable {
     public let store: MailStore
     private let changed: @Sendable () -> Void
+    private let mailChanged: @Sendable () -> Void
     private let calendar: Calendar
 
     /// An answer that can be undone.
@@ -38,11 +40,42 @@ public final class CalendarActions: Sendable {
         public var splitDay: EventTime?
     }
 
-    /// `changed` is called after a change was queued (it wakes the calendar sync).
-    public init(store: MailStore, calendar: Calendar = .current, changed: @escaping @Sendable () -> Void = {}) {
+    /// An answer sent by email that can be undone until the email leaves.
+    public struct EmailAnswerRecord: Sendable {
+        /// The email in the mail outbox.
+        public let outboxID: Int64
+        public let response: ResponseStatus
+        public let summary: String
+        /// The invitation's conversation, where the email's copy shows.
+        public let threadID: String
+        /// The event answered: its UID, the occurrence key ("" for the whole event), and the SEQUENCE of the version
+        /// answered (the newest, which may be newer than the conversation's).
+        public let uid: String
+        public let recurrenceID: String
+        public let sequence: Int
+    }
+
+    /// Why an invitation was not answered by email.
+    public enum EmailAnswerError: Error, LocalizedError, Equatable {
+        /// The meeting was cancelled since, or the organizer took you off it (`MailStore.isWithdrawn`).
+        case withdrawn(summary: String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .withdrawn(let summary): "\(summary) was cancelled, or you were taken off it. Nothing was sent."
+            }
+        }
+    }
+
+    /// `changed` is called after a change was queued (it wakes the calendar sync), `mailChanged` after an answer by
+    /// email was queued or taken back (it wakes the mail sync).
+    public init(
+        store: MailStore, calendar: Calendar = .current, changed: @escaping @Sendable () -> Void = {}, mailChanged: @escaping @Sendable () -> Void = {}
+    ) {
         self.store = store
         self.calendar = calendar
         self.changed = changed
+        self.mailChanged = mailChanged
     }
 
     var window: CalendarWindow { CalendarWindow.around(Date(), calendar: calendar) }
@@ -109,6 +142,58 @@ public final class CalendarActions: Sendable {
             dropException: record.madeException, window: window, calendar: calendar
         )
         changed()
+    }
+
+    // MARK: - Answers by email
+
+    /// Answers an invitation that is not on Google Calendar by email (iMIP): a reply to the organizer, in the conversation
+    /// of the invitation's `mail`, that leaves through the mail outbox after the undo window, like a send. It answers the
+    /// newest version of the invitation, which may have come in another conversation. The answer is kept here, so the
+    /// invitation stops waiting and its pages say what you answered. Nil when the invitation cannot be answered by email
+    /// (no organizer to write to, or you organize it) or the account is not known yet. Throws `EmailAnswerError.withdrawn`
+    /// when the meeting is off since (cancelled, or you were taken off it): nothing is sent then.
+    public func answerByEmail(
+        _ invitation: Invitation, mail: MailMessage, response: ResponseStatus, comment: String? = nil, undoWindow: TimeInterval
+    ) async throws -> EmailAnswerRecord? {
+        guard let account = try await store.account() else { return nil }
+        let key = invitation.recurrenceID?.occurrenceKey
+        let newer = try await store.invitations(uid: invitation.uid).compactMap(\.main)
+            .filter { $0.method == .request && $0.recurrenceID?.occurrenceKey == key && $0.sequence > invitation.sequence }
+            .max { $0.sequence < $1.sequence }
+        let invitation = newer ?? invitation
+        if try await store.isWithdrawn(invitation) { throw EmailAnswerError.withdrawn(summary: invitation.summary) }
+        let now = Date()
+        guard let message = ICalendar.replyMail(
+            to: invitation, mail: mail, account: account, selfAddresses: store.selfAddresses, response: response, comment: comment,
+            now: now, timeZone: calendar.timeZone
+        ) else { return nil }
+        let note = comment.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+        let answer = InvitationAnswer(
+            uid: invitation.uid, recurrenceID: invitation.recurrenceID?.occurrenceKey ?? "", response: response, comment: note,
+            sequence: invitation.sequence, answeredAt: now
+        )
+        let copy = MailMessage(
+            id: "local-\(UUID().uuidString.lowercased())", threadID: mail.threadID, labelIDs: [SystemLabel.sent], from: message.from,
+            to: message.to, subject: message.subject, snippet: HTMLText.snippet(from: message.textBody), date: now, textBody: message.textBody
+        )
+        let outboxID = try await store.queueInvitationReply(
+            InvitationReply(message: message, localMessageID: copy.id, answer: answer, summary: invitation.summary), localCopy: copy,
+            notBefore: undoWindow > 0 ? now.addingTimeInterval(undoWindow) : .distantPast
+        )
+        mailChanged()
+        return EmailAnswerRecord(
+            outboxID: outboxID, response: response, summary: invitation.summary, threadID: mail.threadID, uid: answer.uid,
+            recurrenceID: answer.recurrenceID, sequence: answer.sequence
+        )
+    }
+
+    /// Takes back an answer by email. Before the email left, nothing is sent and the answer before it is back. After,
+    /// the email cannot be unsent and the answer stays, as the organizer has it. Returns true when nothing had left.
+    @discardableResult
+    public func undo(_ record: EmailAnswerRecord) async throws -> Bool {
+        let cancelled = try await store.cancelInvitationReply(outboxID: record.outboxID)
+        mailChanged()
+        return cancelled
     }
 
     // MARK: - Events

@@ -174,6 +174,8 @@ extension AppModel {
             }
         case .answer(let records, let archive):
             undoAnswer(records, archive: archive)
+        case .answerByEmail(let emailed, let records, let archive):
+            undoAnswerByEmail(emailed, calendar: records, archive: archive)
         case .eventChange(let record):
             undoEventChange(record)
         case .eventChanges(let records):
@@ -227,7 +229,7 @@ extension AppModel {
     }
 
     func repeatLastAction() {
-        if let lastAnswer, case .answer? = undoStack.last {
+        if let lastAnswer, undoStack.last?.isAnswer == true {
             answer(lastAnswer)
             return
         }

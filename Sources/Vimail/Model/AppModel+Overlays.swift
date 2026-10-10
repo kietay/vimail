@@ -437,7 +437,8 @@ extension AppModel {
             ("gA", "All mail"), ("gl", "Label…"), ("gv", "Manage views"), ("H / L · ⌘⇧[ / ]", "Cycle pinned views + Inbox"),
         ]),
         ("Calendar", [
-            ("Y / M / N", "Answer yes / maybe / no"), ("R", "Answer with a note"), ("gc", "Calendar (from an invitation: its event)"),
+            ("Y / M / N", "Answer yes / maybe / no (by email when not on Google Calendar)"), ("R", "Answer with a note"),
+            ("gc", "Calendar (from an invitation: its event)"),
             ("gj", "Join the selected or next meeting"), ("{ / }", "Day before / after"), ("[ / ]", "Week before / after (calendar)"),
             ("t", "Today (calendar)"), ("gm", "The event's invitation mail"), ("r / a", "Email organizer / guests (calendar)"),
             ("# / dd", "Cancel your event or decline; one day of a series (calendar)"), ("O", "Original invitation email"),

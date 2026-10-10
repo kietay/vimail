@@ -57,7 +57,8 @@ public actor DryRunProvider: MailProvider {
         let file = directory.appendingPathComponent("sent-\(stamp).eml")
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try? mime.write(to: file)
-        log("send \(file.lastPathComponent) thread=\(message.threadID ?? "new") to=\(message.to.map(\.email).joined(separator: ",")) retry=\(isRetry)")
+        let calendar = message.calendar.map { " calendar=\($0.method)" } ?? ""
+        log("send \(file.lastPathComponent) thread=\(message.threadID ?? "new") to=\(message.to.map(\.email).joined(separator: ",")) retry=\(isRetry)\(calendar)")
 
         let id = "dryrun-\(UUID().uuidString.lowercased())"
         return MailMessage(

@@ -49,6 +49,8 @@ struct Toast: Identifiable, Equatable {
     var isError = false
     /// When set, the toast shows the whole seconds left until this time and stays up until it passes.
     var countdownTo: Date?
+    /// The words before the seconds: "Sending in 5s.", "Accepted by email · Design review · sends in 5s."
+    var countdownLead = "in"
     /// A second sentence, after the countdown.
     var detail: String?
 }
@@ -65,10 +67,21 @@ enum UndoEntry {
     case unsubscribe(outboxIDs: [Int64], lists: [String], archive: UndoRecord?)
     /// Answers to invitations, and the archive that came with them: one u takes back both.
     case answer([CalendarActions.AnswerRecord], archive: UndoRecord?)
+    /// Answers sent by email to invitations that are not on Google Calendar, the answers on Google Calendar given by
+    /// the same key, and the archive that came with them: one u takes back all of it (an email only until it leaves).
+    case answerByEmail([CalendarActions.EmailAnswerRecord], calendar: [CalendarActions.AnswerRecord], archive: UndoRecord?)
     /// A calendar event created, edited or removed.
     case eventChange(CalendarActions.ChangeRecord)
     /// Calendar changes made together, undone last first: "this and following" ends a series and starts the one after it.
     case eventChanges([CalendarActions.ChangeRecord])
+
+    /// Answers to invitations, which `.` repeats on the next one.
+    var isAnswer: Bool {
+        switch self {
+        case .answer, .answerByEmail: true
+        case .action, .send, .unsubscribe, .eventChange, .eventChanges: false
+        }
+    }
 }
 
 /// A ⌘U still checking how to unsubscribe. `u` cancels it then, before it has done anything.
@@ -408,6 +421,17 @@ final class AppModel {
                 let kept = ids.indices.filter { ids[$0] != outboxID }
                 if kept.isEmpty { return archive.map(UndoEntry.action) }
                 return .unsubscribe(outboxIDs: kept.map { ids[$0] }, lists: kept.map { lists[$0] }, archive: archive)
+            }
+        case .answerFailed(let outboxID, let summary, let reason):
+            showToast("Could not send your answer to \(summary): \(reason). The invitation waits for your answer again.", isError: true)
+            // u has nothing left to take back for it; an answer that did not go out alone should not stay archived.
+            undoStack = undoStack.compactMap { entry in
+                guard case .answerByEmail(let emailed, let records, let archive) = entry, emailed.contains(where: { $0.outboxID == outboxID }) else { return entry }
+                let kept = emailed.filter { $0.outboxID != outboxID }
+                if !kept.isEmpty { return .answerByEmail(kept, calendar: records, archive: archive) }
+                if !records.isEmpty { return .answer(records, archive: archive) }
+                if let archive { Task { try? await services.actions.undo(archive); await reloadList() } }
+                return nil
             }
         }
     }
@@ -1045,8 +1069,8 @@ final class AppModel {
         NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
-    func showToast(_ text: String, undoable: Bool = false, isError: Bool = false, countdownTo: Date? = nil, detail: String? = nil) {
-        toast = Toast(text: text, undoable: undoable, isError: isError, countdownTo: countdownTo, detail: detail)
+    func showToast(_ text: String, undoable: Bool = false, isError: Bool = false, countdownTo: Date? = nil, countdownLead: String = "in", detail: String? = nil) {
+        toast = Toast(text: text, undoable: undoable, isError: isError, countdownTo: countdownTo, countdownLead: countdownLead, detail: detail)
         toastTask?.cancel()
         let duration = countdownTo.map { max(0, $0.timeIntervalSinceNow) } ?? (isError ? 6 : 3.5)
         toastTask = Task {

@@ -161,7 +161,7 @@ struct SettingsView: View {
     private var calendarDetail: String {
         if !model.services.isGmail { return "The dummy account has its own calendar." }
         guard model.services.calendarEngine != nil else {
-            return "Not connected. Enable the Google Calendar API in your Cloud project, then connect. Mail keeps working either way."
+            return "Not connected: Y, M and N answer invitations by email. Enable the Google Calendar API in your Cloud project, then connect."
         }
         return model.services.calendarCanChange ? "Connected. Answers and events sync with Google Calendar." : "Connected, read only."
     }
