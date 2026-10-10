@@ -49,6 +49,10 @@ extension AppModel {
 
     /// Routes one key press. Returns true when the key was handled and must not reach the view.
     func handleKey(_ stroke: KeyStroke, context: KeyContext) -> Bool {
+        // ⌘⌫ in the event editor outside a text field (its preview, your editor on the notes) does nothing: unhandled, it
+        // would reach the Message menu's ⌘⌫ (Move to Trash) and trash the conversation behind the editor.
+        if overlay == .eventEditor, !context.textFocused, stroke.command, !stroke.shift, case .backspace = stroke.key { return true }
+
         // The embedded vim owns every key while it has focus.
         if context.terminalFocused { return false }
 
