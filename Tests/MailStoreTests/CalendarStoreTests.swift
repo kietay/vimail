@@ -492,7 +492,7 @@ struct InvitationSearchTests {
         let store = try await seededStore()
         try await store.upsertMessages([
             message("s1", thread: "ts1", subject: "Invitation: Weekly sync", minutesAgo: 300),
-            message("s2", thread: "ts2", subject: "Updated invitation: Weekly sync @ Tue Oct 13", minutesAgo: 200),
+            message("s2", thread: "ts2", subject: "Updated invitation: Weekly sync @ Tue Oct 13", labels: ["TRASH"], minutesAgo: 200),
             message("s3", thread: "ts3", subject: "Canceled event: Weekly sync @ Mon Oct 19", labels: ["TRASH"], minutesAgo: 100),
             message("s4", thread: "ts4", subject: "Invitation: Lunch", minutesAgo: 50),
             message("s5", thread: "ts5", subject: "Canceled event: Retro @ Mon Oct 19", minutesAgo: 40),
@@ -513,15 +513,57 @@ struct InvitationSearchTests {
         #expect(events.map(\.uid).sorted() == ["lunch", "weekly"])
         let series = try #require(events.first { $0.uid == "weekly" })
         #expect(series.main == weekly)
-        // The cancellation counts though its mail is in Trash.
+        // The move and the cancellation count though their mail is in Trash: binning an update does not undo it.
         #expect(series.dates(from: at(9, 0), to: at(23, 0), calendar: la).map(\.start) == [time(at(13, 9))])
-        #expect(try await store.mailOnlyEvents(uid: "lunch").map(\.main) == [lunch])
-        #expect(try await store.mailOnlyEvents(uid: "retro").isEmpty)
+        #expect(try await store.invitedEvent(uid: "lunch").main == lunch)
+        // An event that does not wait still has its mail, for its page; the retro has only a cancelled date.
+        #expect(try await store.invitedEvent(uid: "retro").dates(from: at(9, 0), to: at(23, 0), calendar: la).isEmpty)
+        #expect(try await store.invitedEvent(uid: "unknown") == InvitedEvent([]))
 
         // Once the event is on the calendar, it is no longer only in mail.
         try await store.applyCalendarList([primary], removed: [], replaceAll: true)
         try await store.applyEvents([event("e1", "Weekly sync", start: at(5, 9), uid: "weekly")], calendarID: primary.id, window: window, calendar: la)
         #expect(try await store.mailOnlyEvents().map(\.uid) == ["lunch"])
+    }
+
+    @Test func eventsOnlyInMailFollowTheirNewestUpdateButNotSpam() async throws {
+        let store = try await seededStore()
+        try await store.upsertMessages([
+            message("n1", thread: "tn1", subject: "Invitation: Design sync", minutesAgo: 300),
+            message("n2", thread: "tn2", subject: "Updated invitation: Design sync", labels: ["TRASH"], minutesAgo: 200),
+            message("n3", thread: "tn3", subject: "Updated invitation: Design sync", labels: ["SPAM"], minutesAgo: 100),
+            message("n4", thread: "tn4", subject: "Canceled event: Design sync @ Thu Oct 15", labels: ["SPAM"], minutesAgo: 50),
+            message("n5", thread: "tn5", subject: "Invitation: Offsite", labels: ["TRASH"], minutesAgo: 40),
+        ])
+        func time(_ date: Date) -> EventTime { .timed(date, timeZone: "America/Los_Angeles") }
+        // Thursdays 10:00 from Oct 1, moved to 11:00 by an update you binned. Mail in Spam that says 23:00 changes nothing.
+        let sync = Invitation(
+            method: .request, uid: "sync", summary: "Design sync", start: time(at(1, 10)), end: time(at(1, 10, 30)), recurrence: ["RRULE:FREQ=WEEKLY"]
+        )
+        var later = sync
+        later.sequence = 1
+        later.start = time(at(1, 11))
+        later.end = time(at(1, 11, 30))
+        var spam = sync
+        spam.sequence = 5
+        spam.start = time(at(1, 23))
+        spam.end = time(at(1, 23, 30))
+        spam.conferenceURL = "https://example.com/join"
+        let off = Invitation(method: .cancel, uid: "sync", sequence: 1, recurrenceID: time(at(15, 11)), summary: "Design sync", start: time(at(15, 11)))
+        let offsite = Invitation(method: .request, uid: "offsite", summary: "Offsite", start: time(at(20, 9)), end: time(at(20, 17)))
+        for (index, invitation) in [sync, later, spam, off, offsite].enumerated() {
+            try await store.saveInvitations([invitation], messageID: "n\(index + 1)", threadID: "tn\(index + 1)")
+        }
+
+        let events = try await store.mailOnlyEvents()
+        // The offsite's only invitation is binned: it does not wait, but its page still reads it.
+        #expect(events.map(\.uid) == ["sync"])
+        #expect(try await store.invitedEvent(uid: "offsite").main == offsite)
+        // Oct 15 is cancelled: a cancellation counts wherever its mail is.
+        let dates = try #require(events.first).dates(from: at(9, 0), to: at(23, 0), calendar: la)
+        #expect(dates.map(\.start) == [time(at(22, 11))])
+        #expect(dates.first?.invitation == later)
+        #expect(try await store.invitedEvent(uid: "sync") == events.first)
     }
 
     @Test func cancelledAndBinnedInvitationsAreNotWaiting() async throws {

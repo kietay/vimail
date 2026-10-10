@@ -625,20 +625,23 @@ extension MailStore {
         try await read { db in try Self.storedInvitations(where: Self.withoutEvents, [], db) }
     }
 
-    /// Events known only from mail: those of `invitationsWithoutEvents`, each read together with the cancellations of
-    /// its single dates (which count wherever their mail is, as for whole events). Only `uid`'s event when it is given.
-    public func mailOnlyEvents(uid: String? = nil) async throws -> [InvitedEvent] {
+    /// Events known only from mail: those of `invitationsWithoutEvents`, each as all its mail tells it (`invitedEvent`).
+    public func mailOnlyEvents() async throws -> [InvitedEvent] {
         try await read { db in
-            let only = uid == nil ? "" : " AND i.uid = ?"
-            let values: [SQLBindable] = uid.map { [$0] } ?? []
-            let waiting = try Self.storedInvitations(where: Self.withoutEvents + only, values, db)
-            let uids = Set(waiting.compactMap(\.main?.uid))
-            guard !uids.isEmpty else { return [] }
-            let cancelled = try Self.storedInvitations(where: "i.method = 'CANCEL' AND i.recurrence_id IS NOT NULL" + only, values, db)
-                .filter { $0.main.map { uids.contains($0.uid) } ?? false }
-            let files = (waiting + cancelled).sorted { $0.date < $1.date }
-            return InvitedEvent.events(from: files.flatMap(\.invitations).filter { uids.contains($0.uid) })
+            let uids = try db.query(
+                """
+                SELECT DISTINCT i.uid FROM invitations i JOIN messages m ON m.id = i.message_id
+                WHERE \(Self.withoutEvents) AND i.uid IS NOT NULL AND i.payload IS NOT NULL
+                """
+            ) { $0.string(0) }
+            return try Self.invitedEvents(uids: uids, db)
         }
+    }
+
+    /// One event as its mail tells it, waiting for an answer or not: everything its organizer sent about it, also mail
+    /// in Trash (binning an update does not undo it). Of mail in Spam, only cancellations count.
+    public func invitedEvent(uid: String) async throws -> InvitedEvent {
+        try await read { db in try Self.invitedEvents(uids: [uid], db).first ?? InvitedEvent([]) }
     }
 
     /// For list rows: the latest invitation in each of these conversations.
@@ -658,6 +661,24 @@ extension MailStore {
     }
 
     // MARK: - Helpers
+
+    /// The events with these UIDs as their mail tells them (`invitedEvent`), each from its mail oldest first.
+    static func invitedEvents(uids: [String], _ db: SQLiteDatabase) throws -> [InvitedEvent] {
+        var files: [StoredInvitation] = []
+        for start in stride(from: 0, to: uids.count, by: 400) {
+            let chunk = Array(uids[start..<min(start + 400, uids.count)])
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            files += try storedInvitations(
+                where: """
+                    i.uid IN (\(placeholders)) AND (i.method = 'CANCEL'
+                        OR NOT EXISTS (SELECT 1 FROM message_labels l WHERE l.message_id = i.message_id AND l.label_id = 'SPAM'))
+                    """,
+                chunk, db
+            )
+        }
+        let wanted = Set(uids)
+        return InvitedEvent.events(from: files.sorted { $0.date < $1.date }.flatMap(\.invitations).filter { wanted.contains($0.uid) })
+    }
 
     /// `invitationsWithoutEvents`, as a condition on `invitations i`.
     static let withoutEvents = """

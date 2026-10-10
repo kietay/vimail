@@ -178,7 +178,7 @@ extension AppModel {
         let message = thread.messages.first { $0.id == file.messageID }
         let earlier = (try? await services.store.invitations(uid: invitation.uid)) ?? []
         let previous = earlier.last { $0.messageID != file.messageID && $0.date < file.date && ($0.main?.sequence ?? 0) <= invitation.sequence }?.main
-        let invited = event == nil && !invitation.recurrence.isEmpty ? await mailOnlyEvent(uid: invitation.uid, files: earlier) : nil
+        let invited = event == nil && !invitation.recurrence.isEmpty ? await mailOnlyEvent(uid: invitation.uid) : nil
         return await eventPage(event: event, invitation: invitation, previous: previous, mail: message, invited: invited)
     }
 
@@ -190,7 +190,7 @@ extension AppModel {
         let key = Self.occurrenceKey(of: item)
         if item.calendarID == Self.mailOnlyCalendarID, let uid {
             // Only in mail: the page the mail gives, for this date.
-            let invited = await mailOnlyEvent(uid: uid, files: files)
+            let invited = await mailOnlyEvent(uid: uid)
             return await eventPage(
                 event: nil, invitation: invited.invitation(at: key), previous: nil, mail: nil, occurrence: (item.start, item.end),
                 hasMail: !files.isEmpty, invited: invited
@@ -209,10 +209,13 @@ extension AppModel {
     ) async -> ReaderPayload.EventPage {
         let now = Date()
         let me = services.store.selfAddresses
-        // A series only in mail: its next dates.
+        // A series only in mail: its rule and next dates as all its mail tells them (this mail may be older).
+        var mailSeries: Invitation?
         var mailDates: [InvitedDate] = []
         if event == nil, let invitation, !invitation.recurrence.isEmpty {
-            mailDates = await upcomingDates(of: invited ?? InvitedEvent([invitation]), now: now, limit: 8)
+            let known = invited.flatMap { $0.main == nil ? nil : $0 } ?? InvitedEvent([invitation])
+            mailSeries = known.main.flatMap { $0.isCancellation ? nil : $0 } ?? invitation
+            mailDates = await upcomingDates(of: known, now: now, limit: 8)
         }
         // Times: the occurrence shown, else the next one of a series, else the invitation's.
         var start = occurrence?.start ?? invitation?.start ?? event?.start ?? .timed(now, timeZone: nil)
@@ -235,8 +238,9 @@ extension AppModel {
         var page = ReaderPayload.EventPage(kicker: kicker(invitation: invitation, previous: previous, mail: mail), title: title, when: Formatting.eventRange(start, end))
         page.relative = past ? nil : Formatting.relativeDay(start.instant(), now: now)
         page.zone = Formatting.organizerZone(start, end)
-        let recurrence = event?.recurrence.isEmpty == false ? event!.recurrence : (invitation?.recurrence ?? [])
-        page.repeats = Recurrence.summary(recurrence, start: event?.start ?? start, calendar: .current)
+        // Described from the series' first date: its next date may have been moved.
+        let recurrence = event?.recurrence.isEmpty == false ? event!.recurrence : ((mailSeries ?? invitation)?.recurrence ?? [])
+        page.repeats = Recurrence.summary(recurrence, start: event?.start ?? mailSeries?.start ?? start, calendar: .current)
         page.agenda = (event?.details ?? invitation?.details).map { HTMLText.plainText(fromHTML: $0.contains("<") ? $0 : $0.replacingOccurrences(of: "\n", with: "<br>")) }.flatMap { $0.isEmpty ? nil : $0 }
         if let previous, let invitation { page.changes = Self.changes(from: previous, to: invitation) }
 
@@ -763,13 +767,9 @@ extension AppModel {
         )
     }
 
-    /// An invitation only in mail, as its mail tells it: from the mail that waits for an answer (as the calendar view
-    /// lists it), else from all mail with its UID (`files`, when already read).
-    private func mailOnlyEvent(uid: String, files: [StoredInvitation]? = nil) async -> InvitedEvent {
-        if let waiting = try? await services.store.mailOnlyEvents(uid: uid).first { return waiting }
-        var all = files ?? []
-        if files == nil { all = (try? await services.store.invitations(uid: uid)) ?? [] }
-        return InvitedEvent(all.flatMap(\.invitations).filter { $0.uid == uid })
+    /// An invitation only in mail, as all its mail tells it (as the calendar view lists it).
+    private func mailOnlyEvent(uid: String) async -> InvitedEvent {
+        (try? await services.store.invitedEvent(uid: uid)) ?? InvitedEvent([])
     }
 
     /// The next dates of an invitation only in mail, worked out away from the main thread.
@@ -951,8 +951,13 @@ extension AppModel {
             var oneDay = false
             if item.calendarID == Self.mailOnlyCalendarID {
                 // Any date of a series answers the series (that is the invitation); a date the mail names on its own, that date.
-                guard let uid = item.event.iCalUID,
-                      let invitation = await mailOnlyEvent(uid: uid).invitationToAnswer(at: Self.occurrenceKey(of: item)) else { return }
+                guard let uid = item.event.iCalUID else { return }
+                let invited = await mailOnlyEvent(uid: uid)
+                guard let invitation = invited.invitationToAnswer(at: Self.occurrenceKey(of: item)) else {
+                    // The mail changed since the list was drawn.
+                    showToast((invited.main ?? invited.changedDates[Self.occurrenceKey(of: item)]) == nil ? "No invitation mail for this event." : "The organizer cancelled this event.")
+                    return
+                }
                 switch await lookUpEvent(for: invitation) {
                 case .found(let event): target = event
                 case .missing:
