@@ -359,7 +359,8 @@ extension AppModel {
     }
 
     func viewMatchCount(_ view: SavedView) async -> Int {
-        (try? await services.store.count(resolved(view.query))) ?? 0
+        if view.query.invitation == .conflict { await reloadConflictingInvitations() }
+        return (try? await services.store.count(resolved(view.query))) ?? 0
     }
 
     // MARK: - Reader and attachments

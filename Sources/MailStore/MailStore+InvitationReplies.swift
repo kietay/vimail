@@ -21,6 +21,16 @@ public struct InvitationReply: Hashable, Codable, Sendable {
     }
 }
 
+/// What stands for an invitation after the provider refused an answer by email to it.
+public enum RefusedAnswerOutcome: Hashable, Sendable {
+    /// An answer still covers what the refused one answered (the one before it, or a later one).
+    case answerStands
+    /// Nothing covers it: the invitation waits for an answer again.
+    case waitsAgain
+    /// The meeting, or that date, was cancelled since: nothing waits.
+    case cancelledSince
+}
+
 /// Answers by email to invitations that are not on Google Calendar: kept here so the invitation stops waiting, and sent
 /// through the mail outbox after the undo window, like a send.
 extension MailStore {
@@ -61,21 +71,22 @@ extension MailStore {
         }
     }
 
-    /// After the provider refused the email: its copy leaves Sent and the answer before it comes back. Returns true when
-    /// an answer still covers what this one answered (the one before, or a later one, by the answer rule); else the
-    /// invitation waits for an answer again.
+    /// After the provider refused the email: its copy leaves Sent and the answer before it comes back. Returns what then
+    /// stands for the invitation, by the answer rule.
     @discardableResult
-    public func restoreFailedInvitationReply(_ reply: InvitationReply, outboxID: Int64) async throws -> Bool {
+    public func restoreFailedInvitationReply(_ reply: InvitationReply, outboxID: Int64) async throws -> RefusedAnswerOutcome {
         let me = selfAddresses
         return try await write { db, change in
             try Self.takeBack(reply, outboxID: outboxID, db, &change)
             try Self.refreshThreads(change.threadIDs, db, selfAddresses: me)
             let answer = reply.answer
             if let known = try Self.mailOnlyEvents(uids: [answer.uid], me: me, db).first {
-                return known.event.answer(at: answer.recurrenceID, answers: known.answers) != nil
+                if known.event.answerTarget(at: answer.recurrenceID, answers: known.answers) == nil { return .cancelledSince }
+                return known.event.answer(at: answer.recurrenceID, answers: known.answers) != nil ? .answerStands : .waitsAgain
             }
             // No mail tells the event here: the answer kept must be for this version or a newer one.
-            return try Self.invitationAnswer(uid: answer.uid, recurrenceID: answer.recurrenceID, db).map { $0.sequence >= answer.sequence } ?? false
+            let kept = try Self.invitationAnswer(uid: answer.uid, recurrenceID: answer.recurrenceID, db)
+            return kept.map { $0.sequence >= answer.sequence } == true ? .answerStands : .waitsAgain
         }
     }
 

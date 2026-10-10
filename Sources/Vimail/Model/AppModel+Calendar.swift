@@ -208,13 +208,14 @@ extension AppModel {
         var chips: [String: InvitationChip] = [:]
         for (threadID, file) in stored {
             guard let invitation = file.main else { continue }
-            chips[threadID] = await chip(for: invitation)
+            chips[threadID] = await chip(for: invitation, inSpam: file.isSpam)
         }
         if chips != invitationChips { invitationChips = chips }
     }
 
     /// For an invitation not on Google Calendar, what you answered by email counts (as the calendar view shows it).
-    private func chip(for invitation: Invitation) async -> InvitationChip {
+    /// `inSpam`: the mail is in Spam, where an invitation is not answered by email.
+    private func chip(for invitation: Invitation, inSpam: Bool = false) async -> InvitationChip {
         let time = Formatting.eventShort(invitation.start)
         switch invitation.method {
         case .cancel: return InvitationChip(text: "\(time) · cancelled", colorIndex: 6)
@@ -225,6 +226,7 @@ extension AppModel {
             if invitation.isCancellation { return InvitationChip(text: "\(time) · cancelled", colorIndex: 6) }
             let event = await calendarEvent(for: invitation)
             var emailed: InvitationAnswer?
+            if event == nil, inSpam { return InvitationChip(text: "\(time) · in Spam", colorIndex: 5) }
             if event == nil {
                 let known = await mailOnly(uid: invitation.uid, else: invitation)
                 let key = invitation.recurrenceID?.occurrenceKey ?? ""
@@ -260,6 +262,11 @@ extension AppModel {
         let earlier = (try? await services.store.invitations(uid: invitation.uid)) ?? []
         let previous = earlier.last { $0.messageID != file.messageID && $0.date < file.date && ($0.main?.sequence ?? 0) <= invitation.sequence }?.main
         guard event == nil else { return await eventPage(event: event, invitation: invitation, previous: previous, mail: message) }
+        // In Spam: mail there does not count for the event and is not answered (an answer would tell the sender your
+        // address works). The page shows the invitation as it is.
+        if file.isSpam {
+            return await eventPage(event: nil, invitation: invitation, previous: previous, mail: message, inSpam: true)
+        }
         // Not on Google Calendar: the event as all its mail tells it, and what you answered by email.
         let known = await mailOnly(uid: invitation.uid, else: invitation)
         let key = invitation.recurrenceID?.occurrenceKey ?? ""
@@ -276,7 +283,8 @@ extension AppModel {
         var shown = invitation
         var changedFrom = previous
         if invitation.method == .request, let target {
-            let current = target.recurrenceID == nil && invitation.recurrenceID != nil ? target : (known.event.invitation(at: key) ?? invitation)
+            let seriesWaits = target.recurrenceID == nil && invitation.recurrenceID != nil && known.event.answer(at: key, answers: known.answers) == nil
+            let current = seriesWaits ? target : (known.event.invitation(at: key) ?? invitation)
             if current != invitation {
                 shown = current
                 changedFrom = current.recurrenceID?.occurrenceKey == invitation.recurrenceID?.occurrenceKey ? invitation : nil
@@ -313,11 +321,11 @@ extension AppModel {
     /// `invited`: the event as all its mail tells it, when it is on no calendar (its dates, moved and cancelled ones too).
     /// `answer`: what you answered by email, which counts while the event is not on Google Calendar; `target`: what Y M N
     /// answer then (`InvitedEvent.answerTarget`). `withdrawn`: the meeting is off since the invitation
-    /// (`MailStore.isWithdrawn`), so it shows as cancelled.
+    /// (`MailStore.isWithdrawn`), so it shows as cancelled. `inSpam`: the mail is in Spam, so it is not answered.
     func eventPage(
         event: CalendarEvent?, invitation: Invitation?, previous: Invitation?, mail: MailMessage?,
         occurrence: (start: EventTime, end: EventTime)? = nil, hasMail: Bool = false, invited: InvitedEvent? = nil,
-        answer: InvitationAnswer? = nil, target: Invitation? = nil, withdrawn: Bool = false
+        answer: InvitationAnswer? = nil, target: Invitation? = nil, withdrawn: Bool = false, inSpam: Bool = false
     ) async -> ReaderPayload.EventPage {
         let now = Date()
         let me = services.store.selfAddresses
@@ -356,6 +364,10 @@ extension AppModel {
         // A colleague's copy (shown beside yours) has their answer, not yours. Not on Google Calendar: only an answer by email
         // counts; the file's own PARTSTAT may be from before a newer invitation.
         let yourCopy = event.map(isYourCopy) ?? false
+        // "self" on a colleague's copy is that colleague; in mail, you are your addresses.
+        func isYou(_ person: Attendee) -> Bool { me.contains(person.normalized) || (person.isSelf && (event == nil || yourCopy)) }
+        // An event shown as free takes nobody's time: it overlaps nothing.
+        let busy = event?.isBusy ?? (invitation?.showsAsFree != true)
         let selfResponse = (yourCopy ? event?.selfResponse : nil)
             ?? (event == nil && invitation?.method == .request ? (emailed?.response ?? .needsAction) : invitation?.attendee(matching: me)?.response)
 
@@ -376,7 +388,7 @@ extension AppModel {
             page.facts.append(.init(label: "Where", value: place))
         }
         if let organizer {
-            page.facts.append(.init(label: "Organizer", value: me.contains(organizer.normalized) || organizer.isSelf ? "you" : (organizer.name ?? organizer.email)))
+            page.facts.append(.init(label: "Organizer", value: isYou(organizer) ? "you" : (organizer.name ?? organizer.email)))
         }
         let people = guests.filter { !$0.isResource }.map { guest in
             // Not on Google Calendar, your entry in the invitation is from before your answer by email, or before a newer
@@ -387,7 +399,7 @@ extension AppModel {
             return answered
         }
         page.guests = people.map { guest in
-            let isMe = guest.isSelf || me.contains(guest.normalized)
+            let isMe = isYou(guest)
             let kind = guest.isOrganizer ? "organizer" : guest.response.word
             return .init(name: isMe ? "you" : (guest.name ?? guest.email), answer: guest.isOrganizer ? "organizer" : guest.response.word, kind: kind == "organizer" ? "yes" : kind)
         }
@@ -398,13 +410,13 @@ extension AppModel {
         }
 
         // State chips and the answer keys. Your own events have nothing to answer.
-        let isOrganizer = event?.organizerIsSelf == true || organizer.map { $0.isSelf || me.contains($0.normalized) } == true
+        let isOrganizer = (yourCopy && event?.organizerIsSelf == true) || organizer.map(isYou) == true
         // An invitation not on the calendar here can still be answered: on Google Calendar when it names you (Google may be
         // keeping it hidden), else by email to its organizer.
         let invitedByMail = event == nil && invitation?.method == .request && services.calendarEngine != nil && invitation?.attendee(matching: me) != nil
         let byEmail = event == nil && invitation?.canBeAnsweredByEmail(by: me) == true
         let answerable = ((yourCopy && event?.selfAttendee != nil) || invitedByMail || byEmail) && !isOrganizer && !past && !cancelled
-            && invitation?.method != .reply
+            && invitation?.method != .reply && !inSpam
         if cancelled {
             page.chips.append(.init(text: "cancelled", kind: "clash"))
         } else if past {
@@ -413,6 +425,8 @@ extension AppModel {
             page.chips.append(.init(text: "you organize", kind: "ok"))
         } else if let selfResponse, selfResponse != .needsAction {
             page.chips.append(.init(text: "you said \(selfResponse.word)\(emailed == nil ? "" : " by email")", kind: selfResponse == .declined ? "muted" : "ok"))
+        } else if inSpam {
+            page.chips.append(.init(text: "in Spam", kind: "muted"))
         } else if (yourCopy && event?.selfAttendee != nil) || (event == nil && invitation?.method == .request) {
             page.chips.append(.init(text: "needs your answer", kind: "needs"))
         }
@@ -434,17 +448,18 @@ extension AppModel {
             page.dayMessage = services.isGmail ? "Connect Google Calendar to see your day here. Press : and choose “Connect Google Calendar”." : nil
         } else if event == nil, invitation != nil, !cancelled, !past {
             page.dayMessage = emailed == nil ? "This invitation is not on your Google Calendar yet." : "You answered by email. This event is not on your Google Calendar."
-            page.day = await dayColumn(for: start, end: end, excluding: nil, uid: invitation?.uid, ghost: true, title: title)
+            page.day = await dayColumn(for: start, end: end, excluding: nil, uid: invitation?.uid, ghost: true, busy: busy, title: title)
         } else {
             page.day = await dayColumn(
-                for: start, end: end, excluding: event, uid: event?.iCalUID ?? invitation?.uid, ghost: !isOrganizer && selfResponse == .needsAction, title: title
+                for: start, end: end, excluding: event, uid: event?.iCalUID ?? invitation?.uid, ghost: !isOrganizer && selfResponse == .needsAction,
+                busy: busy, title: title
             )
         }
         if let day = page.day, let clash = day.blocks.first(where: { $0.kind == "clash" }), !cancelled, !past, page.day?.peeking == false {
             page.chips.append(.init(text: "overlaps \(clash.title)", kind: "clash"))
         }
         // A repeating invitation: which of its next 8 dates overlap something you go to.
-        if !recurrence.isEmpty, !cancelled, !past, services.calendarEngine != nil, answerable || event == nil {
+        if !recurrence.isEmpty, !cancelled, !past, busy, services.calendarEngine != nil, answerable || event == nil {
             let clashes = await seriesClashes(event: event, invitation: invitation, mailDates: mailDates, now: now)
             if !clashes.isEmpty {
                 page.chips.append(.init(text: "\(clashes.count) of the next 8 overlap", kind: "clash"))
@@ -452,7 +467,10 @@ extension AppModel {
             }
         }
 
-        if mail != nil {
+        if mail != nil, inSpam {
+            page.footer = "In Spam, so it is not answered by email. Move it out of Spam first (! in the Spam list)."
+            page.original = "Original email from \(mail!.from.displayName)"
+        } else if mail != nil {
             page.footer = answerable ? "Archive after answering: \(settings.archiveInvitationsAfterAnswer ? "on" : "off") · gc this event in the calendar" : "gc this event in the calendar"
             page.original = "Original email from \(mail!.from.displayName)\(mail!.attachments.contains { $0.filename.lowercased().hasSuffix(".ics") } ? " · invite.ics" : "")"
         } else if hasMail {
@@ -521,7 +539,7 @@ extension AppModel {
     /// and overlaps in red. `peekDays` shifts the day ({ and }). `uid`: the event's UID: its dates from mail that you said
     /// yes to by email are this event (at the time its newest mail says, which may not be this page's).
     func dayColumn(
-        for start: EventTime, end: EventTime, excluding event: CalendarEvent?, uid: String? = nil, ghost: Bool, title: String
+        for start: EventTime, end: EventTime, excluding event: CalendarEvent?, uid: String? = nil, ghost: Bool, busy: Bool = true, title: String
     ) async -> ReaderPayload.EventPage.Day {
         let calendar = Calendar.current
         let eventDay = calendar.startOfDay(for: start.instant())
@@ -558,9 +576,9 @@ extension AppModel {
         if showsEvent && ghost {
             spans.append((title, Formatting.time(start.instant()), eventStart, eventEnd, "invite", true))
         }
-        // Overlaps with the event (not counting your declined events).
+        // Overlaps with the event (not counting your declined events, or anything shown as free).
         var overlaps: [(title: String, from: Int, to: Int)] = []
-        if showsEvent {
+        if showsEvent, busy {
             for index in spans.indices where spans[index].busy && ["mine", "maybe", "pending"].contains(spans[index].kind) {
                 let from = max(spans[index].start, eventStart)
                 let to = min(spans[index].end, eventEnd)
@@ -661,6 +679,8 @@ extension AppModel {
             var failure: String?
             // A meeting that is off since its invitation: nothing to answer.
             var withdrawn: String?
+            // Invitations in Spam are not answered by email.
+            var inSpam = 0
             // The version emailed per event (UID and occurrence): two of its mails selected get one email.
             var emailedSequences: [String: Int] = [:]
             for threadID in targets {
@@ -670,6 +690,10 @@ extension AppModel {
                 // answered), also when Google has the event hidden and answers it there.
                 var target = invitation
                 if invitation.method == .request, await calendarEvent(for: invitation) == nil {
+                    if file.isSpam {
+                        inSpam += 1
+                        continue
+                    }
                     let known = await mailOnly(uid: invitation.uid, else: invitation)
                     guard let rule = known.event.answerTarget(at: invitation.recurrenceID?.occurrenceKey ?? "", answers: known.answers) else {
                         withdrawn = "\(invitation.summary) was cancelled, so there is nothing to answer."
@@ -715,6 +739,8 @@ extension AppModel {
                     showToast(failure, isError: true)
                 } else if let withdrawn {
                     showToast(withdrawn)
+                } else if inSpam > 0 {
+                    showToast("This invitation is in Spam, so it is not answered by email. Move it out of Spam first (! in the Spam list).")
                 } else if notOnCalendar > 0, services.calendarEngine == nil {
                     offerCalendarConnection()
                 } else if notOnCalendar > 0 {
@@ -1051,13 +1077,11 @@ extension AppModel {
     }
 
     /// An invitation only in mail, as all its mail tells it (as the calendar view lists it), with your answers by email.
-    /// `invitation`, read from one mail, stands in for its part of the event when no other mail tells it (it is in Spam).
+    /// `invitation`, read from one mail, stands in when no mail tells anything of the event (the store has none of it).
     private func mailOnly(uid: String, else invitation: Invitation? = nil) async -> MailOnlyEvent {
         var known = (try? await services.store.mailOnlyEvent(uid: uid)) ?? MailOnlyEvent(event: InvitedEvent([]))
-        // The part of the event this mail is about (the whole event, or its date), when no other mail tells it: from this
-        // mail. It never replaces what other mail tells.
-        if let invitation, invitation.uid == uid, known.event.invitation(at: invitation.recurrenceID?.occurrenceKey ?? "") == nil {
-            known.event = InvitedEvent([invitation] + [known.event.main].compactMap { $0 } + Array(known.event.changedDates.values))
+        if known.event.main == nil, known.event.changedDates.isEmpty, let invitation, invitation.uid == uid {
+            known.event = InvitedEvent([invitation])
         }
         return known
     }
@@ -1344,7 +1368,7 @@ extension AppModel {
 
     /// The mail of `invitation` (the one a row only in mail answers), else the newest invitation (REQUEST) of its event.
     /// Not a later cancellation of one day, or someone's answer.
-    /// Mail you kept comes before mail in Trash or Spam (an update you binned still counts for the dates).
+    /// Mail you kept comes before mail in Trash (an update you binned still counts for the dates); never mail in Spam.
     static func mailFile(of invitation: Invitation?, in files: [StoredInvitation]) -> StoredInvitation? {
         func exact(_ pool: [StoredInvitation]) -> StoredInvitation? {
             guard let invitation else { return nil }
@@ -1354,8 +1378,10 @@ extension AppModel {
             }
         }
         func request(_ pool: [StoredInvitation]) -> StoredInvitation? { pool.last { $0.main?.method == .request } }
-        let kept = files.filter { !$0.isBinned }
-        return exact(kept) ?? request(kept) ?? exact(files) ?? request(files)
+        // Never mail in Spam: it does not count, and an answer there would tell the sender your address works.
+        let usable = files.filter { !$0.isSpam }
+        let kept = usable.filter { !$0.isBinned }
+        return exact(kept) ?? request(kept) ?? exact(usable) ?? request(usable)
     }
 
     /// An agenda row's place in its series ("20261012T163000Z"), without the row's section prefix; "" for single events.

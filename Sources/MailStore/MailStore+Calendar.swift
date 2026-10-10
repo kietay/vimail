@@ -54,14 +54,20 @@ public struct StoredInvitation: Hashable, Sendable {
     public var answer: InvitationAnswer?
     /// The mail is in Trash or Spam.
     public var isBinned: Bool
+    /// The mail is in Spam: it does not count for the event, and it is not answered.
+    public var isSpam: Bool
 
-    public init(messageID: String, threadID: String, invitations: [Invitation], date: Date, answer: InvitationAnswer? = nil, isBinned: Bool = false) {
+    public init(
+        messageID: String, threadID: String, invitations: [Invitation], date: Date, answer: InvitationAnswer? = nil, isBinned: Bool = false,
+        isSpam: Bool = false
+    ) {
         self.messageID = messageID
         self.threadID = threadID
         self.invitations = invitations
         self.date = date
         self.answer = answer
         self.isBinned = isBinned
+        self.isSpam = isSpam
     }
 
     /// The event the file is about: the series or single event, before its exceptions.
@@ -734,7 +740,7 @@ extension MailStore {
     /// each as all its mail tells it, with your answers by email. Left out: meetings cancelled since (a CANCEL as new or
     /// newer, for the whole event or that occurrence), meetings the sync removed from your calendar (the organizer deleted
     /// them, or took you off), and mail in Trash or Spam. With `includingAccepted`, also events you said yes or maybe to by
-    /// email whose mail you binned: they are still your time. Whether one waits for your answer is `InvitedEvent.waitingDate`.
+    /// email whose mail you put in Trash: they are still your time. Whether one waits for your answer is `InvitedEvent.waitingDate`.
     public func mailOnlyEvents(ignoringStoredEvents: Bool = false, includingAccepted: Bool = false) async throws -> [MailOnlyEvent] {
         let me = selfAddresses
         return try await read { db in
@@ -815,14 +821,8 @@ extension MailStore {
 
     /// The events with these UIDs as their mail tells them, with your answers by email: one read for all of them.
     static func mailOnlyEvents(uids: [String], me: Set<String>, _ db: SQLiteDatabase) throws -> [MailOnlyEvent] {
-        var events = try invitedEvents(uids: uids, me: me, db)
+        let events = try invitedEvents(uids: uids, me: me, db)
         let answers = try invitationAnswers(uids: uids, db)
-        // You said yes or maybe to an invitation whose mail is only in Spam: that mail tells the event you go to.
-        let told = Set(events.map(\.uid))
-        let accepted = uids.filter { uid in
-            !told.contains(uid) && answers[uid]?.values.contains { [.accepted, .tentative].contains($0.response) } == true
-        }
-        if !accepted.isEmpty { events += try invitedEvents(uids: accepted, me: me, includingSpam: true, db) }
         return events.map { MailOnlyEvent(event: $0, answers: answers[$0.uid] ?? [:]) }
     }
 
@@ -841,18 +841,20 @@ extension MailStore {
         return answers
     }
 
-    /// The events with these UIDs as their mail tells them (`invitedEvent`), each from its mail oldest first. With
-    /// `includingSpam`, mail in Spam counts too.
-    static func invitedEvents(uids: [String], me: Set<String>, includingSpam: Bool = false, _ db: SQLiteDatabase) throws -> [InvitedEvent] {
+    /// The events with these UIDs as their mail tells them (`invitedEvent`), each from its mail oldest first. Of mail in
+    /// Spam, only cancellations count.
+    static func invitedEvents(uids: [String], me: Set<String>, _ db: SQLiteDatabase) throws -> [InvitedEvent] {
         var files: [StoredInvitation] = []
-        let spam = includingSpam ? "" : """
-             AND (i.method = 'CANCEL'
-                OR NOT EXISTS (SELECT 1 FROM message_labels l WHERE l.message_id = i.message_id AND l.label_id = 'SPAM'))
-            """
         for start in stride(from: 0, to: uids.count, by: 400) {
             let chunk = Array(uids[start..<min(start + 400, uids.count)])
             let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
-            files += try storedInvitations(where: "i.uid IN (\(placeholders))" + spam, chunk, me: me, db)
+            files += try storedInvitations(
+                where: """
+                    i.uid IN (\(placeholders)) AND (i.method = 'CANCEL'
+                        OR NOT EXISTS (SELECT 1 FROM message_labels l WHERE l.message_id = i.message_id AND l.label_id = 'SPAM'))
+                    """,
+                chunk, me: me, db
+            )
         }
         let wanted = Set(uids)
         return InvitedEvent.events(from: files.sorted { $0.date < $1.date }.flatMap(\.invitations).filter { wanted.contains($0.uid) })
@@ -923,7 +925,8 @@ extension MailStore {
             """
             SELECT i.message_id, i.thread_id, i.payload, m.date,
                    a.uid, a.recurrence_id, a.response, a.comment, a.sequence, a.answered_at, a.outbox_id, a.covered,
-                   EXISTS (SELECT 1 FROM message_labels l WHERE l.message_id = i.message_id AND l.label_id IN ('TRASH', 'SPAM'))
+                   EXISTS (SELECT 1 FROM message_labels l WHERE l.message_id = i.message_id AND l.label_id IN ('TRASH', 'SPAM')),
+                   EXISTS (SELECT 1 FROM message_labels l WHERE l.message_id = i.message_id AND l.label_id = 'SPAM')
             FROM invitations i JOIN messages m ON m.id = i.message_id
             LEFT JOIN invitation_answers a ON a.uid = i.uid AND a.recurrence_id = COALESCE(i.recurrence_id, '') AND a.sequence >= i.sequence
             WHERE \(condition) AND i.payload IS NOT NULL
@@ -935,7 +938,7 @@ extension MailStore {
             StoredInvitation(
                 messageID: row.string(0), threadID: row.string(1),
                 invitations: try decoder.decode([Invitation].self, from: Data(row.string(2).utf8)), date: row.date(3),
-                answer: decodeInvitationAnswer(row, at: 4), isBinned: row.bool(12)
+                answer: decodeInvitationAnswer(row, at: 4), isBinned: row.bool(12), isSpam: row.bool(13)
             )
         }
     }

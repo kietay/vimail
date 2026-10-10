@@ -369,6 +369,8 @@ final class AppModel {
         agendaCursorID = nil
         nextMeeting = nil
         invitationChips = [:]
+        waitingInvitationUIDs = []
+        conflictingInvitationUIDs = []
         eventPages = [:]
         // Saved views belong to an account; another account may not have the one that was open.
         if case .view = session.destination { session.destination = .mailbox(.inbox) }
@@ -428,8 +430,12 @@ final class AppModel {
                 if kept.isEmpty { return archive.map(UndoEntry.action) }
                 return .unsubscribe(outboxIDs: kept.map { ids[$0] }, lists: kept.map { lists[$0] }, archive: archive)
             }
-        case .answerFailed(let outboxID, let summary, let reason, let stands):
-            let state = stands ? "Your earlier answer stands." : "The invitation waits for your answer again."
+        case .answerFailed(let outboxID, let summary, let reason, let outcome):
+            let state = switch outcome {
+            case .answerStands: "Your earlier answer stands."
+            case .waitsAgain: "The invitation waits for your answer again."
+            case .cancelledSince: "The meeting was cancelled since, so nothing waits."
+            }
             showToast("Could not send your answer to \(summary): \(reason). \(state)", isError: true)
             // u has nothing left to take back for it; an answer that did not go out alone should not stay archived.
             undoStack = undoStack.compactMap { entry in
@@ -1043,7 +1049,10 @@ final class AppModel {
         omniTask = Task {
             try? await Task.sleep(for: .milliseconds(70))
             guard !Task.isCancelled else { return }
-            var search = resolved(ThreadQuery(scope: .everywhereExceptTrash).narrowed(by: SearchQuery.parse(query)))
+            let parsed = ThreadQuery(scope: .everywhereExceptTrash).narrowed(by: SearchQuery.parse(query))
+            if parsed.invitation == .conflict { await reloadConflictingInvitations() }
+            guard !Task.isCancelled else { return }
+            var search = resolved(parsed)
             search.limit = 6
             let results = (try? await services.store.threads(search)) ?? []
             guard !Task.isCancelled else { return }

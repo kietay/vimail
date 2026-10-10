@@ -147,28 +147,36 @@ struct InvitationAnswerStoreTests {
         let no = try await queue(.declined, in: store)
         let refused = try #require(try await queuedReplies(store)[no])
         _ = try await store.cancelOutboxItems([no])
-        #expect(try await store.restoreFailedInvitationReply(refused, outboxID: no))
+        #expect(try await store.restoreFailedInvitationReply(refused, outboxID: no) == .answerStands)
         // The organizer moves the meeting (SEQUENCE 1) and the answer to it is refused: the yes was for before, so the
         // invitation waits again.
         try await save([invite("i2", thread: "tu", sequence: 1)], in: store)
         let maybe = try await queue(.tentative, in: store, thread: "tu", sequence: 1)
         let second = try #require(try await queuedReplies(store)[maybe])
         _ = try await store.cancelOutboxItems([maybe])
-        #expect(try await store.restoreFailedInvitationReply(second, outboxID: maybe) == false)
+        #expect(try await store.restoreFailedInvitationReply(second, outboxID: maybe) == .waitsAgain)
         #expect(try await waitingInvitations(store).map(\.sequence) == [1])
+        // Answered, then cancelled before a later answer was refused: nothing waits.
+        try await store.upsertMessages([message("c1", thread: "tc", from: alex, subject: "Canceled: Review")])
+        let start = EventTime.timed(Date().addingTimeInterval(2 * 86_400), timeZone: nil)
+        try await store.saveInvitations([Invitation(method: .cancel, uid: "review@studio.co", sequence: 2, summary: "Review", start: start)], messageID: "c1", threadID: "tc")
+        let late = try await queue(.declined, in: store, thread: "tu", sequence: 1)
+        let third = try #require(try await queuedReplies(store)[late])
+        _ = try await store.cancelOutboxItems([late])
+        #expect(try await store.restoreFailedInvitationReply(third, outboxID: late) == .cancelledSince)
     }
 
-    @Test func aYesToAnInvitationOnlyInSpamIsYourTime() async throws {
+    @Test func mailInSpamDoesNotCount() async throws {
         let store = try await seededStore()
         let (mail, invitation) = invite("i1", thread: "ti")
         var spam = mail
         spam.labelIDs = ["SPAM"]
         try await save([(spam, invitation)], in: store)
-        // Not answered: mail in Spam neither waits nor is your time.
+        // It neither waits nor tells an event, even with an answer kept from before it moved to Spam.
+        #expect(try await store.invitations(threadID: "ti").map(\.isSpam) == [true])
         #expect(try await store.mailOnlyEvents(includingAccepted: true).isEmpty)
         _ = try await queue(.accepted, in: store)
-        let known = try #require(try await store.mailOnlyEvents(includingAccepted: true).first)
-        #expect(known.event.main?.uid == "review@studio.co" && known.event.answer(at: "", answers: known.answers)?.response == .accepted)
+        #expect(try await store.mailOnlyEvents(includingAccepted: true).isEmpty)
         #expect(try await waitingInvitations(store).isEmpty)
     }
 
@@ -179,13 +187,9 @@ struct InvitationAnswerStoreTests {
         spam.labelIDs = ["SPAM"]
         try await save([(spam, invitation)], in: store)
         _ = try await queue(.accepted, in: store)
-        // Mail in Spam does not count, but once you said yes it tells the event you go to; your answer is known.
+        // No mail tells the event here (Spam does not count), but your answer is still known.
         let known = try await store.mailOnlyEvent(uid: "review@studio.co")
-        #expect(known.event.main?.uid == "review@studio.co" && known.answers[""]?.response == .accepted)
-        // A no keeps Spam out: no mail tells the event here, and the answer is still known.
-        _ = try await queue(.declined, in: store)
-        let declined = try await store.mailOnlyEvent(uid: "review@studio.co")
-        #expect(declined.event.main == nil && declined.answers[""]?.response == .declined)
+        #expect(known.event.main == nil && known.answers[""]?.response == .accepted)
     }
 
     @Test func undoBeforeTheEmailLeavesTakesBackTheEmailItsCopyAndTheAnswer() async throws {

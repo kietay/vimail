@@ -92,7 +92,8 @@ them with one key, and you create events from one typed line. Everything works o
   records your answer. By email, one answer covers the whole event and every date its mail had changed when you
   answered; a date the organizer changes after your answer waits again and is answered on its own, and a newer
   invitation to the whole event waits again. The page of a series says whether `Y` `M` `N` answer the whole series or
-  this date only. Here the invitation stops waiting and says "you said yes by email", and a yes or maybe counts as your
+  this date only. An invitation in Spam is shown as it is but not answered by email (a reply would tell the sender your
+  address works), and mail in Spam does not count for an event: move it out of Spam first (`!` in the Spam list). Here the invitation stops waiting and says "you said yes by email", and a yes or maybe counts as your
   time (next meeting, overlaps), also after you bin its mail (until Gmail deletes it from Trash). Like a send, the email leaves after the undo-send window, and `u` takes it back until then (once sent, it
   cannot be unsent). Nothing is sent for a meeting cancelled since, or one the organizer took you off, nor when the
   organizer's address is not a plain `name@domain`.
@@ -162,7 +163,7 @@ them with one key, and you create events from one typed line. Everything works o
 - **Your own time.** A colleague's calendar shown beside yours lists their events (also one you manage), but your next
   meeting, overlaps, free times, find a time and the invitations waiting for you count only your own calendars. Your
   time also has the invitations only in mail that you said yes or maybe to by email. Events that show as free (Outlook's
-  *Show as: Free*, or `TRANSP:TRANSPARENT`) never count as overlaps or busy time.
+  *Show as: Free* or *Working elsewhere*, or `TRANSP:TRANSPARENT`) never count as overlaps or busy time.
 
 ## Logs
 

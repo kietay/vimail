@@ -41,9 +41,8 @@ public actor SyncEngine {
         case unsubscribed(list: String)
         /// A queued unsubscribe failed for good: the list refused it, or its server never answered.
         case unsubscribeFailed(outboxID: Int64, list: String, reason: String)
-        /// The provider refused an answer by email. The answer before it is back: `answerStands` when there is one (an
-        /// earlier or a later answer), else the invitation waits again.
-        case answerFailed(outboxID: Int64, summary: String, reason: String, answerStands: Bool)
+        /// The provider refused an answer by email. The answer before it is back; `outcome` says what stands now.
+        case answerFailed(outboxID: Int64, summary: String, reason: String, outcome: RefusedAnswerOutcome)
     }
 
     public let provider: any MailProvider
@@ -561,8 +560,8 @@ public actor SyncEngine {
         case .unsubscribe(let request):
             eventContinuation.yield(.unsubscribeFailed(outboxID: item.id, list: request.list, reason: reason))
         case .invitationReply(let reply):
-            let stands = try await store.restoreFailedInvitationReply(reply, outboxID: item.id)
-            eventContinuation.yield(.answerFailed(outboxID: item.id, summary: reply.summary, reason: reason, answerStands: stands))
+            let outcome = try await store.restoreFailedInvitationReply(reply, outboxID: item.id)
+            eventContinuation.yield(.answerFailed(outboxID: item.id, summary: reply.summary, reason: reason, outcome: outcome))
         }
     }
 

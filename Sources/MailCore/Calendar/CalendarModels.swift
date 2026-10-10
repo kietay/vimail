@@ -410,8 +410,9 @@ public struct Invitation: Hashable, Codable, Sendable {
     public var status: EventStatus?
     /// DTSTAMP: when the organizer's calendar wrote the file.
     public var stamp: Date?
-    /// True when the event shows as free (TRANSP:TRANSPARENT, or Outlook's X-MICROSOFT-CDO-BUSYSTATUS:FREE): it does not
-    /// take your time. Nil (busy) in files read before this was kept.
+    /// True when the event shows as free: Outlook's status for your copy (X-MICROSOFT-CDO-INTENDEDSTATUS, else
+    /// BUSYSTATUS) is Free or Working elsewhere, or, without it, TRANSP:TRANSPARENT. It does not take your time. Nil
+    /// (busy) in files read before this was kept.
     public var showsAsFree: Bool?
 
     public init(
